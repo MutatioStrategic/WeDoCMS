@@ -2,6 +2,9 @@ node_modules/
 dist/
 contracts/reports/
 worker-smoke*.log
+*.log
+scripts/_tmp-*.mjs
+.tmp-ai-previews-*/
 .wrangler/
 .security-dry-run/
 security-dry-run/

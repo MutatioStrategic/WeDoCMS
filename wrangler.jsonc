@@ -111,6 +111,7 @@
     "STREAM_CUSTOMER_CODE": "",
     "STREAM_PUBLIC_PLAYBACK_ENABLED": "false",
     "R2_BUCKET_NAME": "veld-archive-media",
+    "R2_ACCOUNT_ID": "37e92dc58245d6eab6517a916bd4d9d6",
     "R2_DR_BUCKET_NAME": "veld-archive-media-dr",
     "BACKUP_BUCKET_NAME": "veld-archive-backups-dr",
     "CHAOS_TESTING_ENABLED": "false",
