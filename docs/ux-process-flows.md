@@ -18,6 +18,12 @@ flowchart LR
   I --> J[Request access or save lightbox]
 ```
 
+Video previews show a distinct `VELD ARCHIVE · PREVIEW / NOT LICENSED FOR USE`
+watermark. The Worker never falls back to an original video for an anonymous or
+unpaid viewer; once a paid entitlement is confirmed, the authenticated viewer
+can play the original through the preview route and download it from the
+licensed workspace.
+
 ## Identity and workspaces
 
 ```mermaid

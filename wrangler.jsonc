@@ -4,6 +4,9 @@
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-08-13",
   "compatibility_flags": ["nodejs_compat"],
+  "secrets": {
+    "required": ["R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"]
+  },
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1
@@ -64,6 +67,14 @@
   ],
   "ai": {
     "binding": "AI"
+  },
+  "images": {
+    "binding": "IMAGES",
+    "remote": true
+  },
+  "media": {
+    "binding": "MEDIA",
+    "remote": true
   },
   "vectorize": [
     {
@@ -127,5 +138,6 @@
     "PHOTO_INDEX_NAMESPACE": "published-photos-v1",
     "PHOTO_AI_SOURCE_ORIGIN": "https://veld-archive-api.blewisorlando.workers.dev",
     "PAYOUT_MIN_CENTS": "10000"
+    ,"PHOTOGRAPHER_SUBSCRIPTION_PRICE_CENTS": "10000"
   }
 }

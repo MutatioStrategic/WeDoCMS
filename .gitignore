@@ -4,6 +4,7 @@ contracts/reports/
 worker-smoke*.log
 *.log
 scripts/_tmp-*.mjs
+scripts/_tmp-test-photo-library.*
 .tmp-ai-previews-*/
 .wrangler/
 .security-dry-run/
@@ -13,4 +14,5 @@ security-dry-run/
 .backups/
 *.sql.gz
 fixtures/demo-media/
+fixtures/test-photo-library/
 worker-configuration.d.ts

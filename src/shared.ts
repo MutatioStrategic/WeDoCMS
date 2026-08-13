@@ -83,6 +83,7 @@ export type Asset = {
   sourceLicense?: string | null;
   sourceAttribution?: string | null;
   previewUrl?: string | null;
+  posterUrl?: string | null;
   streamUid?: string | null;
   streamEmbedUrl?: string | null;
   releases?: ContributorRelease[];

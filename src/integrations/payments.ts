@@ -2,7 +2,9 @@ import { bearerHeaders, idempotencyHeaders, IntegrationError, readJson, type Htt
 
 export type PaymentSessionRequest = {
   idempotencyKey: string;
-  licenceId: string;
+  licenceId?: string;
+  referenceId?: string;
+  productType?: "licence" | "photographer_subscription";
   amountCents: number;
   currency: string;
   buyer: { id: string; email: string };
@@ -58,20 +60,21 @@ export class JsonPaymentAdapter implements PaymentProvider {
         ...idempotencyHeaders(request.idempotencyKey),
       },
       body: JSON.stringify({
-        reference: request.licenceId,
+        reference: request.referenceId ?? request.licenceId,
         amount: request.amountCents,
         currency: request.currency.toUpperCase(),
         buyer: request.buyer,
         successUrl: request.successUrl,
         cancelUrl: request.cancelUrl,
         metadata: request.metadata,
+        productType: request.productType ?? "licence",
       }),
     });
     const value = await readJson<JsonPaymentResponse>(response, this.provider);
     const checkoutUrl = value.checkoutUrl ?? value.checkout_url ?? value.url;
     if (!value.id || !checkoutUrl) throw new IntegrationError(this.provider, "Provider returned no checkout session or hosted URL", { details: value });
     return {
-      id: request.licenceId,
+      id: request.referenceId ?? request.licenceId ?? request.idempotencyKey,
       provider: this.provider,
       status: value.status === "created" ? "created" : "pending",
       checkoutUrl,

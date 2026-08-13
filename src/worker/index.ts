@@ -92,6 +92,7 @@ type SecretBindings = {
   ZA_BANK_ENDPOINT?: string;
   ZA_BANK_TOKEN?: string;
   PAYOUT_MIN_CENTS?: string;
+  PHOTOGRAPHER_SUBSCRIPTION_PRICE_CENTS?: string;
   OCR_ENABLED?: string;
   OCR_MODEL?: string;
   PHOTO_VISION_MODEL?: string;
@@ -158,6 +159,7 @@ async function runMaintenance(env: Bindings): Promise<void> {
     env.DB.prepare("DELETE FROM rate_limit_buckets WHERE updated_at < datetime('now', '-2 day')"),
     env.DB.prepare("DELETE FROM notifications WHERE created_at < datetime('now', '-365 day') AND read_at IS NOT NULL"),
     env.DB.prepare("UPDATE upload_sessions SET status = 'expired', failure_reason = 'upload_session_expired' WHERE status = 'created' AND created_at < datetime('now', '-1 day')"),
+    env.DB.prepare("UPDATE photographer_subscriptions SET status = 'expired', updated_at = CURRENT_TIMESTAMP WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP"),
   ]);
 }
 
@@ -402,9 +404,91 @@ function streamEmbedUrl(row: Record<string, unknown>, env?: Pick<SecretBindings,
 
 export function publicMediaKey(row: Record<string, unknown>): string | null {
   const previewKey = typeof row.preview_key === "string" ? row.preview_key.trim() : "";
-  if (previewKey) return previewKey;
+  return previewKey || null;
+}
+
+export function previewMediaKey(row: Record<string, unknown>, unwatermarked = false, width?: 640 | 1200 | 1800): string | null {
+  if (!unwatermarked) return publicMediaKey(row);
   const originalKey = typeof row.original_key === "string" ? row.original_key.trim() : "";
-  return originalKey || null;
+  return originalKey || publicMediaKey(row);
+}
+
+function responsivePreviewKey(row: Record<string, unknown>, width?: number): string | null {
+  if (width === 640 && typeof row.preview_640_key === "string" && row.preview_640_key.trim()) return row.preview_640_key.trim();
+  if (width === 1200 && typeof row.preview_1200_key === "string" && row.preview_1200_key.trim()) return row.preview_1200_key.trim();
+  return publicMediaKey(row);
+}
+
+export function previewObjectKey(originalKey: string, contentType?: string): string {
+  const relative = originalKey.startsWith("originals/") ? originalKey.slice("originals/".length) : originalKey;
+  if (contentType?.startsWith("image/")) return `previews/${relative.replace(/\.[^.\/]+$/, ".webp")}`;
+  return `previews/${relative}`;
+}
+
+function previewVariantKey(originalKey: string, width: number): string {
+  const relative = originalKey.startsWith("originals/") ? originalKey.slice("originals/".length) : originalKey;
+  return `previews/${width}/${relative.replace(/\.[^.\/]+$/, ".webp")}`;
+}
+
+const PREVIEW_MAX_DIMENSION = 1800;
+const PREVIEW_QUALITY = 78;
+
+async function buildWatermarkedPreview(env: Bindings, source: ReadableStream<Uint8Array>, width: number, alreadyOptimized = false): Promise<{ body: ReadableStream<Uint8Array>; contentType: string }> {
+  const input = env.IMAGES.input(source);
+  const base = alreadyOptimized ? input : input.transform({
+    width,
+    height: width,
+    fit: "scale-down",
+    sharpen: 1,
+  });
+  const watermarkResponse = await env.ASSETS.fetch(new Request("https://assets.internal/watermark.png"));
+  if (!watermarkResponse.ok || !watermarkResponse.body) throw new Error("Watermark asset is unavailable");
+  const watermark = env.IMAGES.input(watermarkResponse.body).transform({ width: 560, height: 180, fit: "contain" });
+  const output = await base.draw(watermark, { repeat: true, opacity: 0.24 }).output({ format: "image/webp", quality: PREVIEW_QUALITY });
+  const contentType = output.contentType() || "image/webp";
+  return { body: output.image(), contentType };
+}
+
+async function writeWatermarkedPreview(env: Bindings, originalKey: string, previousPreviewKey?: string | null): Promise<{ key: string; contentType: string; variants: { preview640Key: string; preview1200Key: string; preview1800Key: string } }> {
+  const source = await env.MEDIA_BUCKET.get(originalKey);
+  if (!source) throw new Error("R2 original disappeared before preview creation");
+  const widths = [640, 1200, PREVIEW_MAX_DIMENSION];
+  const sourceBytes = source.size <= 20 * 1024 * 1024 ? await source.arrayBuffer() : null;
+  const outputs: { width: number; key: string; body: ReadableStream<Uint8Array>; contentType: string }[] = [];
+  for (const width of widths) {
+    let preview: { body: ReadableStream<Uint8Array>; contentType: string };
+    if (sourceBytes) {
+      preview = await buildWatermarkedPreview(env, new Response(sourceBytes).body!, width);
+    } else {
+      const expires = Math.floor(Date.now() / 1000) + 300;
+      const signingSecret = env.R2_SECRET_ACCESS_KEY;
+      const origin = env.PHOTO_AI_SOURCE_ORIGIN?.replace(/\/$/, "");
+      if (!signingSecret || !origin) throw new Error("Large image preview requires an internal source signer");
+      const signature = hex(await hmac(utf8(signingSecret), `${originalKey}.${expires}`));
+      const sourceUrl = `${origin}/internal/media-preview-source?key=${encodeURIComponent(originalKey)}&expires=${expires}&signature=${signature}`;
+      const transformed = await fetch(sourceUrl, { cf: { image: { fit: "scale-down", width, height: width, format: "webp", quality: PREVIEW_QUALITY, metadata: "none" } } });
+      if (!transformed.ok || !transformed.body) throw new Error(`Large image resize failed with HTTP ${transformed.status}`);
+      preview = await buildWatermarkedPreview(env, transformed.body, width, true);
+    }
+    outputs.push({ width, key: width === PREVIEW_MAX_DIMENSION ? previewObjectKey(originalKey, "image/*") : previewVariantKey(originalKey, width), ...preview });
+  }
+  for (const output of outputs) {
+    await env.MEDIA_BUCKET.put(output.key, output.body, { httpMetadata: { contentType: output.contentType, cacheControl: "public, max-age=3600, stale-while-revalidate=86400" }, customMetadata: { sourceKey: originalKey, purpose: "watermarked-preview", transformation: `webp-${output.width}-q${PREVIEW_QUALITY}` } });
+  }
+  if (previousPreviewKey && previousPreviewKey !== outputs[2].key) await env.MEDIA_BUCKET.delete(previousPreviewKey);
+  return { key: outputs[2].key, contentType: outputs[2].contentType, variants: { preview640Key: outputs[0].key, preview1200Key: outputs[1].key, preview1800Key: outputs[2].key } };
+}
+
+async function writeVideoPoster(env: Bindings, originalKey: string, previousPosterKey?: string | null): Promise<string> {
+  const source = await env.MEDIA_BUCKET.get(originalKey);
+  if (!source) throw new Error("R2 video original disappeared before poster creation");
+  const frame = env.MEDIA.input(source.body).transform({ width: 1200, height: 675, fit: "contain" }).output({ mode: "frame", time: "1s", format: "jpg" });
+  const frameStream = await frame.media();
+  const poster = await buildWatermarkedPreview(env, frameStream, 1200, true);
+  const key = `previews/posters/${originalKey.replace(/^originals\//, "").replace(/\.[^.\/]+$/, ".webp")}`;
+  await env.MEDIA_BUCKET.put(key, poster.body, { httpMetadata: { contentType: poster.contentType, cacheControl: "public, max-age=3600, stale-while-revalidate=86400" }, customMetadata: { sourceKey: originalKey, purpose: "watermarked-video-poster", transformation: "frame-1s-webp-1200" } });
+  if (previousPosterKey && previousPosterKey !== key) await env.MEDIA_BUCKET.delete(previousPosterKey);
+  return key;
 }
 
 const assetRowToDomain = (row: Record<string, unknown>, env?: Pick<SecretBindings, "STREAM_CUSTOMER_CODE" | "STREAM_PUBLIC_PLAYBACK_ENABLED">): Asset => ({
@@ -455,6 +539,7 @@ const assetRowToDomain = (row: Record<string, unknown>, env?: Pick<SecretBinding
   sourceLicense: (row.source_license as string | null) ?? null,
   sourceAttribution: (row.source_attribution as string | null) ?? null,
   previewUrl: publicMediaKey(row) ? `/api/assets/${encodeURIComponent(String(row.id))}/preview` : null,
+  posterUrl: row.kind === "video" && row.video_poster_key ? `/api/assets/${encodeURIComponent(String(row.id))}/poster` : null,
   streamUid: (row.stream_uid as string | null) ?? null,
   streamEmbedUrl: streamEmbedUrl(row, env),
   monetizationModel: (row.monetization_model as MonetizationModel | undefined) ?? "membership",
@@ -462,10 +547,24 @@ const assetRowToDomain = (row: Record<string, unknown>, env?: Pick<SecretBinding
 });
 
 function previewContentType(row: Record<string, unknown>): string {
-  const fileName = String(row.source_file_name ?? row.preview_key ?? "").toLowerCase();
+  const fileName = String(row.preview_key ?? row.source_file_name ?? "").toLowerCase();
   if (row.kind === "video") return fileName.endsWith(".webm") ? "video/webm" : "video/mp4";
   if (fileName.endsWith(".png")) return "image/png";
   if (fileName.endsWith(".webp")) return "image/webp";
+  return "image/jpeg";
+}
+
+function originalContentType(row: Record<string, unknown>): string {
+  const fileName = String(row.source_file_name ?? row.original_key ?? "").toLowerCase();
+  if (row.kind === "video") return fileName.endsWith(".webm") ? "video/webm" : "video/mp4";
+  if (fileName.endsWith(".png")) return "image/png";
+  if (fileName.endsWith(".webp")) return "image/webp";
+  return imageContentTypeFromFilename(fileName);
+}
+
+function imageContentTypeFromFilename(fileName: string): string {
+  if (fileName.endsWith(".gif")) return "image/gif";
+  if (fileName.endsWith(".avif")) return "image/avif";
   return "image/jpeg";
 }
 
@@ -1221,10 +1320,81 @@ app.get("/api/my/licences", async (c) => {
     licenceType: row.licence_type, territory: String(row.territory), durationDays: Number(row.duration_days),
     priceCents: Number(row.price_cents), status: row.status, createdAt: String(row.created_at),
     previewUrl: row.preview_key ? `/api/assets/${encodeURIComponent(String(row.asset_id))}/preview` : null,
+    originalUrl: row.status === "paid" ? `/api/assets/${encodeURIComponent(String(row.asset_id))}/original` : null,
   })) });
 });
 
-const paymentWebhookSchema = paymentWebhookRequestSchema;
+const photographerSubscriptionSchema = z.object({
+  photographerId: z.string().min(1).max(120),
+  durationDays: z.union([z.literal(30), z.literal(90), z.literal(365)]).default(30),
+  successUrl: z.string().url().max(2048),
+  cancelUrl: z.string().url().max(2048),
+});
+
+app.post("/api/subscriptions/checkout", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, 401);
+  if (!c.env.PAYMENT_PROVIDER || !c.env.PAYMENT_ENDPOINT || !c.env.PAYMENT_TOKEN) return c.json({ error: "Payment provider is not configured" }, 503);
+  const payload = photographerSubscriptionSchema.parse(await c.req.json());
+  const photographer = await c.env.DB.prepare("SELECT id, email, role FROM users WHERE id = ? AND role = 'contributor'").bind(payload.photographerId).first<{ id: string; email: string; role: string }>();
+  if (!photographer || photographer.id === user.id) return c.json({ error: "Photographer not found" }, 404);
+  const priceCents = Math.max(100, Number(c.env.PHOTOGRAPHER_SUBSCRIPTION_PRICE_CENTS ?? 10_000)) * Math.ceil(payload.durationDays / 30);
+  let subscription = await c.env.DB.prepare("SELECT id, status FROM photographer_subscriptions WHERE organization_id = ? AND photographer_id = ? AND subscriber_id = ?")
+    .bind(user.organizationId, photographer.id, user.id).first<{ id: string; status: string }>();
+  if (subscription?.status === "active") return c.json({ error: "Photographer subscription is already active" }, 409);
+  const subscriptionId = subscription?.id ?? crypto.randomUUID();
+  await c.env.DB.prepare(`
+    INSERT INTO photographer_subscriptions (id, organization_id, photographer_id, subscriber_id, status, price_cents, currency, duration_days)
+    VALUES (?, ?, ?, ?, 'pending', ?, 'ZAR', ?)
+    ON CONFLICT(organization_id, photographer_id, subscriber_id) DO UPDATE SET status = 'pending', price_cents = excluded.price_cents, currency = excluded.currency, duration_days = excluded.duration_days, updated_at = CURRENT_TIMESTAMP
+  `).bind(subscriptionId, user.organizationId, photographer.id, user.id, priceCents, payload.durationDays).run();
+  try {
+    const session = await new IntegrationContainer(c.env).payments.get(c.env.PAYMENT_PROVIDER).createCheckoutSession({
+      idempotencyKey: `photographer-subscription:${subscriptionId}:${payload.durationDays}`,
+      referenceId: subscriptionId,
+      productType: "photographer_subscription",
+      amountCents: priceCents,
+      currency: "ZAR",
+      buyer: { id: user.id, email: user.email },
+      successUrl: payload.successUrl,
+      cancelUrl: payload.cancelUrl,
+      metadata: { organizationId: user.organizationId, userId: user.id, photographerId: photographer.id, productType: "photographer_subscription", durationDays: String(payload.durationDays) },
+    });
+    await c.env.DB.prepare("UPDATE photographer_subscriptions SET payment_provider = ?, payment_reference = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?")
+      .bind(c.env.PAYMENT_PROVIDER, session.providerReference ?? session.id, subscriptionId, user.organizationId).run();
+    return c.json({ subscriptionId, provider: session.provider, checkoutUrl: session.checkoutUrl, status: session.status, priceCents, currency: "ZAR", durationDays: payload.durationDays }, 201, { Location: `/api/subscriptions/${subscriptionId}` });
+  } catch (error) {
+    return c.json({ error: "Payment provider could not create a subscription checkout session" }, 503);
+  }
+});
+
+app.get("/api/my/subscriptions", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const rows = await c.env.DB.prepare(`SELECT s.id, s.photographer_id, u.display_name AS photographer_name, s.status, s.price_cents, s.currency, s.duration_days, s.paid_at, s.expires_at, s.created_at FROM photographer_subscriptions s JOIN users u ON u.id = s.photographer_id WHERE s.organization_id = ? AND s.subscriber_id = ? ORDER BY s.created_at DESC LIMIT 100`).bind(user.organizationId, user.id).all<Record<string, unknown>>();
+  return c.json({ results: rows.results });
+});
+
+app.post("/api/subscriptions/:id/cancel", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const result = await c.env.DB.prepare("UPDATE photographer_subscriptions SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ? AND subscriber_id = ? AND status IN ('pending', 'active')")
+    .bind(c.req.param("id"), user.organizationId, user.id).run();
+  if (!result.meta.changes) return c.json({ error: "Active subscription not found" }, 404);
+  return c.json({ subscriptionId: c.req.param("id"), status: "cancelled" });
+});
+
+const paymentWebhookSchema = z.object({
+  provider: z.string().trim().min(2).max(80),
+  eventId: z.string().trim().min(4).max(240),
+  type: z.enum(["payment_succeeded", "payment_failed", "refund", "chargeback"]),
+  licenceId: z.string().min(1).max(120).optional(),
+  subscriptionId: z.string().min(1).max(120).optional(),
+  productType: z.enum(["licence", "photographer_subscription"]).default("licence"),
+  paymentReference: z.string().trim().max(240).optional(),
+  amountCents: z.number().int().positive().max(100_000_000),
+  currency: z.string().length(3),
+}).refine((value) => value.productType === "licence" ? Boolean(value.licenceId) : Boolean(value.subscriptionId), { message: "A licenceId or subscriptionId is required for the product type" });
 
 
 async function verifyPaymentWebhook(secret: string, signature: string, body: string): Promise<boolean> {
@@ -2041,13 +2211,32 @@ app.post("/api/webhooks/kyc", async (c) => {
 });
 
 app.on(["GET", "HEAD"], "/api/assets/:id/preview", async (c) => {
+  const user = await requestUser(c);
   const row = await c.env.DB.prepare(`
-    SELECT id, kind, status, source_file_name, preview_key, original_key
-    FROM assets
-    WHERE id = ?
-  `).bind(c.req.param("id")).first<Record<string, unknown>>();
-  const mediaKey = row ? publicMediaKey(row) : null;
-  if (!row || row.status !== "published" || !mediaKey) {
+    SELECT a.id, a.organization_id, a.owner_id, a.kind, a.status, a.source_file_name, a.preview_key, a.preview_640_key, a.preview_1200_key, a.original_key,
+      EXISTS(
+        SELECT 1 FROM licences l
+        WHERE l.asset_id = a.id AND l.organization_id = a.organization_id
+          AND l.buyer_id = ? AND l.status = 'paid'
+      ) AS paid_entitlement,
+      EXISTS(
+        SELECT 1 FROM photographer_subscriptions s
+        WHERE s.organization_id = a.organization_id AND s.photographer_id = a.owner_id
+          AND s.subscriber_id = ? AND s.status = 'active' AND s.paid_at IS NOT NULL
+          AND (s.expires_at IS NULL OR s.expires_at > CURRENT_TIMESTAMP)
+      ) AS subscription_entitlement
+    FROM assets a
+    WHERE a.id = ?
+  `).bind(user?.id ?? "", user?.id ?? "", c.req.param("id")).first<Record<string, unknown>>();
+  const entitled = Boolean(user && row && String(row.organization_id) === user.organizationId && (
+    String(row.owner_id) === user.id || allowedRole(user, ["editor", "admin"])
+      || Number(row.paid_entitlement ?? 0) === 1 || Number(row.subscription_entitlement ?? 0) === 1
+  ));
+  const requestedWidth = c.req.query("width") === "640" ? 640 : c.req.query("width") === "1200" ? 1200 : undefined;
+  const mediaKey = row ? entitled ? previewMediaKey(row, true) : responsivePreviewKey(row, requestedWidth) : null;
+  const canInspectPrivate = Boolean(user && row && String(row.organization_id) === user.organizationId
+    && (String(row.owner_id) === user.id || allowedRole(user, ["editor", "admin"])));
+  if (!row || !mediaKey || (row.status !== "published" && !canInspectPrivate)) {
     return c.json({ error: "Published media preview not found" }, 404);
   }
 
@@ -2055,7 +2244,108 @@ app.on(["GET", "HEAD"], "/api/assets/:id/preview", async (c) => {
     ? await c.env.MEDIA_BUCKET.head(mediaKey)
     : await c.env.MEDIA_BUCKET.get(mediaKey, c.req.header("Range") ? { range: c.req.raw.headers } : undefined);
   if (!object) return c.json({ error: "Media preview is unavailable" }, 404);
-  return createMediaResponse(c.req.raw, object as R2ObjectBody, previewContentType(row));
+  const response = createMediaResponse(c.req.raw, object as R2ObjectBody, entitled ? originalContentType(row) : previewContentType(row));
+  response.headers.set("Cache-Control", entitled ? "private, no-store" : row.kind === "image" ? "public, max-age=3600, stale-while-revalidate=86400" : "private, max-age=60");
+  return response;
+});
+
+app.get("/api/assets/:id/preview-access", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ paid: false });
+  const row = await c.env.DB.prepare(`
+    SELECT a.organization_id, a.owner_id,
+      EXISTS(
+        SELECT 1 FROM licences l
+        WHERE l.asset_id = a.id AND l.organization_id = a.organization_id
+          AND l.buyer_id = ? AND l.status = 'paid'
+      ) AS paid_entitlement,
+      EXISTS(
+        SELECT 1 FROM photographer_subscriptions s
+        WHERE s.organization_id = a.organization_id AND s.photographer_id = a.owner_id
+          AND s.subscriber_id = ? AND s.status = 'active' AND s.paid_at IS NOT NULL
+          AND (s.expires_at IS NULL OR s.expires_at > CURRENT_TIMESTAMP)
+      ) AS subscription_entitlement
+    FROM assets a
+    WHERE a.id = ? AND a.status = 'published'
+  `).bind(user.id, user.id, c.req.param("id")).first<Record<string, unknown>>();
+  const paid = Boolean(row && String(row.organization_id) === user.organizationId && (
+    String(row.owner_id) === user.id || allowedRole(user, ["editor", "admin"])
+      || Number(row.paid_entitlement ?? 0) === 1 || Number(row.subscription_entitlement ?? 0) === 1
+  ));
+  return c.json({ paid });
+});
+
+app.on(["GET", "HEAD"], "/api/assets/:id/poster", async (c) => {
+  const user = await requestUser(c);
+  const row = await c.env.DB.prepare("SELECT id, organization_id, owner_id, kind, status, source_file_name, video_poster_key FROM assets WHERE id = ?")
+    .bind(c.req.param("id")).first<Record<string, unknown>>();
+  const canInspectPrivate = Boolean(user && row && String(row.organization_id) === user.organizationId && (String(row.owner_id) === user.id || allowedRole(user, ["editor", "admin"])));
+  const key = typeof row?.video_poster_key === "string" ? row.video_poster_key.trim() : "";
+  if (!row || row.kind !== "video" || !key || (row.status !== "published" && !canInspectPrivate)) return c.json({ error: "Video poster not found" }, 404);
+  const object = c.req.method === "HEAD" ? await c.env.MEDIA_BUCKET.head(key) : await c.env.MEDIA_BUCKET.get(key);
+  if (!object) return c.json({ error: "Video poster unavailable" }, 404);
+  const response = createMediaResponse(c.req.raw, object as R2ObjectBody, "image/webp");
+  response.headers.set("Cache-Control", "public, max-age=3600, stale-while-revalidate=86400");
+  return response;
+});
+
+app.on(["GET", "HEAD"], "/api/assets/:id/original", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const row = await c.env.DB.prepare(`
+    SELECT a.id, a.kind, a.status, a.source_file_name, a.original_key, a.owner_id,
+      EXISTS(
+        SELECT 1 FROM licences l
+        WHERE l.asset_id = a.id AND l.organization_id = a.organization_id
+          AND l.buyer_id = ? AND l.status = 'paid'
+      ) AS paid_entitlement,
+      EXISTS(
+        SELECT 1 FROM photographer_subscriptions s
+        WHERE s.organization_id = a.organization_id AND s.photographer_id = a.owner_id
+          AND s.subscriber_id = ? AND s.status = 'active' AND s.paid_at IS NOT NULL
+          AND (s.expires_at IS NULL OR s.expires_at > CURRENT_TIMESTAMP)
+      ) AS subscription_entitlement
+    FROM assets a
+    WHERE a.id = ? AND a.organization_id = ?
+  `).bind(user.id, user.id, c.req.param("id"), user.organizationId).first<Record<string, unknown>>();
+  if (!row) return c.json({ error: "Original media not found" }, 404);
+  const elevated = allowedRole(user, ["editor", "admin"]);
+  const entitled = elevated || String(row.owner_id) === user.id || Number(row.paid_entitlement) === 1 || Number(row.subscription_entitlement) === 1;
+  if (!entitled) return c.json({ error: "A paid licence is required to download the original" }, 403);
+  const originalKey = typeof row.original_key === "string" ? row.original_key.trim() : "";
+  if (!originalKey) return c.json({ error: "Original media is unavailable" }, 404);
+  const object = await c.env.MEDIA_BUCKET.head(originalKey);
+  if (!object) return c.json({ error: "Original media is unavailable" }, 404);
+  const entitlementType = elevated ? "staff" : String(row.owner_id) === user.id ? "owner" : Number(row.subscription_entitlement) === 1 ? "subscription" : "licence";
+  await c.env.DB.prepare("INSERT INTO media_download_events (id, organization_id, asset_id, user_id, entitlement_type, object_key) VALUES (?, ?, ?, ?, ?, ?)")
+    .bind(crypto.randomUUID(), user.organizationId, row.id, user.id, entitlementType, originalKey).run();
+  const filename = String(row.source_file_name ?? "original").replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 180) || "original";
+  const signedUrl = await createPresignedR2Url(c.env, c.env.R2_BUCKET_NAME, originalKey, "GET", 300, {
+    contentDisposition: `attachment; filename="${filename}"`,
+    contentType: originalContentType(row),
+  });
+  if (!signedUrl) return c.json({ error: "Original download signing is unavailable" }, 503);
+  return new Response(null, { status: 302, headers: { Location: signedUrl, "Cache-Control": "private, no-store" } });
+});
+
+// Cloudflare Image Resizing uses this short-lived, HMAC-signed source URL for
+// originals larger than the Images binding's 20 MB stream limit. The URL is
+// never returned to a caller and expires before the transformation completes.
+app.on(["GET", "HEAD"], "/internal/media-preview-source", async (c) => {
+  const key = c.req.query("key") ?? "";
+  const expires = Number(c.req.query("expires") ?? 0);
+  const signature = c.req.query("signature") ?? "";
+  const secret = c.env.R2_SECRET_ACCESS_KEY;
+  if (!key || !secret || !Number.isFinite(expires) || expires < Math.floor(Date.now() / 1000)) return c.json({ error: "Not found" }, 404);
+  const expected = hex(await hmac(utf8(secret), `${key}.${expires}`));
+  if (!timingSafeEqual(expected, signature)) return c.json({ error: "Not found" }, 404);
+  const object = c.req.method === "HEAD" ? await c.env.MEDIA_BUCKET.head(key) : await c.env.MEDIA_BUCKET.get(key);
+  if (!object) return c.json({ error: "Not found" }, 404);
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set("Cache-Control", "private, no-store");
+  headers.set("Content-Length", String(object.size));
+  return new Response(c.req.method === "HEAD" ? null : (object as R2ObjectBody).body, { status: 200, headers });
 });
 
 // Cloudflare Image Resizing calls this source URL with Via: image-resizing.
@@ -2223,6 +2513,39 @@ app.post("/api/admin/photo-index/rebuild", async (c) => {
     if (await enqueuePhotoJobBestEffort(c.env, asset.id, "sync_index")) queued += 1;
   }
   return c.json({ queued, total: assets.results.length, message: "Published photos queued for idempotent re-indexing." }, 202);
+});
+
+app.post("/api/admin/media/previews/rebuild", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["admin", "editor"])) return c.json({ error: "Editor access required" }, 403);
+  let payload: { assetIds?: string[] } = {};
+  try {
+    payload = z.object({ assetIds: z.array(z.string().min(1).max(120)).max(500).optional() }).parse(await c.req.json());
+  } catch {
+    // An empty body means rebuild every image with a private original in this organisation.
+  }
+  const assets = await c.env.DB.prepare(`
+    SELECT id, original_key, preview_key
+    FROM assets
+    WHERE organization_id = ? AND kind = 'image' AND original_key IS NOT NULL
+    ORDER BY updated_at DESC LIMIT 500
+  `).bind(user.organizationId).all<Record<string, unknown>>();
+  const requested = payload.assetIds ? new Set(payload.assetIds) : null;
+  const selected = requested ? assets.results.filter((asset) => requested.has(String(asset.id))) : assets.results;
+  let rebuilt = 0;
+  const failures: { assetId: string; error: string }[] = [];
+  for (const asset of selected) {
+    try {
+      const originalKey = String(asset.original_key);
+      const preview = await writeWatermarkedPreview(c.env, originalKey, asset.preview_key as string | null);
+      await c.env.DB.prepare("UPDATE assets SET preview_key = ?, preview_640_key = ?, preview_1200_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?")
+        .bind(preview.key, preview.variants.preview640Key, preview.variants.preview1200Key, asset.id, user.organizationId).run();
+      rebuilt += 1;
+    } catch (error) {
+      failures.push({ assetId: String(asset.id), error: error instanceof Error ? error.message : "preview transformation failed" });
+    }
+  }
+  return c.json({ rebuilt, total: selected.length, failed: failures.length, failures, transformation: `webp-${PREVIEW_MAX_DIMENSION}-q${PREVIEW_QUALITY}-watermarked` }, failures.length ? 207 : 200);
 });
 
 const photoJobStatusSchema = z.enum(["all", "queued", "running", "completed", "needs_review", "failed", "dead_lettered", "skipped"]);
@@ -2694,9 +3017,23 @@ app.post("/api/uploads", async (c) => {
   const owner = await requestUser(c);
   if (!owner || !allowedRole(owner, ["contributor", "editor", "admin"])) return c.json({ error: "Contributor authentication required" }, 401);
   const ownerId = owner.id;
+  const idempotencyKey = payload.idempotencyKey ?? c.req.header("Idempotency-Key")?.trim() ?? null;
+  const contentSha256 = payload.sha256?.toLowerCase() ?? null;
   if (payload.assetId) {
     const asset = await c.env.DB.prepare("SELECT owner_id FROM assets WHERE id = ? AND organization_id = ?").bind(payload.assetId, owner.organizationId).first<{ owner_id: string }>();
     if (!asset || (asset.owner_id !== ownerId && !allowedRole(owner, ["editor", "admin"]))) return c.json({ error: "Asset not found" }, 404);
+  }
+  if (idempotencyKey) {
+    const existing = await c.env.DB.prepare("SELECT id, object_key, filename, content_type, size_bytes, status FROM upload_sessions WHERE organization_id = ? AND owner_id = ? AND idempotency_key = ?")
+      .bind(owner.organizationId, ownerId, idempotencyKey).first<{ id: string; object_key: string; filename: string; content_type: string; size_bytes: number; status: string }>();
+    if (existing) {
+      const existingHash = await c.env.DB.prepare("SELECT content_sha256 FROM upload_sessions WHERE id = ?").bind(existing.id).first<{ content_sha256: string | null }>();
+      if (existing.filename !== payload.filename || existing.content_type !== payload.contentType || Number(existing.size_bytes) !== payload.sizeBytes || (contentSha256 && contentSha256 !== existingHash?.content_sha256)) return c.json({ error: "Idempotency key was already used for different upload content" }, 409);
+      if (existing.status === "failed" || existing.status === "expired") return c.json({ error: "This idempotency key belongs to a failed or expired upload; use a new key" }, 409);
+      const uploadUrl = await createPresignedR2Url(c.env, c.env.R2_BUCKET_NAME, existing.object_key, "PUT");
+      if (!uploadUrl) return c.json({ error: "Media storage is not configured for uploads", code: "r2_presign_config_missing" }, 503);
+      return c.json(validateContractResponse("POST /api/uploads 201", uploadResponseSchema, { uploadId: existing.id, objectKey: existing.object_key, strategy: "r2-presigned-put", uploadUrl, expiresInSeconds: 900, idempotent: true, message: existing.status === "uploaded" ? "Upload already completed; safe to reuse." : "Upload session already exists; safe to retry." }), existing.status === "uploaded" ? 200 : 201, { Location: `/api/uploads/${existing.id}/complete` });
+    }
   }
   const dailyQuota = Math.max(1, Number(c.env.UPLOAD_DAILY_QUOTA_BYTES ?? 50_000_000_000));
   const usage = await c.env.DB.prepare("SELECT COALESCE(SUM(size_bytes), 0) AS total FROM upload_sessions WHERE organization_id = ? AND owner_id = ? AND created_at >= date('now') AND status <> 'failed'").bind(owner.organizationId, owner.id).first<{ total: number }>();
@@ -2705,12 +3042,23 @@ app.post("/api/uploads", async (c) => {
   const organizationUsage = await c.env.DB.prepare("SELECT COALESCE(SUM(size_bytes), 0) AS total FROM upload_sessions WHERE organization_id = ? AND status IN ('created', 'uploaded')").bind(owner.organizationId).first<{ total: number }>();
   if (Number(organizationUsage?.total ?? 0) + payload.sizeBytes > organizationQuota) return c.json({ error: "Organization storage quota exceeded", quotaBytes: organizationQuota }, 413);
   const id = crypto.randomUUID();
-  const objectKey = `originals/${ownerId}/${id}/${payload.filename.replace(/[^a-zA-Z0-9._-]/g, "-")}`;
+  const objectIdentity = idempotencyKey ? await sha256Hex(`${owner.organizationId}:${ownerId}:${idempotencyKey}`) : id;
+  const objectKey = `originals/${ownerId}/${objectIdentity}/${payload.filename.replace(/[^a-zA-Z0-9._-]/g, "-")}`;
 
   await c.env.DB.prepare(`
-    INSERT INTO upload_sessions (id, organization_id, owner_id, asset_id, object_key, filename, content_type, size_bytes)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).bind(id, owner.organizationId, ownerId, payload.assetId ?? null, objectKey, payload.filename, payload.contentType, payload.sizeBytes).run();
+    INSERT OR IGNORE INTO upload_sessions (id, organization_id, owner_id, asset_id, object_key, filename, content_type, size_bytes, idempotency_key, content_sha256)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(id, owner.organizationId, ownerId, payload.assetId ?? null, objectKey, payload.filename, payload.contentType, payload.sizeBytes, idempotencyKey, contentSha256).run();
+  if (idempotencyKey) {
+    const persisted = await c.env.DB.prepare("SELECT id, object_key, status FROM upload_sessions WHERE organization_id = ? AND owner_id = ? AND idempotency_key = ?")
+      .bind(owner.organizationId, ownerId, idempotencyKey).first<{ id: string; object_key: string; status: string }>();
+    if (!persisted) return c.json({ error: "Upload session could not be persisted" }, 503);
+    if (persisted.id !== id) {
+      const uploadUrl = await createPresignedR2Url(c.env, c.env.R2_BUCKET_NAME, persisted.object_key, "PUT");
+      if (!uploadUrl) return c.json({ error: "Media storage is not configured for uploads", code: "r2_presign_config_missing" }, 503);
+      return c.json(validateContractResponse("POST /api/uploads 201", uploadResponseSchema, { uploadId: persisted.id, objectKey: persisted.object_key, strategy: "r2-presigned-put", uploadUrl, expiresInSeconds: 900, idempotent: true, message: "Upload session already exists; safe to retry." }), 201, { Location: `/api/uploads/${persisted.id}/complete` });
+    }
+  }
 
   if (chaos === "fail-after-session") {
     logChaos(c, trace, chaos, "after-db");
@@ -2729,7 +3077,17 @@ app.post("/api/uploads", async (c) => {
 
   if (!uploadUrl) {
     await c.env.DB.prepare("UPDATE upload_sessions SET status = 'failed', failure_reason = ? WHERE id = ?").bind("R2 presigned upload is not configured", id).run();
-    return c.json({ error: "Media storage is not configured for uploads" }, 503);
+    const missingR2Bindings = [
+      ["R2_ACCOUNT_ID", c.env.R2_ACCOUNT_ID],
+      ["R2_ACCESS_KEY_ID", c.env.R2_ACCESS_KEY_ID],
+      ["R2_SECRET_ACCESS_KEY", c.env.R2_SECRET_ACCESS_KEY],
+      ["R2_BUCKET_NAME", c.env.R2_BUCKET_NAME],
+    ].filter(([, value]) => !String(value ?? "").trim()).map(([name]) => name);
+    return c.json({
+      error: "Media storage is not configured for uploads",
+      code: "r2_presign_config_missing",
+      missingBindings: missingR2Bindings,
+    }, 503);
   }
   recordMetric(c.env, "upload_session_created", trace, payload.sizeBytes, [payload.contentType.split("/")[0]]);
   return c.json(validateContractResponse("POST /api/uploads 201", uploadResponseSchema, {
@@ -2738,6 +3096,7 @@ app.post("/api/uploads", async (c) => {
     strategy: "r2-presigned-put",
     uploadUrl,
     expiresInSeconds: uploadUrl ? 900 : null,
+    idempotent: false,
     message: "Upload directly to private R2 with this short-lived PUT URL, then call the completion endpoint.",
   }), 201, { Location: `/api/uploads/${id}/complete` });
 });
@@ -2770,6 +3129,35 @@ app.post("/api/uploads/:uploadId/complete", async (c) => {
     return c.json({ error: "R2 object was not found", uploadId }, 409);
   }
 
+  let previewKey: string | null = null;
+  let preview640Key: string | null = null;
+  let preview1200Key: string | null = null;
+  let videoPosterKey: string | null = null;
+  if (session.content_type.startsWith("image/")) {
+    previewKey = previewObjectKey(session.object_key, session.content_type);
+    const previewExists = await c.env.MEDIA_BUCKET.head(previewKey);
+    if (!previewExists) {
+      try {
+        const previews = await writeWatermarkedPreview(c.env, session.object_key);
+        previewKey = previews.key;
+        preview640Key = previews.variants.preview640Key;
+        preview1200Key = previews.variants.preview1200Key;
+      } catch (error) {
+        await c.env.DB.prepare("UPDATE upload_sessions SET status = 'failed', failure_reason = ? WHERE id = ?")
+          .bind(`Preview transformation failed: ${error instanceof Error ? error.message : "unknown error"}`, uploadId).run();
+        return c.json({ error: "Image preview transformation is unavailable", code: "preview_transformation_unavailable", uploadId }, 503);
+      }
+    }
+  } else if (session.content_type.startsWith("video/")) {
+    try {
+      videoPosterKey = await writeVideoPoster(c.env, session.object_key);
+    } catch (error) {
+      await c.env.DB.prepare("UPDATE upload_sessions SET status = 'failed', failure_reason = ? WHERE id = ?")
+        .bind(`Video poster transformation failed: ${error instanceof Error ? error.message : "unknown error"}`, uploadId).run();
+      return c.json({ error: "Video poster transformation is unavailable", code: "video_preview_transformation_unavailable", uploadId }, 503);
+    }
+  }
+
   const observedSize = chaos === "partial-upload" ? Math.max(0, session.size_bytes - 1) : object.size;
   if (observedSize !== session.size_bytes) {
     logChaos(c, trace, chaos ?? "size-mismatch", "completion-size-check");
@@ -2794,14 +3182,14 @@ app.post("/api/uploads/:uploadId/complete", async (c) => {
 
   const assetId = session.asset_id ?? crypto.randomUUID();
   const assetStatement = session.asset_id
-    ? c.env.DB.prepare(`UPDATE assets SET original_key = ?, source_file_name = ?, source_etag = ?,
+    ? c.env.DB.prepare(`UPDATE assets SET original_key = ?, preview_key = ?, preview_640_key = ?, preview_1200_key = ?, video_poster_key = ?, source_file_name = ?, source_etag = ?,
         status = 'needs_review', workflow_stage = 'ai_tagging', asset_revision = asset_revision + 1,
         enriched_revision = NULL, reviewed_revision = NULL, approved_revision = NULL, human_verified = 0,
         metadata_review_status = 'needs_context', metadata_review_note = 'Uploaded media is queued for AI enrichment and human review.',
         vector_index_status = 'pending', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?`)
-      .bind(session.object_key, session.filename, object.etag, assetId, session.organization_id)
-    : c.env.DB.prepare("INSERT INTO assets (id, organization_id, owner_id, kind, status, title, source_file_name, original_key, source_etag, workflow_stage) VALUES (?, ?, ?, ?, 'needs_review', ?, ?, ?, ?, 'ai_tagging')")
-      .bind(assetId, session.organization_id, session.owner_id, session.content_type.startsWith("video/") ? "video" : "image", session.filename, session.filename, session.object_key, object.etag);
+      .bind(session.object_key, previewKey, preview640Key, preview1200Key, videoPosterKey, session.filename, object.etag, assetId, session.organization_id)
+    : c.env.DB.prepare("INSERT INTO assets (id, organization_id, owner_id, kind, status, title, source_file_name, original_key, preview_key, preview_640_key, preview_1200_key, video_poster_key, source_etag, workflow_stage) VALUES (?, ?, ?, ?, 'needs_review', ?, ?, ?, ?, ?, ?, ?, ?, 'ai_tagging')")
+      .bind(assetId, session.organization_id, session.owner_id, session.content_type.startsWith("video/") ? "video" : "image", session.filename, session.filename, session.object_key, previewKey, preview640Key, preview1200Key, videoPosterKey, object.etag);
   const persistence = await c.env.DB.batch([
     assetStatement,
     c.env.DB.prepare(`

@@ -120,7 +120,7 @@ Apply subsequent migrations in order as well; `0004_explainability_safety.sql` a
 5. Create a Turnstile widget for the development and production hostnames.
 6. Store the Turnstile secret with `wrangler secret put TURNSTILE_SECRET`.
 7. Replace the development `TURNSTILE_HOSTNAMES` value for production.
-8. For browser-direct R2 uploads, configure `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, and `R2_SECRET_ACCESS_KEY` as Worker secrets/vars according to your deployment policy. The API then issues a short-lived presigned PUT URL.
+8. For browser-direct R2 uploads and private AI resizing, configure `R2_ACCOUNT_ID` as the account variable and set `R2_ACCESS_KEY_ID` plus `R2_SECRET_ACCESS_KEY` as Worker secrets. Create a bucket-scoped R2 Object Read & Write token, then run `npx wrangler secret put R2_ACCESS_KEY_ID` and `npx wrangler secret put R2_SECRET_ACCESS_KEY` interactively; never commit or pass either value as a command argument. The API then issues short-lived presigned PUT/GET URLs.
 9. Provision the DR buckets and R2 event queue with `./scripts/provision-dr.ps1`.
 10. Configure `STREAM_WEBHOOK_SECRET` and `CHAOS_TEST_TOKEN` as Worker secrets.
 11. Configure the KYC provider to POST only signed, metadata-only decisions to `/api/webhooks/kyc`; never send raw identity documents through the audit endpoint. The webhook uses HMAC-SHA256 in `x-kyc-signature`.

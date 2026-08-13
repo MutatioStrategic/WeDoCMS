@@ -570,7 +570,7 @@ paths:
   /api/assets/{id}/preview:
     get:
       operationId: getAssetPreview
-      summary: Stream the public optimized, watermarked preview
+      summary: Stream a preview; unpaid video viewers receive the watermarked preview and paid viewers receive the licensed original
       parameters:
         - name: id
           in: path
@@ -583,6 +583,25 @@ paths:
       responses:
         '200': { description: Preview bytes; cacheable public WebP for images }
         '404': { description: Published preview unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/assets/{id}/preview-access:
+    get:
+      operationId: getAssetPreviewAccess
+      summary: Check whether the signed-in viewer has paid access to an unwatermarked video preview
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Preview access decision
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [paid]
+                properties:
+                  paid: { type: boolean }
   /api/assets/{id}/original:
     get:
       operationId: downloadAssetOriginal

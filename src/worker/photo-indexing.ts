@@ -712,7 +712,7 @@ function ftsQuery(value: string): string {
 }
 
 function filterClauses(filters: { kind: "all" | "image" | "video"; status: "published" | "needs_review" | "all"; location?: string; locationType?: string; category?: string }): { clauses: string[]; values: string[] } {
-  const clauses = [filters.status === "all" ? "1 = 1" : "a.status = ?"];
+  const clauses = [filters.status === "all" ? "1 = 1" : "a.status = ?", "a.id NOT LIKE 'asset-test-photo-%'"];
   const values: string[] = filters.status === "all" ? [] : [filters.status];
   if (filters.kind !== "all") { clauses.push("a.kind = ?"); values.push(filters.kind); }
   if (filters.location) {

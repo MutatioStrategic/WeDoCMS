@@ -152,6 +152,8 @@ export const uploadRequestSchema = z.object({
   contentType: z.string().regex(/^(image|video)\//),
   sizeBytes: z.number().int().positive().max(30_000_000_000),
   assetId: z.string().optional(),
+  idempotencyKey: z.string().trim().min(8).max(200).optional(),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
 });
 
 export const uploadResponseSchema = z.object({
@@ -161,6 +163,7 @@ export const uploadResponseSchema = z.object({
   uploadUrl: z.string().url(),
   expiresInSeconds: z.number().int().positive(),
   message: z.string(),
+  idempotent: z.boolean().optional(),
 });
 
 export const uploadCompleteResponseSchema = z.object({

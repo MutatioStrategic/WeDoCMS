@@ -18,7 +18,7 @@ async function hex(value: ArrayBuffer | Uint8Array<ArrayBuffer>): Promise<string
 }
 
 function encodePath(path: string): string {
-  return path.split("/").map((part) => encodeURIComponent(part)).join("/");
+  return path.split("/").map((part) => encodeURIComponent(part).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`)).join("/");
 }
 
 /** Creates a short-lived R2 S3 URL without exposing credentials to callers. */
@@ -28,6 +28,7 @@ export async function createPresignedR2Url(
   objectKey: string,
   method: "GET" | "PUT",
   expiresSeconds = 900,
+  responseOverrides?: { contentDisposition?: string; contentType?: string },
 ): Promise<string | null> {
   if (!env.R2_ACCOUNT_ID || !env.R2_ACCESS_KEY_ID || !env.R2_SECRET_ACCESS_KEY || !bucketName) return null;
   const now = new Date();
@@ -35,7 +36,9 @@ export async function createPresignedR2Url(
   const dateStamp = amzDate.slice(0, 8);
   const region = "auto";
   const service = "s3";
-  const host = `${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`;
+  // R2 presigned URLs use the virtual-hosted S3 endpoint: bucket.account.r2...
+  // The bucket is therefore part of the host and must not be repeated in the path.
+  const host = `${bucketName}.${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`;
   const credential = `${env.R2_ACCESS_KEY_ID}/${dateStamp}/${region}/${service}/aws4_request`;
   const query = new URLSearchParams({
     "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
@@ -44,9 +47,11 @@ export async function createPresignedR2Url(
     "X-Amz-Expires": String(expiresSeconds),
     "X-Amz-SignedHeaders": "host",
   });
+  if (responseOverrides?.contentDisposition) query.set("response-content-disposition", responseOverrides.contentDisposition);
+  if (responseOverrides?.contentType) query.set("response-content-type", responseOverrides.contentType);
   const canonicalQuery = [...query.entries()].sort(([left], [right]) => left.localeCompare(right))
     .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`).join("&");
-  const canonicalUri = `/${encodeURIComponent(bucketName)}/${encodePath(objectKey)}`;
+  const canonicalUri = `/${encodePath(objectKey)}`;
   const canonicalRequest = [method, canonicalUri, canonicalQuery, `host:${host}\n`, "host", "UNSIGNED-PAYLOAD"].join("\n");
   const canonicalRequestHash = await hex(await crypto.subtle.digest("SHA-256", utf8(canonicalRequest)));
   const stringToSign = ["AWS4-HMAC-SHA256", amzDate, `${dateStamp}/${region}/${service}/aws4_request`, canonicalRequestHash].join("\n");
