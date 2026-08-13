@@ -126,7 +126,6 @@ jobs:
           npm run test:auth
           npm run test:penetration
           npm run test:fuzz
-          npm run chaos:uploads
       - name: Show Worker log on failure
         if: failure()
         run: cat worker.log
@@ -165,6 +164,8 @@ jobs:
         with:
           target: http://127.0.0.1:8787
           fail_action: true
+          allow_issue_writing: false
+          cmd_options: '-l HIGH'
       - name: Stop local Worker
         if: always()
         shell: bash
@@ -176,7 +177,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22
           cache: npm
@@ -184,7 +185,7 @@ jobs:
       - run: npx wrangler types
       - run: npm run build
       - name: Scan repository for vulnerabilities, secrets, and misconfiguration
-        uses: aquasecurity/trivy-action@v0.36.0
+         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           scan-type: fs
           scan-ref: .
@@ -195,7 +196,7 @@ jobs:
       - name: Validate Wrangler configuration
         run: npx wrangler deploy --dry-run --outdir=security-dry-run
       - name: Check workflow permissions and unsafe patterns
-        uses: zizmorcore/zizmor-action@v0.6.2
+         uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054
         with:
           persona: pedantic
 

@@ -59,9 +59,10 @@ em { font-family: 'Playfair Display', serif; font-weight: 500; }
 .visual-2 { background: radial-gradient(circle at 55% 38%, #dfa776 0 8%, transparent 9%), linear-gradient(150deg, #8a4e39 0 38%, #29352c 39% 59%, #b85e3c 60%); }
 .visual-3 { background: linear-gradient(170deg, #5b766e 0 40%, #d6b183 41% 45%, #344f4a 46% 65%, #253b35 66%); }
 .asset-visual.video { background-color: #354f4b; }
-.visual-overlay { position: absolute; inset: 16px 16px auto; display: flex; justify-content: space-between; color: rgba(255,251,241,.82); font: 10px 'DM Mono', monospace; }
-.visual-overlay span:first-child { display: grid; place-items: center; width: 30px; height: 30px; border: 1px solid rgba(255,251,241,.6); border-radius: 50%; font-size: 10px; }
-.visual-place { position: absolute; left: 16px; bottom: 14px; color: rgba(255,251,241,.88); font: 10px 'DM Mono', monospace; text-transform: uppercase; letter-spacing: .09em; }
+.visual-overlay { position: absolute; inset: 16px 16px auto; display: flex; justify-content: space-between; color: rgba(255,251,241,.92); font: 10px 'DM Mono', monospace; }
+.visual-overlay > span:last-child { padding: 4px 6px; border-radius: 2px; background: rgba(23,32,25,.68); }
+.visual-overlay span:first-child { display: grid; place-items: center; width: 30px; height: 30px; border: 1px solid rgba(255,251,241,.6); border-radius: 50%; font-size: 10px; background: rgba(23,32,25,.9); }
+.visual-place { position: absolute; left: 16px; bottom: 14px; padding: 5px 7px; border-radius: 2px; color: #fffaf2; background: rgba(23,32,25,.9); font: 10px 'DM Mono', monospace; text-transform: uppercase; letter-spacing: .09em; }
 .asset-info { display: flex; justify-content: space-between; align-items: start; gap: 10px; padding: 13px 2px 0; }
 .asset-info h3 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: -.02em; }
 .asset-info p { margin: 5px 0 0; font: 10px 'DM Mono', monospace; color: #999a8f; }
