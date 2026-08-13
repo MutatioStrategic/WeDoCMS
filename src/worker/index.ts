@@ -400,6 +400,13 @@ function streamEmbedUrl(row: Record<string, unknown>, env?: Pick<SecretBindings,
   return `https://customer-${encodeURIComponent(customerCode)}.cloudflarestream.com/${encodeURIComponent(uid)}/iframe`;
 }
 
+export function publicMediaKey(row: Record<string, unknown>): string | null {
+  const previewKey = typeof row.preview_key === "string" ? row.preview_key.trim() : "";
+  if (previewKey) return previewKey;
+  const originalKey = typeof row.original_key === "string" ? row.original_key.trim() : "";
+  return originalKey || null;
+}
+
 const assetRowToDomain = (row: Record<string, unknown>, env?: Pick<SecretBindings, "STREAM_CUSTOMER_CODE" | "STREAM_PUBLIC_PLAYBACK_ENABLED">): Asset => ({
   id: String(row.id),
   kind: row.kind as Asset["kind"],
@@ -447,7 +454,7 @@ const assetRowToDomain = (row: Record<string, unknown>, env?: Pick<SecretBinding
   sourceUrl: (row.source_url as string | null) ?? null,
   sourceLicense: (row.source_license as string | null) ?? null,
   sourceAttribution: (row.source_attribution as string | null) ?? null,
-  previewUrl: row.preview_key ? `/api/assets/${encodeURIComponent(String(row.id))}/preview` : null,
+  previewUrl: publicMediaKey(row) ? `/api/assets/${encodeURIComponent(String(row.id))}/preview` : null,
   streamUid: (row.stream_uid as string | null) ?? null,
   streamEmbedUrl: streamEmbedUrl(row, env),
   monetizationModel: (row.monetization_model as MonetizationModel | undefined) ?? "membership",
@@ -505,8 +512,43 @@ const searchSchema = z.object({
   location: z.string().trim().max(80).optional(),
   locationType: z.enum(["urban_street", "coastal_landscape", "market_scene", "indoor", "residential", "rural_landscape", "industrial", "event", "transport", "nature", "sports", "food", "other", "unknown"]).optional(),
   category: z.enum(["people", "lifestyle", "travel", "nature", "architecture", "food", "business", "transport", "arts_culture", "sport", "news_editorial", "objects", "other"]).optional(),
+  verified: z.enum(["true"]).optional(),
   status: z.enum(["published", "needs_review", "all"]).default("published"),
 });
+
+const curationSchema = z.object({
+  title: z.string().trim().min(3).max(180),
+  description: z.string().trim().min(10).max(2000),
+  theme: z.string().trim().min(2).max(100).default("Editorial selection"),
+  location: z.string().trim().min(2).max(120).default("South Africa"),
+  featuredLabel: z.string().trim().min(2).max(80).default("EDITOR'S PICK"),
+  status: z.enum(["draft", "published", "archived"]).default("draft"),
+  assetIds: z.array(z.string().trim().min(1).max(120)).max(100).default([]),
+});
+
+const buyerApiKeySchema = z.object({ label: z.string().trim().min(3).max(120) });
+
+async function publicBuyerOrganization(env: Bindings, request: Request): Promise<string | null> {
+  const token = request.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
+  if (!token || !token.startsWith("va_buyer_")) return null;
+  const tokenHash = await sha256Hex(token);
+  const key = await env.DB.prepare("SELECT id, organization_id FROM buyer_api_keys WHERE token_hash = ? AND status = 'active'").bind(tokenHash).first<{ id: string; organization_id: string }>();
+  if (!key) return null;
+  await env.DB.prepare("UPDATE buyer_api_keys SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?").bind(key.id).run();
+  return key.organization_id;
+}
+
+async function replaceCurationAssets(env: Bindings, table: "showcase_assets" | "collection_assets", parentColumn: "showcase_id" | "collection_id", parentId: string, organizationId: string, assetIds: string[]) {
+  const uniqueIds = [...new Set(assetIds)];
+  if (uniqueIds.length) {
+    const placeholders = uniqueIds.map(() => "?").join(", ");
+    const found = await env.DB.prepare(`SELECT id FROM assets WHERE organization_id = ? AND status = 'published' AND id IN (${placeholders})`).bind(organizationId, ...uniqueIds).all<{ id: string }>();
+    if (found.results.length !== uniqueIds.length) throw new Error("Every curated asset must be a published asset in this organisation.");
+  }
+  const statements = [env.DB.prepare(`DELETE FROM ${table} WHERE ${parentColumn} = ?`).bind(parentId)];
+  uniqueIds.forEach((assetId, sortOrder) => statements.push(env.DB.prepare(`INSERT INTO ${table} (${parentColumn}, asset_id, sort_order) VALUES (?, ?, ?)`).bind(parentId, assetId, sortOrder + 1)));
+  await env.DB.batch(statements);
+}
 
 const analyticsEventSchema = z.object({
   consent: z.literal(true),
@@ -2000,17 +2042,18 @@ app.post("/api/webhooks/kyc", async (c) => {
 
 app.on(["GET", "HEAD"], "/api/assets/:id/preview", async (c) => {
   const row = await c.env.DB.prepare(`
-    SELECT id, kind, status, source_file_name, preview_key
+    SELECT id, kind, status, source_file_name, preview_key, original_key
     FROM assets
     WHERE id = ?
   `).bind(c.req.param("id")).first<Record<string, unknown>>();
-  if (!row || row.status !== "published" || typeof row.preview_key !== "string" || !row.preview_key) {
+  const mediaKey = row ? publicMediaKey(row) : null;
+  if (!row || row.status !== "published" || !mediaKey) {
     return c.json({ error: "Published media preview not found" }, 404);
   }
 
   const object = c.req.method === "HEAD"
-    ? await c.env.MEDIA_BUCKET.head(row.preview_key)
-    : await c.env.MEDIA_BUCKET.get(row.preview_key, c.req.header("Range") ? { range: c.req.raw.headers } : undefined);
+    ? await c.env.MEDIA_BUCKET.head(mediaKey)
+    : await c.env.MEDIA_BUCKET.get(mediaKey, c.req.header("Range") ? { range: c.req.raw.headers } : undefined);
   if (!object) return c.json({ error: "Media preview is unavailable" }, 404);
   return createMediaResponse(c.req.raw, object as R2ObjectBody, previewContentType(row));
 });
@@ -2051,6 +2094,7 @@ app.get("/api/assets", async (c) => {
     location: c.req.query("location"),
     locationType: c.req.query("locationType"),
     category: c.req.query("category"),
+    verified: c.req.query("verified"),
     status: c.req.query("status") ?? "published",
   });
 
@@ -2069,7 +2113,7 @@ app.get("/api/assets", async (c) => {
   }
 
   if (!searchHandled) {
-    const clauses = [params.status === "all" ? "1 = 1" : "a.status = ?"];
+    const clauses = [params.status === "all" ? "1 = 1" : "a.status = ?", "a.id NOT LIKE 'asset-test-photo-%'"];
     const values: string[] = params.status === "all" ? [] : [params.status];
 
     if (params.kind !== "all") {
@@ -2083,6 +2127,7 @@ app.get("/api/assets", async (c) => {
     }
     if (params.locationType) { clauses.push("a.visual_location_type = ?"); values.push(params.locationType); }
     if (params.category) { clauses.push("a.primary_category = ?"); values.push(params.category); }
+    if (params.verified) clauses.push("a.human_verified = 1");
     if (params.q) {
       clauses.push("(a.title LIKE ? OR a.description LIKE ? OR a.caption LIKE ? OR a.subject_tags LIKE ? OR a.cultural_tags LIKE ? OR a.ai_tags LIKE ? OR a.ocr_text LIKE ? OR a.visual_location_type LIKE ? OR a.primary_category LIKE ? OR a.scene_attributes LIKE ?)");
       const query = `%${params.q}%`;
@@ -2099,6 +2144,7 @@ app.get("/api/assets", async (c) => {
 
     rows = result.results as Record<string, unknown>[];
   }
+  if (params.verified) rows = rows.filter((row) => Boolean(row.human_verified));
   const matchedAssets = archiveDomain.rankSearchAssets(rows.map((row) => assetRowToDomain(row, c.env)), params.q);
   const countBy = <T extends string>(values: (T | null | undefined)[]): Map<string, number> => {
     const counts = new Map<string, number>();
@@ -2127,6 +2173,44 @@ app.get("/api/assets", async (c) => {
 
   recordMetric(c.env, "asset_search", c.get("trace"), matchedAssets.length, [params.kind, params.status]);
   return c.json(validateContractResponse("GET /api/assets 200", searchResponseSchema, response));
+});
+
+app.get("/api/admin/launch-readiness", async (c) => {
+  const admin = await requestUser(c);
+  if (!admin || !allowedRole(admin, ["admin"])) return c.json({ error: "Admin access required" }, 403);
+  const emailConfigured = Boolean(c.env.EMAIL && c.env.EMAIL_FROM?.trim());
+  const payoutRails = [
+    { provider: "stripe_connect", configured: Boolean(c.env.STRIPE_SECRET_KEY?.trim()) },
+    { provider: "payfast", configured: Boolean(c.env.PAYFAST_ENDPOINT?.trim() && c.env.PAYFAST_TOKEN?.trim()) },
+    { provider: "za_bank", configured: Boolean(c.env.ZA_BANK_ENDPOINT?.trim() && c.env.ZA_BANK_TOKEN?.trim()) },
+  ];
+  const checks = [
+    { id: "production_mode", ready: String(c.env.APP_ENV) === "production" && c.env.DEMO_AUTH_ENABLED !== "true", action: "Set APP_ENV=production and disable demo authentication." },
+    { id: "email_sender", ready: emailConfigured, action: "Enroll and verify an Email Sending domain, then set EMAIL_FROM as a Worker secret." },
+    { id: "payout_rail", ready: payoutRails.some((rail) => rail.configured), action: "Configure and verify one payout provider with production credentials before approving a payout batch." },
+  ];
+  return c.json({ ready: checks.every((check) => check.ready), checks, payoutRails });
+});
+
+app.get("/api/assets/facets", async (c) => {
+  const params = searchSchema.parse({ q: c.req.query("q") ?? "", kind: c.req.query("kind") ?? "all", status: "published" });
+  const query = `%${params.q}%`;
+  const rows = await c.env.DB.prepare(`SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id
+    WHERE a.status = 'published' AND a.id NOT LIKE 'asset-test-photo-%' AND (? = '' OR a.title LIKE ? OR a.description LIKE ? OR a.subject_tags LIKE ?)
+    ORDER BY a.human_verified DESC, a.created_at DESC LIMIT 500`).bind(params.q, query, query, query).all<Record<string, unknown>>();
+  const assets = rows.results.map((row) => assetRowToDomain(row, c.env));
+  const count = (values: Array<string | null | undefined>) => [...values.reduce((map, value) => value ? map.set(value, (map.get(value) ?? 0) + 1) : map, new Map<string, number>()).entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([value, total]) => ({ value, count: total }));
+  return c.json({ query: params.q, total: assets.length, facets: { kinds: count(assets.map((asset) => asset.kind)), provinces: count(assets.map((asset) => asset.province)), categories: count(assets.map((asset) => asset.primaryCategory)), verified: assets.filter((asset) => asset.humanVerified).length } });
+});
+
+app.get("/api/assets/:id", async (c) => {
+  const user = await requestUser(c);
+  const row = await c.env.DB.prepare("SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.id = ?")
+    .bind(c.req.param("id")).first<Record<string, unknown>>();
+  if (!row) return c.json({ error: "Asset not found" }, 404);
+  const mayInspectPrivate = Boolean(user && String(row.organization_id) === user.organizationId && (String(row.owner_id) === user.id || allowedRole(user, ["editor", "admin"])));
+  if (row.status !== "published" && !mayInspectPrivate) return c.json({ error: "Asset not found" }, 404);
+  return c.json(assetRowToDomain(row, c.env));
 });
 
 app.post("/api/admin/photo-index/rebuild", async (c) => {
@@ -2254,14 +2338,91 @@ app.get("/api/analytics/buyer", async (c) => {
   return c.json(response);
 });
 
+app.get("/api/admin/search-insights", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Editor access required" }, 403);
+  const [searches, tags, views] = await c.env.DB.batch([
+    c.env.DB.prepare("SELECT metric_key AS value, SUM(count) AS count FROM analytics_daily WHERE metric_type = 'search' AND metric_date >= date('now', '-30 day') GROUP BY metric_key ORDER BY count DESC LIMIT 20"),
+    c.env.DB.prepare("SELECT metric_key AS value, SUM(count) AS count FROM analytics_daily WHERE metric_type = 'tag_click' AND metric_date >= date('now', '-30 day') GROUP BY metric_key ORDER BY count DESC LIMIT 20"),
+    c.env.DB.prepare("SELECT a.id, a.title, SUM(ad.count) AS views FROM analytics_daily ad JOIN assets a ON a.id = ad.asset_id WHERE ad.metric_type = 'asset_view' AND a.organization_id = ? AND ad.metric_date >= date('now', '-30 day') GROUP BY a.id ORDER BY views DESC LIMIT 20").bind(user.organizationId),
+  ]);
+  return c.json({ range: "Last 30 days", searches: searches.results, tagClicks: tags.results, mostViewedAssets: views.results, rankingSignals: ["human verification", "metadata match", "rights readiness", "editorial freshness"] });
+});
+
+app.get("/api/admin/community/curation", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Editor access required" }, 403);
+  const [showcases, collections] = await c.env.DB.batch([
+    c.env.DB.prepare("SELECT * FROM showcases WHERE organization_id = ? ORDER BY created_at DESC").bind(user.organizationId),
+    c.env.DB.prepare("SELECT * FROM featured_collections WHERE organization_id = ? ORDER BY created_at DESC").bind(user.organizationId),
+  ]);
+  return c.json({ showcases: showcases.results, collections: collections.results });
+});
+
+app.post("/api/admin/community/showcases", async (c) => {
+  const user = await requestUser(c); if (!user || !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Editor access required" }, 403);
+  const payload = curationSchema.parse(await c.req.json()); const id = crypto.randomUUID();
+  await c.env.DB.prepare("INSERT INTO showcases (id, organization_id, title, description, curator_id, theme, status) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(id, user.organizationId, payload.title, payload.description, user.id, payload.theme, payload.status).run();
+  try { await replaceCurationAssets(c.env, "showcase_assets", "showcase_id", id, user.organizationId, payload.assetIds); } catch (error) { await c.env.DB.prepare("DELETE FROM showcases WHERE id = ?").bind(id).run(); return c.json({ error: error instanceof Error ? error.message : "Could not curate assets" }, 422); }
+  return c.json({ id, status: payload.status }, 201, { Location: `/api/admin/community/showcases/${id}` });
+});
+
+app.patch("/api/admin/community/showcases/:id", async (c) => {
+  const user = await requestUser(c); if (!user || !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Editor access required" }, 403);
+  const payload = curationSchema.partial().parse(await c.req.json()); const id = c.req.param("id");
+  const current = await c.env.DB.prepare("SELECT id FROM showcases WHERE id = ? AND organization_id = ?").bind(id, user.organizationId).first(); if (!current) return c.json({ error: "Showcase not found" }, 404);
+  await c.env.DB.prepare("UPDATE showcases SET title = COALESCE(?, title), description = COALESCE(?, description), theme = COALESCE(?, theme), status = COALESCE(?, status) WHERE id = ?").bind(payload.title ?? null, payload.description ?? null, payload.theme ?? null, payload.status ?? null, id).run();
+  if (payload.assetIds) try { await replaceCurationAssets(c.env, "showcase_assets", "showcase_id", id, user.organizationId, payload.assetIds); } catch (error) { return c.json({ error: error instanceof Error ? error.message : "Could not curate assets" }, 422); }
+  return c.json({ id, ok: true });
+});
+
+app.delete("/api/admin/community/showcases/:id", async (c) => { const user = await requestUser(c); if (!user || !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Editor access required" }, 403); const result = await c.env.DB.prepare("DELETE FROM showcases WHERE id = ? AND organization_id = ?").bind(c.req.param("id"), user.organizationId).run(); return Number(result.meta.changes ?? 0) ? c.json({ ok: true }) : c.json({ error: "Showcase not found" }, 404); });
+
+app.post("/api/admin/community/collections", async (c) => {
+  const user = await requestUser(c); if (!user || !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Editor access required" }, 403);
+  const payload = curationSchema.parse(await c.req.json()); const id = crypto.randomUUID();
+  await c.env.DB.prepare("INSERT INTO featured_collections (id, organization_id, title, description, location, featured_label, status) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(id, user.organizationId, payload.title, payload.description, payload.location, payload.featuredLabel, payload.status).run();
+  try { await replaceCurationAssets(c.env, "collection_assets", "collection_id", id, user.organizationId, payload.assetIds); } catch (error) { await c.env.DB.prepare("DELETE FROM featured_collections WHERE id = ?").bind(id).run(); return c.json({ error: error instanceof Error ? error.message : "Could not curate assets" }, 422); }
+  return c.json({ id, status: payload.status }, 201, { Location: `/api/admin/community/collections/${id}` });
+});
+
+app.patch("/api/admin/community/collections/:id", async (c) => {
+  const user = await requestUser(c); if (!user || !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Editor access required" }, 403);
+  const payload = curationSchema.partial().parse(await c.req.json()); const id = c.req.param("id"); const current = await c.env.DB.prepare("SELECT id FROM featured_collections WHERE id = ? AND organization_id = ?").bind(id, user.organizationId).first(); if (!current) return c.json({ error: "Collection not found" }, 404);
+  await c.env.DB.prepare("UPDATE featured_collections SET title = COALESCE(?, title), description = COALESCE(?, description), location = COALESCE(?, location), featured_label = COALESCE(?, featured_label), status = COALESCE(?, status) WHERE id = ?").bind(payload.title ?? null, payload.description ?? null, payload.location ?? null, payload.featuredLabel ?? null, payload.status ?? null, id).run();
+  if (payload.assetIds) try { await replaceCurationAssets(c.env, "collection_assets", "collection_id", id, user.organizationId, payload.assetIds); } catch (error) { return c.json({ error: error instanceof Error ? error.message : "Could not curate assets" }, 422); }
+  return c.json({ id, ok: true });
+});
+
+app.delete("/api/admin/community/collections/:id", async (c) => { const user = await requestUser(c); if (!user || !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Editor access required" }, 403); const result = await c.env.DB.prepare("DELETE FROM featured_collections WHERE id = ? AND organization_id = ?").bind(c.req.param("id"), user.organizationId).run(); return Number(result.meta.changes ?? 0) ? c.json({ ok: true }) : c.json({ error: "Collection not found" }, 404); });
+
+app.post("/api/buyer-api-keys", async (c) => {
+  const user = await requestUser(c); if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, 403);
+  const payload = buyerApiKeySchema.parse(await c.req.json()); const token = `va_buyer_${base64UrlToken()}`; const id = crypto.randomUUID();
+  await c.env.DB.prepare("INSERT INTO buyer_api_keys (id, organization_id, user_id, label, token_hash) VALUES (?, ?, ?, ?, ?)").bind(id, user.organizationId, user.id, payload.label, await sha256Hex(token)).run();
+  return c.json({ id, label: payload.label, token, warning: "Copy this token now. It will not be shown again." }, 201, { Location: `/api/buyer-api-keys/${id}` });
+});
+
+app.get("/api/buyer-api-keys", async (c) => { const user = await requestUser(c); if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, 403); const keys = await c.env.DB.prepare("SELECT id, label, status, last_used_at, created_at, revoked_at FROM buyer_api_keys WHERE organization_id = ? AND user_id = ? ORDER BY created_at DESC").bind(user.organizationId, user.id).all(); return c.json({ results: keys.results }); });
+app.delete("/api/buyer-api-keys/:id", async (c) => { const user = await requestUser(c); if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, 403); const changed = await c.env.DB.prepare("UPDATE buyer_api_keys SET status = 'revoked', revoked_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ? AND user_id = ? AND status = 'active'").bind(c.req.param("id"), user.organizationId, user.id).run(); return Number(changed.meta.changes ?? 0) ? c.json({ ok: true }) : c.json({ error: "API key not found" }, 404); });
+
+app.get("/api/public/v1/assets", async (c) => {
+  const organizationId = await publicBuyerOrganization(c.env, c.req.raw); if (!organizationId) return c.json({ error: "Valid buyer API token required" }, 401);
+  const q = z.string().trim().max(240).parse(c.req.query("q") ?? ""); const limit = Math.min(100, Math.max(1, Number(c.req.query("limit") ?? 25) || 25)); const match = `%${q}%`;
+  const rows = await c.env.DB.prepare("SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.organization_id = ? AND a.status = 'published' AND (? = '' OR a.title LIKE ? OR a.description LIKE ? OR a.subject_tags LIKE ?) ORDER BY a.human_verified DESC, a.created_at DESC LIMIT ?").bind(organizationId, q, match, match, match, limit).all<Record<string, unknown>>();
+  return c.json({ results: rows.results.map((row) => assetRowToDomain(row, c.env)), limit });
+});
+app.get("/api/public/v1/assets/:id", async (c) => { const organizationId = await publicBuyerOrganization(c.env, c.req.raw); if (!organizationId) return c.json({ error: "Valid buyer API token required" }, 401); const row = await c.env.DB.prepare("SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.id = ? AND a.organization_id = ? AND a.status = 'published'").bind(c.req.param("id"), organizationId).first<Record<string, unknown>>(); return row ? c.json(assetRowToDomain(row, c.env)) : c.json({ error: "Asset not found" }, 404); });
+
 app.get("/api/community/overview", async (c) => {
+  const organizationId = c.env.DEFAULT_ORGANIZATION_ID ?? "org-demo";
   const [forums, threads, showcases, showcaseAssets, collections, collectionAssets] = await Promise.all([
     c.env.DB.prepare(`SELECT f.*, COUNT(DISTINCT t.id) AS topic_count, COUNT(p.id) AS post_count FROM community_forums f LEFT JOIN forum_threads t ON t.forum_id = f.id AND t.status = 'open' LEFT JOIN forum_posts p ON p.thread_id = t.id AND p.status = 'visible' WHERE f.status = 'open' GROUP BY f.id ORDER BY f.created_at ASC`).all<Record<string, unknown>>(),
     c.env.DB.prepare(`SELECT t.*, u.display_name AS author, COUNT(p.id) AS replies FROM forum_threads t JOIN users u ON u.id = t.author_id LEFT JOIN forum_posts p ON p.thread_id = t.id AND p.status = 'visible' WHERE t.status = 'open' GROUP BY t.id ORDER BY t.featured DESC, t.updated_at DESC LIMIT 12`).all<Record<string, unknown>>(),
-    c.env.DB.prepare(`SELECT s.*, u.display_name AS curator FROM showcases s JOIN users u ON u.id = s.curator_id WHERE s.status = 'published' ORDER BY s.created_at DESC LIMIT 12`).all<Record<string, unknown>>(),
-    c.env.DB.prepare(`SELECT showcase_id, asset_id FROM showcase_assets ORDER BY sort_order ASC`).all<Record<string, unknown>>(),
-    c.env.DB.prepare(`SELECT c.*, COUNT(DISTINCT ca.asset_id) AS asset_count, COUNT(DISTINCT a.owner_id) AS contributor_count FROM featured_collections c LEFT JOIN collection_assets ca ON ca.collection_id = c.id LEFT JOIN assets a ON a.id = ca.asset_id WHERE c.status = 'published' GROUP BY c.id ORDER BY c.created_at DESC LIMIT 12`).all<Record<string, unknown>>(),
-    c.env.DB.prepare(`SELECT collection_id, asset_id FROM collection_assets ORDER BY sort_order ASC`).all<Record<string, unknown>>(),
+    c.env.DB.prepare(`SELECT s.*, u.display_name AS curator FROM showcases s JOIN users u ON u.id = s.curator_id WHERE s.organization_id = ? AND s.status = 'published' ORDER BY s.created_at DESC LIMIT 12`).bind(organizationId).all<Record<string, unknown>>(),
+    c.env.DB.prepare(`SELECT sa.showcase_id, sa.asset_id FROM showcase_assets sa JOIN showcases s ON s.id = sa.showcase_id WHERE s.organization_id = ? ORDER BY sa.sort_order ASC`).bind(organizationId).all<Record<string, unknown>>(),
+    c.env.DB.prepare(`SELECT c.*, COUNT(DISTINCT ca.asset_id) AS asset_count, COUNT(DISTINCT a.owner_id) AS contributor_count FROM featured_collections c LEFT JOIN collection_assets ca ON ca.collection_id = c.id LEFT JOIN assets a ON a.id = ca.asset_id WHERE c.organization_id = ? AND c.status = 'published' GROUP BY c.id ORDER BY c.created_at DESC LIMIT 12`).bind(organizationId).all<Record<string, unknown>>(),
+    c.env.DB.prepare(`SELECT ca.collection_id, ca.asset_id FROM collection_assets ca JOIN featured_collections c ON c.id = ca.collection_id WHERE c.organization_id = ? ORDER BY ca.sort_order ASC`).bind(organizationId).all<Record<string, unknown>>(),
   ]);
 
   const showcaseAssetMap = new Map<string, string[]>();

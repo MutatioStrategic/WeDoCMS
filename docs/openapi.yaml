@@ -77,6 +77,9 @@ paths:
         - name: status
           in: query
           schema: { type: string, enum: [published, needs_review, all], default: published }
+        - name: verified
+          in: query
+          schema: { type: string, enum: ['true'] }
       responses:
         '200':
           description: Explainable search results
@@ -552,6 +555,127 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/assets/{id}:
+    get:
+      operationId: getAsset
+      summary: Get a published asset or an authorized private asset
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Asset record, content: { application/json: { schema: { $ref: '#/components/schemas/Asset' } } } }
+        '404': { description: Asset unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/assets/facets:
+    get:
+      operationId: getAssetFacets
+      summary: Get live search facets derived from published records
+      responses:
+        '200': { description: Dynamic facet counts }
+  /api/admin/search-insights:
+    get:
+      operationId: getSearchInsights
+      summary: Get editor ranking and demand signals for the last 30 days
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Search insight report }
+        '403': { description: Editor access required }
+  /api/admin/community/curation:
+    get:
+      operationId: getCuration
+      summary: List organization showcases and collections for editors
+      security: [{ sessionCookie: [] }]
+      responses: { '200': { description: Curation records } }
+  /api/admin/community/showcases:
+    post:
+      operationId: createShowcase
+      summary: Create a tenant-scoped editorial showcase
+      security: [{ sessionCookie: [] }]
+      responses: { '201': { description: Showcase created, headers: { Location: { schema: { type: string } } } } }
+  /api/admin/community/showcases/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      operationId: updateShowcase
+      summary: Update a showcase and its ordered published assets
+      security: [{ sessionCookie: [] }]
+      responses: { '200': { description: Showcase updated } }
+    delete:
+      operationId: deleteShowcase
+      summary: Delete a showcase
+      security: [{ sessionCookie: [] }]
+      responses: { '200': { description: Showcase removed } }
+  /api/admin/community/collections:
+    post:
+      operationId: createCollection
+      summary: Create a tenant-scoped featured collection
+      security: [{ sessionCookie: [] }]
+      responses: { '201': { description: Collection created, headers: { Location: { schema: { type: string } } } } }
+  /api/admin/community/collections/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      operationId: updateCollection
+      summary: Update a collection and its ordered published assets
+      security: [{ sessionCookie: [] }]
+      responses: { '200': { description: Collection updated } }
+    delete:
+      operationId: deleteCollection
+      summary: Delete a collection
+      security: [{ sessionCookie: [] }]
+      responses: { '200': { description: Collection removed } }
+  /api/buyer-api-keys:
+    get:
+      operationId: listBuyerApiKeys
+      summary: List the caller's buyer API keys
+      security: [{ sessionCookie: [] }]
+      responses: { '200': { description: API key metadata only } }
+    post:
+      operationId: createBuyerApiKey
+      summary: Create a buyer API key; the clear-text token is returned once
+      security: [{ sessionCookie: [] }]
+      responses: { '201': { description: API key created, headers: { Location: { schema: { type: string } } } } }
+  /api/buyer-api-keys/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    delete:
+      operationId: revokeBuyerApiKey
+      summary: Revoke a buyer API key
+      security: [{ sessionCookie: [] }]
+      responses: { '200': { description: API key revoked } }
+  /api/public/v1/assets:
+    get:
+      operationId: publicBuyerSearchAssets
+      summary: Search published organization assets with a buyer bearer token
+      security: [{ buyerApiKey: [] }]
+      responses: { '200': { description: Published assets } }
+  /api/public/v1/assets/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: publicBuyerGetAsset
+      summary: Get a published organization asset with a buyer bearer token
+      security: [{ buyerApiKey: [] }]
+      responses: { '200': { description: Published asset }, '404': { description: Asset unavailable } }
+  /api/admin/launch-readiness:
+    get:
+      operationId: getLaunchReadiness
+      summary: Check non-secret email, payout, and production-mode readiness
+      security: [{ sessionCookie: [] }]
+      responses: { '200': { description: Launch readiness report } }
   /api/webhooks/payments:
     post:
       operationId: receivePaymentWebhook
@@ -598,6 +722,10 @@ components:
       type: apiKey
       in: cookie
       name: va_session
+    buyerApiKey:
+      type: http
+      scheme: bearer
+      bearerFormat: Veld buyer API key
     bearerAuth:
       type: http
       scheme: bearer
