@@ -1,6 +1,7 @@
 node_modules/
 dist/
 contracts/reports/
+worker-smoke*.log
 .wrangler/
 .security-dry-run/
 security-dry-run/
