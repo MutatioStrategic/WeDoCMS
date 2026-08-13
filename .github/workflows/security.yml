@@ -104,6 +104,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx wrangler types
+      - run: npx wrangler d1 migrations apply veld-archive --local
       - run: npm run build
       - name: Start isolated local Worker
         shell: bash
@@ -121,6 +122,7 @@ jobs:
             if curl --silent --fail http://127.0.0.1:8787/api/health >/dev/null; then break; fi
             sleep 1
           done
+          curl --silent --fail http://127.0.0.1:8787/api/health >/dev/null
           npm run test:auth
           npm run test:penetration
           npm run test:fuzz
@@ -142,6 +144,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx wrangler types
+      - run: npx wrangler d1 migrations apply veld-archive --local
       - run: npm run build
       - name: Start isolated local Worker
         shell: bash
@@ -173,6 +176,13 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx wrangler types
+      - run: npm run build
       - name: Scan repository for vulnerabilities, secrets, and misconfiguration
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -183,7 +193,7 @@ jobs:
           ignore-unfixed: true
           exit-code: '1'
       - name: Validate Wrangler configuration
-        run: npx --yes wrangler@4.28.0 deploy --dry-run --outdir=security-dry-run
+        run: npx wrangler deploy --dry-run --outdir=security-dry-run
       - name: Check workflow permissions and unsafe patterns
         uses: zizmorcore/zizmor-action@v0.6.2
         with:

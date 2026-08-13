@@ -23,8 +23,8 @@ jobs:
       - run: npm run typecheck
       - run: npm test -- --run
       - run: npm run build
-      - run: npm run test:migrations
-      - run: npm run test:dr
+      - run: pwsh -NoProfile -File scripts/migration-smoke.ps1
+      - run: pwsh -NoProfile -File scripts/dr-restore-smoke.ps1
       - name: Start local Worker for authenticated smoke tests
         shell: bash
         env:
