@@ -1,0 +1,7 @@
+# Security-sensitive paths require review from the repository owner.
+/.github/ @MutatioStrategic
+/docs/security-testing.md @MutatioStrategic
+/src/worker/auth.ts @MutatioStrategic
+/src/worker/security.ts @MutatioStrategic
+/src/worker/index.ts @MutatioStrategic
+/wrangler.jsonc @MutatioStrategic

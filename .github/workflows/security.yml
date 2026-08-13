@@ -1,0 +1,209 @@
+name: Security gates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "23 2 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  threat-model-and-policy:
+    name: Threat model and policy checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require security documentation
+        run: |
+          test -s docs/security-testing.md
+          test -s .github/pull_request_template.md
+          test -s .github/CODEOWNERS
+      - name: Check repository text for accidental private-key material
+        shell: bash
+        run: |
+          if grep -RInE --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=dist \
+            '-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----' .; then
+            echo "Private-key material found in the repository. Rotate it and remove it from history."
+            exit 1
+          fi
+
+  quality-and-sast:
+    name: Quality, SAST, secrets, and SCA
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test -- --run
+      - run: npm run build
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+      - name: Generate CycloneDX SBOM
+        run: npm sbom --sbom-format=cyclonedx --sbom-type=application > sbom.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wedocms-sbom-${{ github.sha }}
+          path: sbom.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Scan source and history for secrets and backdoors
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          queries: security-extended
+      - name: CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:javascript-typescript
+
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          deny-licenses: GPL-3.0-only, GPL-3.0-or-later, AGPL-3.0-only, AGPL-3.0-or-later
+
+  api-auth-and-fuzz:
+    name: API, authorization, and fuzz tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Start isolated local Worker
+        shell: bash
+        env:
+          CHAOS_TEST_TOKEN: ci-chaos-test-token
+        run: |
+          npx wrangler dev --local --port 8787 \
+            --var SESSION_SECRET:ci-session-secret-that-is-long-enough-for-tests \
+            --var PAYMENT_WEBHOOK_SECRET:ci-payment-webhook-secret-that-is-long-enough \
+            --var CHAOS_TEST_TOKEN:ci-chaos-test-token \
+            --var CHAOS_TESTING_ENABLED:true > worker.log 2>&1 &
+          worker_pid=$!
+          trap 'kill "$worker_pid"' EXIT
+          for attempt in $(seq 1 45); do
+            if curl --silent --fail http://127.0.0.1:8787/api/health >/dev/null; then break; fi
+            sleep 1
+          done
+          npm run test:auth
+          npm run test:penetration
+          npm run test:fuzz
+          npm run chaos:uploads
+      - name: Show Worker log on failure
+        if: failure()
+        run: cat worker.log
+
+  dast:
+    name: DAST baseline scan
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Start isolated local Worker
+        shell: bash
+        run: |
+          npx wrangler dev --local --port 8787 \
+            --var SESSION_SECRET:ci-session-secret-that-is-long-enough-for-tests \
+            --var PAYMENT_WEBHOOK_SECRET:ci-payment-webhook-secret-that-is-long-enough > worker.log 2>&1 &
+          worker_pid=$!
+          echo "$worker_pid" > worker.pid
+          for attempt in $(seq 1 45); do
+            if curl --silent --fail http://127.0.0.1:8787/api/health >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          cat worker.log
+          exit 1
+      - name: OWASP ZAP baseline scan
+        uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: http://127.0.0.1:8787
+          fail_action: true
+      - name: Stop local Worker
+        if: always()
+        shell: bash
+        run: if test -f worker.pid; then kill "$(cat worker.pid)" || true; fi
+
+  infrastructure-and-supply-chain:
+    name: Infrastructure and supply-chain scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan repository for vulnerabilities, secrets, and misconfiguration
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+      - name: Validate Wrangler configuration
+        run: npx --yes wrangler@4.28.0 deploy --dry-run --outdir=security-dry-run
+      - name: Check workflow permissions and unsafe patterns
+        uses: zizmorcore/zizmor-action@v0.2.0
+        with:
+          persona: pedantic
+
+  runtime-controls:
+    name: Runtime and release-control checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require least-privilege workflow defaults
+        shell: bash
+        run: |
+          grep -q '^permissions:' .github/workflows/security.yml
+          grep -q 'contents: read' .github/workflows/security.yml
+          if grep -RInE 'CLOUDFLARE_API_TOKEN|STRIPE_SECRET_KEY|PAYMENT_TOKEN' .github/workflows \
+              | grep -v 'secrets\.'; then
+            echo "A production credential appears to be embedded in workflow source."
+            exit 1
+          fi
+      - name: Record reproducibility metadata
+        run: |
+          node --version
+          npm --version
+          sha256sum package-lock.json

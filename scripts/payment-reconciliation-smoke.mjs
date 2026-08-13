@@ -1,0 +1,11 @@
+const baseUrl = (process.env.E2E_BASE_URL ?? "http://127.0.0.1:8787").replace(/\/$/, "");
+const response = await fetch(`${baseUrl}/api/auth/dev-login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role: "admin" }) });
+if (!response.ok) throw new Error(`Admin login failed: ${response.status}`);
+const body = await response.json();
+const cookies = typeof response.headers.getSetCookie === "function" ? response.headers.getSetCookie() : [response.headers.get("set-cookie") ?? ""];
+const cookie = cookies.find((value) => value.startsWith("va_session="))?.split(";", 1)[0];
+const reconciliation = await fetch(`${baseUrl}/api/ops/reconciliation/payments`, { headers: { Cookie: cookie ?? "" } });
+if (!reconciliation.ok) throw new Error(`Payment reconciliation failed: ${reconciliation.status}`);
+const report = await reconciliation.json();
+if (typeof report.discrepancyCount !== "number") throw new Error("Reconciliation report has no discrepancy count");
+console.log(JSON.stringify({ ok: true, discrepancyCount: report.discrepancyCount }, null, 2));

@@ -1,0 +1,120 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "veld-archive-api",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-08-13",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "veld-archive",
+      "database_id": "replace-with-cloudflare-d1-id",
+      "migrations_dir": "./migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "MEDIA_BUCKET",
+      "bucket_name": "veld-archive-media"
+    },
+    {
+      "binding": "MEDIA_DR_BUCKET",
+      "bucket_name": "veld-archive-media-dr"
+    },
+    {
+      "binding": "BACKUP_BUCKET",
+      "bucket_name": "veld-archive-backups-dr"
+    },
+    {
+      "binding": "AUDIT_BUCKET_ZA",
+      "bucket_name": "veld-archive-audit-za"
+    },
+    {
+      "binding": "AUDIT_BUCKET_EU",
+      "bucket_name": "veld-archive-audit-eu",
+      "jurisdiction": "eu"
+    },
+    {
+      "binding": "KYC_BUCKET_ZA",
+      "bucket_name": "veld-archive-kyc-za"
+    },
+    {
+      "binding": "KYC_BUCKET_EU",
+      "bucket_name": "veld-archive-kyc-eu",
+      "jurisdiction": "eu"
+    }
+  ],
+  "analytics_engine_datasets": [
+    {
+      "binding": "OBSERVABILITY",
+      "dataset": "veld_archive_observability"
+    }
+  ],
+  "vectorize": [
+    {
+      "binding": "PHOTO_INDEX",
+      "index_name": "veld-archive-photo-index"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "queue": "veld-archive-photo-enrichment",
+        "binding": "PHOTO_ENRICHMENT_QUEUE"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "veld-archive-r2-events",
+        "max_batch_size": 100,
+        "max_batch_timeout": 5,
+        "max_retries": 5
+      },
+      {
+        "queue": "veld-archive-photo-enrichment",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "veld-archive-photo-enrichment-dlq"
+      }
+    ]
+  },
+  "triggers": {
+    "crons": ["*/15 * * * *"]
+  },
+  "vars": {
+    "APP_ENV": "development",
+    "ALLOWED_ORIGINS": "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8787,http://127.0.0.1:8787",
+    "TURNSTILE_HOSTNAMES": "localhost,127.0.0.1",
+    "DEFAULT_ORGANIZATION_ID": "org-demo",
+    "RATE_LIMIT_WINDOW_SECONDS": "60",
+    "RATE_LIMIT_DEFAULT_PER_WINDOW": "120",
+    "UPLOAD_DAILY_QUOTA_BYTES": "50000000000",
+    "ORG_STORAGE_QUOTA_BYTES": "500000000000",
+    "MEDIA_SCANNER_URL": "",
+    "R2_BUCKET_NAME": "veld-archive-media",
+    "R2_DR_BUCKET_NAME": "veld-archive-media-dr",
+    "BACKUP_BUCKET_NAME": "veld-archive-backups-dr",
+    "CHAOS_TESTING_ENABLED": "false",
+    "UPLOAD_MAX_SIZE_BYTES": "30000000000",
+    "AUDIT_SIGNING_KEY_ID": "audit-ed25519-v1",
+    "AUDIT_RETENTION_DAYS": "2555",
+    "AUDIT_ALLOWED_RESIDENCIES": "za,eu",
+    "KYC_PROVIDER": "replace-with-your-kyc-provider",
+    "OCR_ENABLED": "false",
+    "OCR_MODEL": "@cf/moondream/moondream3.1-9B-A2B",
+    "PHOTO_VISION_MODEL": "@cf/moondream/moondream3.1-9B-A2B",
+    "PHOTO_EMBEDDING_MODEL": "@cf/baai/bge-base-en-v1.5",
+    "PHOTO_INDEX_NAMESPACE": "published-photos-v1",
+    "PAYOUT_MIN_CENTS": "10000"
+  }
+}

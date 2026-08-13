@@ -1,0 +1,47 @@
+{
+  "name": "veld-archive",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:a11y": "node scripts/accessibility-check.mjs",
+    "test:auth": "node scripts/authenticated-smoke.mjs",
+    "test:penetration": "node scripts/penetration-smoke.mjs",
+    "test:fuzz": "node scripts/fuzz-http.mjs",
+    "test:payments": "node scripts/payment-reconciliation-smoke.mjs",
+    "test:migrations": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/migration-smoke.ps1",
+    "test:backup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-backup.ps1",
+    "test:dr": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dr-restore-smoke.ps1",
+    "test:local-smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-local-smoke.ps1",
+    "seed:demo-media": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/seed-demo-media.ps1",
+    "worker:dev": "wrangler dev",
+    "worker:deploy": "wrangler deploy",
+    "backup:d1": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/backup-d1.ps1",
+    "chaos:uploads": "node scripts/chaos-upload.mjs"
+  },
+  "dependencies": {
+    "hono": "^4.7.7",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "zod": "^3.25.67"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
+    "@pact-foundation/pact": "^17.1.2",
+    "@playwright/test": "^1.62.1",
+    "@types/node": "^22.15.21",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.6.0",
+    "openapi-enforcer": "^1.23.0",
+    "typescript": "^5.8.3",
+    "vite": "^7.1.0",
+    "vitest": "^3.2.4",
+    "wrangler": "^4.28.0",
+    "yaml": "^2.9.0"
+  }
+}

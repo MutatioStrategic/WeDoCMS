@@ -1,0 +1,551 @@
+openapi: 3.0.3
+info:
+  title: Veld Archive API
+  version: 0.1.0
+  description: Core API for trusted South African visual discovery, ingestion, rights, and governance.
+servers:
+  - url: https://archive.example.com
+paths:
+  /api/health:
+    get:
+      operationId: getHealth
+      summary: Health check
+      responses:
+        '200':
+          description: Service is available
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /api/auth/session:
+    get:
+      operationId: getSession
+      summary: Return the current browser session
+      responses:
+        '200':
+          description: Authenticated or anonymous session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+  /api/auth/exchange:
+    post:
+      operationId: exchangeIdentityToken
+      summary: Exchange a verified bearer identity token for a session cookie
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExchangeRequest'
+      responses:
+        '200':
+          description: Session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthenticatedSessionResponse'
+        '401':
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/assets:
+    get:
+      operationId: searchAssets
+      summary: Search published assets
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 240, default: '' }
+        - name: kind
+          in: query
+          schema: { type: string, enum: [all, image, video], default: all }
+        - name: location
+          in: query
+          schema: { type: string, maxLength: 80 }
+        - name: status
+          in: query
+          schema: { type: string, enum: [published, needs_review, all], default: published }
+      responses:
+        '200':
+          description: Explainable search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResponse'
+        '400':
+          description: Invalid search query
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    post:
+      operationId: createAsset
+      summary: Create an asset metadata record
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssetCreateRequest'
+      responses:
+        '201':
+          description: Asset created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AssetCreateResponse' }
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: Contributor or editor access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422':
+          description: Metadata or pricing rule failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/notifications:
+    get:
+      operationId: listNotifications
+      summary: List notifications for the current user
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Notifications
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results: { type: array, items: { type: object, additionalProperties: true } }
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/governance/assets/{id}/action:
+    post:
+      operationId: runGovernanceAction
+      summary: Run tagging, correct metadata, approve, or reject an asset
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, minLength: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GovernanceActionRequest' }
+      responses:
+        '200':
+          description: Governance state updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceActionResponse' }
+        '403':
+          description: Contributor or editor access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422':
+          description: Governance rule failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/uploads:
+    post:
+      operationId: createUploadSession
+      summary: Create a direct R2 upload session
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UploadRequest' }
+      responses:
+        '201':
+          description: Short-lived upload URL returned
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadResponse' }
+        '401':
+          description: Contributor authentication required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/uploads/{uploadId}/complete:
+    post:
+      operationId: completeUpload
+      summary: Verify the R2 object and complete ingestion
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: uploadId
+          in: path
+          required: true
+          schema: { type: string, minLength: 1 }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false }
+      responses:
+        '200':
+          description: Upload completed or idempotently confirmed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadCompleteResponse' }
+        '403':
+          description: Upload ownership check failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: Upload session not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/checkout/validate:
+    post:
+      operationId: validateCheckout
+      summary: Validate rights and releases before checkout
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LicenceRequest' }
+      responses:
+        '200':
+          description: Licence validation result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CheckoutValidationResponse' }
+        '404':
+          description: Asset not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422':
+          description: Invalid licence request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/payments/{licenceId}/session:
+    post:
+      operationId: createPaymentSession
+      summary: Create a hosted payment-provider checkout session for a pending licence
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: licenceId
+          in: path
+          required: true
+          schema: { type: string, minLength: 1 }
+      responses:
+        '201':
+          description: Hosted checkout URL returned
+          content:
+            application/json:
+              schema: { type: object, required: [licenceId, provider, checkoutUrl, status], additionalProperties: true }
+        '401':
+          description: Authenticated buyer required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503':
+          description: Payment provider is unavailable or unconfigured
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/webhooks/payments:
+    post:
+      operationId: receivePaymentWebhook
+      summary: Receive a signed payment, refund, or chargeback event
+      parameters:
+        - name: x-payment-signature
+          in: header
+          required: true
+          schema: { type: string, minLength: 1 }
+      responses:
+        '200':
+          description: Event accepted or already processed
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '401':
+          description: Invalid signature
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/security/turnstile:
+    post:
+      operationId: verifyTurnstile
+      summary: Server-side Turnstile verification
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, action]
+              properties:
+                token: { type: string, minLength: 1, maxLength: 2048 }
+                action: { type: string, minLength: 1, maxLength: 64 }
+      responses:
+        '200':
+          description: Verification result
+          content:
+            application/json:
+              schema: { type: object, required: [verified], properties: { verified: { type: boolean }, reason: { type: string } }, additionalProperties: false }
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: va_session
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        code: { type: string }
+        retryAfter: { type: integer, minimum: 0 }
+        quotaBytes: { type: integer, minimum: 1 }
+        uploadId: { type: string }
+        issues:
+          type: array
+          items:
+            type: object
+            required: [path, code]
+            properties:
+              path: { type: array, items: {} }
+              code: { type: string }
+      additionalProperties: true
+    HealthResponse:
+      type: object
+      required: [ok, service, environment]
+      properties:
+        ok: { type: boolean, enum: [true] }
+        service: { type: string, enum: [veld-archive-api] }
+        environment: { type: string }
+      additionalProperties: false
+    SessionUser:
+      type: object
+      required: [id, email, displayName, role, onboardingStatus, organizationId, organizationName, residencyRegion, sessionId, csrfToken]
+      properties:
+        id: { type: string }
+        email: { type: string, format: email }
+        displayName: { type: string }
+        role: { type: string }
+        onboardingStatus: { type: string }
+        organizationId: { type: string }
+        organizationName: { type: string }
+        residencyRegion: { type: string, enum: [za, eu] }
+        sessionId: { type: string }
+        csrfToken: { type: string }
+      additionalProperties: false
+    SessionResponse:
+      oneOf:
+        - type: object
+          required: [authenticated, user]
+          properties:
+            authenticated: { type: boolean, enum: [false] }
+            user: { nullable: true }
+          additionalProperties: false
+        - $ref: '#/components/schemas/AuthenticatedSessionResponse'
+    AuthenticatedSessionResponse:
+      type: object
+      required: [authenticated, user, csrfToken]
+      properties:
+        authenticated: { type: boolean, enum: [true] }
+        user: { $ref: '#/components/schemas/SessionUser' }
+        csrfToken: { type: string }
+      additionalProperties: false
+    ExchangeRequest:
+      type: object
+      properties:
+        organizationId: { type: string, minLength: 1, maxLength: 120 }
+      additionalProperties: false
+    Asset:
+      type: object
+      required: [id, kind, status, title, description, caption, country, province, city, locality, landmark, subjectTags, culturalTags, rightsStatus, modelReleaseStatus, propertyReleaseStatus, authenticityConfidence, humanVerified, contributor, workflowStage, aiTags, curatorNotes]
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [image, video] }
+        status: { type: string, enum: [draft, processing, needs_review, published, rejected, withdrawn] }
+        title: { type: string }
+        description: { type: string }
+        caption: { type: string }
+        country: { type: string }
+        province: { type: string, nullable: true }
+        city: { type: string, nullable: true }
+        locality: { type: string, nullable: true }
+        landmark: { type: string, nullable: true }
+        subjectTags: { type: array, items: { type: string } }
+        culturalTags: { type: array, items: { type: string } }
+        rightsStatus: { type: string, enum: [pending, verified, restricted, editorial_only] }
+        modelReleaseStatus: { type: string, enum: [unknown, not_required, pending, verified] }
+        propertyReleaseStatus: { type: string, enum: [unknown, not_required, pending, verified] }
+        authenticityConfidence: { type: number, minimum: 0, maximum: 1 }
+        aiConfidence: { type: number, minimum: 0, maximum: 1 }
+        humanVerified: { type: boolean }
+        contributor: { type: string }
+        workflowStage: { type: string, enum: [ingestion, ai_tagging, curator_correction, approval] }
+        aiTags: { type: array, items: { type: string } }
+        curatorNotes: { type: string }
+        metadataReviewStatus: { type: string, enum: [reviewed, needs_context, blocked] }
+        metadataReviewNote: { type: string }
+        metadataProvenance: { type: string, enum: [contributor, editor, ai_suggested] }
+        sourceFileName: { type: string, nullable: true }
+        sourceUrl: { type: string, nullable: true }
+        sourceLicense: { type: string, nullable: true }
+        sourceAttribution: { type: string, nullable: true }
+        monetizationModel: { type: string, enum: [membership, individual_license, custom_quote] }
+        licensePriceCents: { type: integer, minimum: 0, nullable: true }
+      additionalProperties: true
+    SearchResponse:
+      type: object
+      required: [query, mode, results, facets]
+      properties:
+        query: { type: string }
+        mode: { type: string, enum: [keyword, semantic-preview] }
+        results: { type: array, items: { $ref: '#/components/schemas/Asset' } }
+        facets:
+          type: array
+          items:
+            type: object
+            required: [label, value, count]
+            properties:
+              label: { type: string }
+              value: { type: string }
+              count: { type: integer, minimum: 0 }
+            additionalProperties: false
+      additionalProperties: false
+    AssetCreateRequest:
+      type: object
+      required: [kind, title]
+      properties:
+        kind: { type: string, enum: [image, video] }
+        title: { type: string, minLength: 3, maxLength: 240 }
+        description: { type: string, maxLength: 4000, default: '' }
+        caption: { type: string, maxLength: 4000, default: '' }
+        province: { type: string, maxLength: 120 }
+        city: { type: string, maxLength: 120 }
+        locality: { type: string, maxLength: 160 }
+        landmark: { type: string, maxLength: 160 }
+        subjectTags: { type: array, maxItems: 50, items: { type: string, minLength: 1, maxLength: 80 } }
+        culturalTags: { type: array, maxItems: 50, items: { type: string, minLength: 1, maxLength: 100 } }
+        rightsStatus: { type: string, enum: [pending, verified, restricted, editorial_only] }
+        modelReleaseStatus: { type: string, enum: [unknown, not_required, pending, verified] }
+        propertyReleaseStatus: { type: string, enum: [unknown, not_required, pending, verified] }
+        monetizationModel: { type: string, enum: [membership, individual_license, custom_quote] }
+        licensePriceCents: { type: integer, minimum: 0, maximum: 100000000, nullable: true }
+      additionalProperties: false
+    AssetCreateResponse:
+      type: object
+      required: [id, status]
+      properties:
+        id: { type: string }
+        status: { type: string, enum: [needs_review] }
+      additionalProperties: false
+    GovernanceActionRequest:
+      type: object
+      required: [action]
+      properties:
+        action: { type: string, enum: [run_ai_tagging, save_correction, approve, reject] }
+        title: { type: string, minLength: 1, maxLength: 180 }
+        caption: { type: string, maxLength: 1000 }
+        subjectTags: { type: array, maxItems: 30, items: { type: string, minLength: 1, maxLength: 60 } }
+        culturalTags: { type: array, maxItems: 30, items: { type: string, minLength: 1, maxLength: 80 } }
+        curatorNotes: { type: string, maxLength: 2000 }
+        rightsStatus: { type: string, enum: [pending, verified, restricted, editorial_only] }
+        modelReleaseStatus: { type: string, enum: [unknown, not_required, pending, verified] }
+        propertyReleaseStatus: { type: string, enum: [unknown, not_required, pending, verified] }
+        aiTags: { type: array, maxItems: 30, items: { type: string, minLength: 1, maxLength: 80 } }
+        monetizationModel: { type: string, enum: [membership, individual_license, custom_quote] }
+        licensePriceCents: { type: integer, minimum: 0, maximum: 100000000, nullable: true }
+      additionalProperties: false
+    GovernanceActionResponse:
+      type: object
+      required: [ok, assetId, stage, status, indexing]
+      properties:
+        ok: { type: boolean, enum: [true] }
+        assetId: { type: string }
+        stage: { type: string, enum: [ai_tagging, curator_correction, approval] }
+        status: { type: string, enum: [needs_review, published, rejected] }
+        indexing: { type: string }
+      additionalProperties: false
+    UploadRequest:
+      type: object
+      required: [filename, contentType, sizeBytes]
+      properties:
+        filename: { type: string, minLength: 1, maxLength: 180 }
+        contentType: { type: string, pattern: '^(image|video)/' }
+        sizeBytes: { type: integer, minimum: 1, maximum: 30000000000 }
+        assetId: { type: string }
+      additionalProperties: false
+    UploadResponse:
+      type: object
+      required: [uploadId, objectKey, strategy, uploadUrl, expiresInSeconds, message]
+      properties:
+        uploadId: { type: string }
+        objectKey: { type: string }
+        strategy: { type: string, enum: [r2-presigned-put] }
+        uploadUrl: { type: string, format: uri }
+        expiresInSeconds: { type: integer, minimum: 1 }
+        message: { type: string }
+      additionalProperties: false
+    UploadCompleteResponse:
+      type: object
+      required: [uploadId, status]
+      properties:
+        uploadId: { type: string }
+        assetId: { type: string }
+        objectKey: { type: string }
+        status: { type: string, enum: [uploaded] }
+        idempotent: { type: boolean }
+        enrichment: { type: string }
+        etag: { type: string }
+      additionalProperties: false
+    LicenceRequest:
+      type: object
+      required: [assetId, licenceType, territory, durationDays]
+      properties:
+        assetId: { type: string, minLength: 1 }
+        licenceType: { type: string, enum: [editorial, commercial, advertising, social, broadcast, exclusive] }
+        territory: { type: string, minLength: 1, maxLength: 80 }
+        durationDays: { type: integer, minimum: 1, maximum: 3650 }
+      additionalProperties: false
+    CheckoutValidationResponse:
+      type: object
+      required: [assetId, priceCents, currency, monetizationModel, allowed, checks, blockingReasons]
+      properties:
+        assetId: { type: string }
+        priceCents: { type: integer, minimum: 0, nullable: true }
+        currency: { type: string, enum: [ZAR] }
+        monetizationModel: { type: string, enum: [membership, individual_license, custom_quote] }
+        allowed: { type: boolean }
+        checks: { type: array, items: { type: object, required: [label, passed, detail], additionalProperties: false } }
+        blockingReasons: { type: array, items: { type: string } }
+      additionalProperties: true

@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.wrangler/
+.security-dry-run/
+security-dry-run/
+.dev.vars
+.env
+.backups/
+*.sql.gz
+fixtures/demo-media/
+worker-configuration.d.ts

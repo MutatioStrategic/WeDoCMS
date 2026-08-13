@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test -- --run
+      - run: npm run build
+      - run: npm run test:migrations
+      - run: npm run test:dr
+      - name: Start local Worker for authenticated smoke tests
+        shell: bash
+        env:
+          SESSION_SECRET: ci-session-secret-that-is-long-enough-for-tests
+        run: |
+          npx wrangler dev --local --port 8787 --var SESSION_SECRET:ci-session-secret-that-is-long-enough-for-tests --var PAYMENT_WEBHOOK_SECRET:ci-payment-webhook-secret-that-is-long-enough > worker.log 2>&1 &
+          worker_pid=$!
+          trap 'kill $worker_pid' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --silent --fail http://127.0.0.1:8787/api/health >/dev/null; then break; fi
+            sleep 1
+          done
+          npm run test:auth
+          npm run test:penetration
+          npm run test:payments
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:a11y
