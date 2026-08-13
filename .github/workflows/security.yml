@@ -165,7 +165,7 @@ jobs:
           target: http://127.0.0.1:8787
           fail_action: true
           allow_issue_writing: false
-          cmd_options: '-l FAIL'
+          cmd_options: '-l FAIL -I'
       - name: Stop local Worker
         if: always()
         shell: bash
