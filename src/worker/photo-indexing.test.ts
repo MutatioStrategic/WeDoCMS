@@ -2,12 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildPhotoSearchDocument,
   classifyVisionResult,
+  normalizeVisionResult,
   mergeHybridSearchRows,
   parseVisionMetadata,
   preparePhotoForVision,
   photoJobMatchesAsset,
   enqueuePhotoJob,
   replayPhotoJob,
+  requeuePhotoEnrichment,
   type PhotoPipelineBindings,
 } from "./photo-indexing";
 
@@ -27,6 +29,22 @@ describe("photo AI indexing", () => {
     expect(metadata.confidence).toBe(0.88);
     expect(metadata.locationType).toBe("market_scene");
     expect(metadata.primaryCategory).toBe("food");
+  });
+
+  it("normalizes Workers AI response wrappers before classifying metadata", () => {
+    const wrapped = { result: { answer: JSON.stringify({
+      description: "A dog standing outdoors on a grassy field",
+      locationType: "rural_landscape",
+      primaryCategory: "nature",
+      sceneAttributes: ["outdoor", "landscape"],
+      confidence: 0.8,
+      fieldConfidences: { description: 0.8, locationType: 0.8, primaryCategory: 0.8 },
+      imageQuality: "readable",
+      textReadability: "no_text",
+      detectedLanguage: "none",
+    }) } };
+    expect(normalizeVisionResult(wrapped)).toEqual(expect.any(String));
+    expect(classifyVisionResult(wrapped).metadata.description).toContain("dog standing outdoors");
   });
 
   it("routes malformed, low-confidence, unreadable, and unsupported-language output to review", () => {
@@ -91,6 +109,20 @@ describe("photo AI indexing", () => {
     const replayed = await replayPhotoJob({ DB: db, PHOTO_ENRICHMENT_QUEUE: queue } as unknown as PhotoPipelineBindings, "enrich-job-1");
     expect(replayed).toBeNull();
     expect(queue.send).not.toHaveBeenCalled();
+  });
+
+  it("requeues an explicit admin re-enrichment for the same upload revision", async () => {
+    const statements = [
+      { id: "enrich-job-1", asset_id: "asset-1", operation: "enrich", status: "needs_review", asset_revision: 1, source_etag: "etag-1" },
+      { kind: "image", status: "needs_review", asset_revision: 1, source_etag: "etag-1" },
+    ];
+    const run = vi.fn(async () => ({ meta: { changes: 1 } }));
+    const db = { prepare: vi.fn(() => ({ bind: vi.fn(() => ({ first: vi.fn(async () => statements.shift()), run })) })) };
+    const queue = { send: vi.fn() };
+    await expect(requeuePhotoEnrichment({ DB: db, PHOTO_ENRICHMENT_QUEUE: queue } as unknown as PhotoPipelineBindings, "enrich-job-1"))
+      .resolves.toBe("enrich-job-1");
+    expect(run).toHaveBeenCalled();
+    expect(queue.send).toHaveBeenCalledWith(expect.objectContaining({ jobId: "enrich-job-1", operation: "enrich" }));
   });
 
   it("resizes oversized private R2 images before sending them to AI", async () => {

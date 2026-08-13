@@ -59,6 +59,7 @@ export const assetSchema = z.object({
   contributor: z.string(),
   workflowStage: z.enum(["ingestion", "ai_tagging", "curator_correction", "approval"]),
   aiTags: z.array(z.string()),
+  aiSuggestedMetadata: z.record(z.string(), z.unknown()).optional(),
   visualLocationType: z.enum(["urban_street", "coastal_landscape", "market_scene", "indoor", "residential", "rural_landscape", "industrial", "event", "transport", "nature", "sports", "food", "other", "unknown"]).optional(),
   primaryCategory: z.enum(["people", "lifestyle", "travel", "nature", "architecture", "food", "business", "transport", "arts_culture", "sport", "news_editorial", "objects", "other"]).optional(),
   sceneAttributes: z.array(z.string()).optional(),

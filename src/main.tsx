@@ -27,7 +27,7 @@ type SessionUser = { id: string; email: string; displayName: string; role: strin
 type ApprovalLedgerEntry = {
   id: string;
   category: "user_account" | "image";
-  source: "signed_audit" | "workflow_event";
+  source: "signed_audit" | "workflow_event" | "r2_data_catalog";
   occurredAt: string;
   action: string;
   decision: string;
@@ -37,7 +37,14 @@ type ApprovalLedgerEntry = {
   streamId: string | null;
   sequence: number | null;
   notes: string | null;
-  integrity: { status: "verified" | "failed" | "legacy"; hashValid: boolean | null; signatureValid: boolean | null; hash: string | null; r2Key: string | null };
+  integrity: { status: "verified" | "failed" | "legacy" | "catalog"; hashValid: boolean | null; signatureValid: boolean | null; hash: string | null; r2Key: string | null };
+};
+
+type AuditAnalyticsConnectors = {
+  pipeline: "configured" | "not_configured";
+  r2DataCatalog: "configured" | "not_configured";
+  table: string;
+  catalogSearch?: "ready" | "not_configured" | "unavailable";
 };
 
 function isJsonResponse(response: Response): boolean {
@@ -639,16 +646,21 @@ function AdminLedgerWorkspace({ api, onNotice }: { api: (path: string, init?: Re
   const [entries, setEntries] = useState<ApprovalLedgerEntry[]>([]);
   const [summary, setSummary] = useState({ total: 0, userAccount: 0, image: 0, signedAudit: 0, legacyWorkflow: 0, verifiedIntegrity: 0, failedIntegrity: 0 });
   const [state, setState] = useState<"loading" | "ready" | "unavailable">("loading");
+  const [search, setSearch] = useState("");
+  const [searchResults, setSearchResults] = useState<ApprovalLedgerEntry[]>([]);
+  const [searchState, setSearchState] = useState<"idle" | "loading" | "ready" | "unavailable">("idle");
+  const [connectors, setConnectors] = useState<AuditAnalyticsConnectors | null>(null);
 
   useEffect(() => {
     let active = true;
     setState("loading");
     api(`/api/admin/approval-ledger?category=${category}&limit=250`)
-      .then((response) => readJson<{ summary: typeof summary; results: ApprovalLedgerEntry[] }>(response, "Approval ledger unavailable"))
+      .then((response) => readJson<{ summary: typeof summary; results: ApprovalLedgerEntry[]; analytics?: AuditAnalyticsConnectors }>(response, "Approval ledger unavailable"))
       .then((data) => {
         if (!active) return;
         setSummary(data.summary);
         setEntries(data.results);
+        if (data.analytics) setConnectors(data.analytics);
         setState("ready");
       })
       .catch(() => {
@@ -659,6 +671,22 @@ function AdminLedgerWorkspace({ api, onNotice }: { api: (path: string, init?: Re
       });
     return () => { active = false; };
   }, [api, category, onNotice]);
+
+  const runAuditSearch = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setSearchState("loading");
+    try {
+      const query = search.trim() ? `?q=${encodeURIComponent(search.trim())}&limit=100` : "?limit=100";
+      const data = await readJson<{ results: ApprovalLedgerEntry[]; connectors: AuditAnalyticsConnectors }>(await api(`/api/admin/analytics/audit-search${query}`), "Audit search unavailable");
+      setSearchResults(data.results);
+      setConnectors(data.connectors);
+      setSearchState("ready");
+    } catch {
+      setSearchResults([]);
+      setSearchState("unavailable");
+      onNotice("The cross-system audit search is unavailable. The live D1 ledger remains available below.");
+    }
+  };
 
   const filters = [
     { value: "all" as const, label: "All events", count: summary.total },
@@ -684,6 +712,23 @@ function AdminLedgerWorkspace({ api, onNotice }: { api: (path: string, init?: Re
       <span className={`ledger-integrity ${summary.failedIntegrity ? "failed" : "verified"}`}>{summary.failedIntegrity ? `${summary.failedIntegrity} integrity issue${summary.failedIntegrity === 1 ? "" : "s"}` : "Signed records verified"}</span>
     </div>
 
+    <section className="ledger-search-panel" aria-labelledby="ledger-search-title">
+      <div className="ledger-search-heading"><div><span className="section-kicker">OWNER / CEO SEARCH</span><h2 id="ledger-search-title">Search across the <em>audit system.</em></h2><p>Searches live D1 audit records and, when configured, the redacted R2 Data Catalog copy. Catalog rows are analytics copies, not replacement proof.</p></div></div>
+      <form className="ledger-search-form" onSubmit={runAuditSearch}>
+        <label htmlFor="ledger-audit-search">Search action, asset, actor, resource, or redacted event context</label>
+        <div><input id="ledger-audit-search" value={search} onChange={(event) => setSearch(event.target.value)} maxLength={120} autoComplete="off" /><button type="submit" disabled={searchState === "loading"}>{searchState === "loading" ? "Searching..." : "Search system"}</button></div>
+      </form>
+      <div className="ledger-connectors" aria-label="Audit connector status">
+        <span>D1 live <strong>connected</strong></span>
+        <span>Pipeline <strong>{connectors?.pipeline ?? "not_configured"}</strong></span>
+        <span>R2 Data Catalog <strong>{connectors?.catalogSearch === "unavailable" ? "unavailable" : connectors?.r2DataCatalog ?? "not_configured"}</strong></span>
+        {connectors?.table && <span>Table <strong>{connectors.table}</strong></span>}
+      </div>
+      {searchState === "unavailable" && <div className="empty-state" role="alert">Cross-system search could not be completed. Retry after checking the Worker connector configuration.</div>}
+      {searchState === "ready" && !searchResults.length && <div className="empty-state">No audit records matched that search.</div>}
+      {searchState === "ready" && searchResults.length > 0 && <div className="ledger-search-results" aria-live="polite"><span className="section-kicker">{searchResults.length} MATCHES</span>{searchResults.map((entry) => <LedgerRow key={`search:${entry.source}:${entry.id}`} entry={entry} />)}</div>}
+    </section>
+
     <section className="ledger-list" aria-live="polite">
       {state === "loading" && <div className="empty-state" role="status">Loading approval ledger...</div>}
       {state === "unavailable" && <div className="empty-state">Approval records could not be loaded. Check the Worker API, D1 migrations, and admin session.</div>}
@@ -695,7 +740,7 @@ function AdminLedgerWorkspace({ api, onNotice }: { api: (path: string, init?: Re
 
 function LedgerRow({ entry }: { entry: ApprovalLedgerEntry }) {
   const date = new Intl.DateTimeFormat("en-ZA", { dateStyle: "medium", timeStyle: "short" }).format(new Date(entry.occurredAt));
-  const proof = entry.integrity.status === "verified" ? "Signed proof verified" : entry.integrity.status === "failed" ? "Integrity check failed" : "Legacy workflow record";
+  const proof = entry.integrity.status === "verified" ? "Signed proof verified" : entry.integrity.status === "failed" ? "Integrity check failed" : entry.integrity.status === "catalog" ? "R2 catalog analytics copy" : "Legacy workflow record";
   return <article className={`ledger-row ${entry.category} ${entry.integrity.status}`}>
     <div className="ledger-row-mark" aria-hidden="true">{entry.category === "image" ? "IMG" : "USR"}</div>
     <div className="ledger-row-main">
@@ -1161,7 +1206,10 @@ function ContributorWorkspace({ api, onNotice }: { api: (path: string, init?: Re
     setUploadProgress(0);
     setUploadError("");
     try {
-      const sessionResponse = await api("/api/uploads", { method: "POST", body: JSON.stringify({ filename: uploadFile.name, contentType: uploadFile.type, sizeBytes: uploadFile.size, assetId }) });
+      const digest = await crypto.subtle.digest("SHA-256", await uploadFile.arrayBuffer());
+      const sha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+      const idempotencyKey = `asset-upload:${assetId}:${sha256}`;
+      const sessionResponse = await api("/api/uploads", { method: "POST", body: JSON.stringify({ filename: uploadFile.name, contentType: uploadFile.type, sizeBytes: uploadFile.size, assetId, idempotencyKey, sha256 }) });
       const session = await sessionResponse.json() as { uploadUrl?: string; uploadId: string };
       if (!sessionResponse.ok || !session.uploadUrl) throw new Error("R2 is not configured");
       setPendingUpload({ assetId, uploadUrl: session.uploadUrl, uploadId: session.uploadId });

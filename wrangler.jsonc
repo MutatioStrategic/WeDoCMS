@@ -122,6 +122,9 @@
     "STREAM_CUSTOMER_CODE": "",
     "STREAM_PUBLIC_PLAYBACK_ENABLED": "false",
     "R2_BUCKET_NAME": "veld-archive-media",
+    "R2_ANALYTICS_BUCKET": "veld-archive-analytics",
+    "R2_ANALYTICS_NAMESPACE": "audit",
+    "R2_ANALYTICS_TABLE": "events",
     "R2_ACCOUNT_ID": "37e92dc58245d6eab6517a916bd4d9d6",
     "R2_DR_BUCKET_NAME": "veld-archive-media-dr",
     "BACKUP_BUCKET_NAME": "veld-archive-backups-dr",
@@ -137,7 +140,7 @@
     "PHOTO_EMBEDDING_MODEL": "@cf/baai/bge-base-en-v1.5",
     "PHOTO_INDEX_NAMESPACE": "published-photos-v1",
     "PHOTO_AI_SOURCE_ORIGIN": "https://veld-archive-api.blewisorlando.workers.dev",
-    "PAYOUT_MIN_CENTS": "10000"
-    ,"PHOTOGRAPHER_SUBSCRIPTION_PRICE_CENTS": "10000"
+    "PAYOUT_MIN_CENTS": "10000",
+    "PHOTOGRAPHER_SUBSCRIPTION_PRICE_CENTS": "10000"
   }
 }

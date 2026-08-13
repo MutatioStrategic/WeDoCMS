@@ -42,6 +42,9 @@ type AssetRow = Record<string, unknown> & {
   asset_revision: number;
   approved_revision: number | null;
   vector_index_id: string | null;
+  ai_metadata_suggestion_json?: string | null;
+  ai_metadata_suggestion_revision?: number | null;
+  ai_metadata_suggestion_etag?: string | null;
 };
 
 export type VisionMetadata = {
@@ -276,8 +279,28 @@ function parseVisionObject(value: unknown): { metadata: VisionMetadata; malforme
   };
 }
 
+function unwrapVisionResult(value: unknown, depth = 0): unknown {
+  if (depth > 4 || value == null) return value;
+  if (typeof value === "string") return value.trim();
+  if (typeof value !== "object" || Array.isArray(value)) return value;
+  const record = value as Record<string, unknown>;
+  const metadataKeys = ["description", "visibleText", "visible_text", "subjectTags", "subject_tags", "locationType", "location_type", "primaryCategory", "primary_category"];
+  if (metadataKeys.some((key) => key in record)) return record;
+  for (const key of ["answer", "response", "output", "result", "data"]) {
+    if (record[key] !== undefined && record[key] !== null) {
+      const nested = unwrapVisionResult(record[key], depth + 1);
+      if (nested !== "") return nested;
+    }
+  }
+  return record;
+}
+
+export function normalizeVisionResult(value: unknown): unknown {
+  return unwrapVisionResult(value);
+}
+
 export function classifyVisionResult(value: unknown): VisionClassification {
-  const { metadata, malformed } = parseVisionObject(value);
+  const { metadata, malformed } = parseVisionObject(normalizeVisionResult(value));
   const issues: string[] = [];
   if (malformed) issues.push("malformed_json");
   if (metadata.description.length < 12) issues.push("missing_description");
@@ -434,6 +457,37 @@ export async function replayPhotoJob(env: PhotoPipelineBindings, jobId: string):
   return job.id;
 }
 
+function cachedVisionMetadata(asset: AssetRow, job: PhotoEnrichmentJob): VisionMetadata | null {
+  if (Number(asset.ai_metadata_suggestion_revision ?? 0) !== job.assetRevision
+    || String(asset.ai_metadata_suggestion_etag ?? "") !== String(job.sourceEtag ?? "")) return null;
+  try {
+    const value = JSON.parse(String(asset.ai_metadata_suggestion_json ?? "{}"));
+    if (!value || typeof value !== "object" || Array.isArray(value) || !("description" in value)) return null;
+    return classifyVisionResult(value).metadata;
+  } catch {
+    return null;
+  }
+}
+
+export async function requeuePhotoEnrichment(env: PhotoPipelineBindings, jobId: string): Promise<string | null> {
+  if (!env.PHOTO_ENRICHMENT_QUEUE) return null;
+  const job = await env.DB.prepare(`SELECT id, asset_id, operation, status, asset_revision, source_etag
+    FROM photo_ai_jobs WHERE id = ?`).bind(jobId)
+    .first<{ id: string; asset_id: string; operation: PhotoJobOperation; status: string; asset_revision: number; source_etag: string | null }>();
+  if (!job || job.operation !== "enrich" || !["completed", "needs_review", "failed", "dead_lettered", "skipped"].includes(job.status)) return null;
+  const asset = await env.DB.prepare(`SELECT kind, status, asset_revision, source_etag FROM assets WHERE id = ?`)
+    .bind(job.asset_id).first<{ kind: string; status: string; asset_revision: number; source_etag: string | null }>();
+  if (!asset || asset.kind !== "image" || asset.status === "published" || !photoJobMatchesAsset({ assetRevision: job.asset_revision, sourceEtag: job.source_etag }, asset)) return null;
+  await env.DB.prepare(`UPDATE photo_ai_jobs SET status = 'queued', attempts = 0, error_class = NULL,
+    last_error = NULL, next_attempt_at = NULL, dead_lettered_at = NULL, requested_at = CURRENT_TIMESTAMP,
+    updated_at = CURRENT_TIMESTAMP WHERE id = ?`).bind(job.id).run();
+  await env.PHOTO_ENRICHMENT_QUEUE.send({
+    type: "photo.enrich", jobId: job.id, assetId: job.asset_id, operation: "enrich",
+    assetRevision: job.asset_revision, sourceEtag: job.source_etag,
+  });
+  return job.id;
+}
+
 export async function retryQueuedPhotoJobs(env: PhotoPipelineBindings): Promise<number> {
   if (!env.PHOTO_ENRICHMENT_QUEUE) return 0;
   await env.DB.batch([
@@ -504,21 +558,32 @@ async function enrichPhoto(env: PhotoPipelineBindings, job: PhotoEnrichmentJob, 
     await markStale(env, job, attempt, "asset-revision-or-source-changed");
     return;
   }
-  const sourceKey = asset.preview_key || asset.original_key;
+  // Vision enrichment must inspect the private original. Generated watermarked
+  // WebP previews are delivery artifacts and can be unreadable to some vision
+  // models; they remain the correct source for browser previews only.
+  const sourceKey = asset.original_key || asset.preview_key;
   if (asset.kind !== "image" || !sourceKey) {
     await markJob(env, job.jobId, "skipped", { error: "not-an-indexable-image", errorClass: "permanent" });
     return;
   }
-  if (!env.AI) throw new PhotoPipelineError("AI binding is not configured for photo enrichment", "retryable");
-  const object = await env.MEDIA_BUCKET.get(sourceKey);
-  if (!object) throw new PhotoPipelineError("Photo object was not found in R2", "retryable");
-  const contentType = object.httpMetadata?.contentType?.toLowerCase() ?? "image/jpeg";
-  if (!contentType.startsWith("image/")) throw new PhotoPipelineError("Photo object is not an image", "permanent");
-  const preparedImage = await preparePhotoForVision(env, sourceKey, job.jobId, object, contentType);
-  const image = preparedImage.bytes;
-  const aiImage = preparedImage.aiInput ?? `data:${preparedImage.contentType};base64,${base64Bytes(image ?? new Uint8Array())}`;
-  const model = env.PHOTO_VISION_MODEL ?? DEFAULT_VISION_MODEL;
-  const vision = await env.AI.run(model, {
+  const cached = cachedVisionMetadata(asset, job);
+  let preparedImage: PreparedVisionImage = { bytes: null, contentType: "image/jpeg", transformed: false, aiInput: null };
+  let image: Uint8Array | null = null;
+  let model = env.PHOTO_VISION_MODEL ?? DEFAULT_VISION_MODEL;
+  let vision: unknown = cached;
+  let classified: VisionClassification;
+  if (cached) {
+    classified = classifyVisionResult(cached);
+  } else {
+    if (!env.AI) throw new PhotoPipelineError("AI binding is not configured for photo enrichment", "retryable");
+    const object = await env.MEDIA_BUCKET.get(sourceKey);
+    if (!object) throw new PhotoPipelineError("Photo object was not found in R2", "retryable");
+    const contentType = object.httpMetadata?.contentType?.toLowerCase() ?? "image/jpeg";
+    if (!contentType.startsWith("image/")) throw new PhotoPipelineError("Photo object is not an image", "permanent");
+    preparedImage = await preparePhotoForVision(env, sourceKey, job.jobId, object, contentType);
+    image = preparedImage.bytes;
+    const aiImage = preparedImage.aiInput ?? `data:${preparedImage.contentType};base64,${base64Bytes(image ?? new Uint8Array())}`;
+    vision = await env.AI.run(model, {
     task: "query",
     image: aiImage,
     question: `Return JSON only using schema ${PHOTO_SCHEMA_VERSION}: {"description":"factual observable description","visibleText":"all legible text or empty","subjectTags":["observable tags"],"locationType":"urban_street|coastal_landscape|market_scene|indoor|residential|rural_landscape|industrial|event|transport|nature|sports|food|other|unknown","primaryCategory":"people|lifestyle|travel|nature|architecture|food|business|transport|arts_culture|sport|news_editorial|objects|other","sceneAttributes":["indoor|outdoor|daylight|night|sunrise_sunset|people_present|no_people|crowd|single_person|group|vehicle|building|landscape|close_up|wide_view|aerial|food_present|text_present|copy_space"],"detectedLanguage":"ISO 639-1/3 code, none if no text","textReadability":"clear|partial|unreadable|no_text","imageQuality":"readable|poor|unreadable","confidence":0.0,"fieldConfidences":{"description":0.0,"visibleText":0.0,"locationType":0.0,"primaryCategory":0.0,"sceneAttributes":0.0}}. Classify only the visible setting type; never assert country, province, city, locality, landmark, identity, ethnicity, race, religion, culture, intent, legality, authenticity, or rights from pixels. If uncertain use unknown/other and lower confidence.`,
@@ -526,8 +591,15 @@ async function enrichPhoto(env: PhotoPipelineBindings, job: PhotoEnrichmentJob, 
     stream: false,
     temperature: 0,
     max_tokens: 900,
-  }) as { answer?: string; description?: string };
-  const classified = classifyVisionResult(vision.answer ?? vision.description ?? vision);
+    });
+    classified = classifyVisionResult(vision);
+    // This is the durable AI checkpoint. It intentionally happens before the
+    // final metadata event/job update so retries never spend another token on
+    // a response that was already received from the model.
+    await env.DB.prepare(`UPDATE assets SET ai_metadata_suggestion_json = ?, ai_metadata_suggestion_revision = ?, ai_metadata_suggestion_etag = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND asset_revision = ? AND COALESCE(source_etag, '') = COALESCE(?, '') AND status <> 'published'`)
+      .bind(JSON.stringify(classified.metadata), job.assetRevision, job.sourceEtag, asset.id, job.assetRevision, job.sourceEtag).run();
+  }
   const metadata = classified.metadata;
   const current = await getAsset(env, job.assetId);
   if (!current || !photoJobMatchesAsset(job, current) || current.status === "published") {
@@ -544,7 +616,7 @@ async function enrichPhoto(env: PhotoPipelineBindings, job: PhotoEnrichmentJob, 
       description = CASE WHEN ? = 1 AND trim(description) = '' THEN ? ELSE description END,
       caption = CASE WHEN ? = 1 AND trim(caption) = '' THEN ? ELSE caption END,
       subject_tags = CASE WHEN ? = 1 THEN ? ELSE subject_tags END,
-      ai_tags = ?, ocr_text = ?, visual_location_type = ?, primary_category = ?, scene_attributes = ?,
+      ai_tags = ?, ai_metadata_suggestion_json = ?, ocr_text = ?, visual_location_type = ?, primary_category = ?, scene_attributes = ?,
       detected_language = ?, text_readability = ?, ocr_confidence = ?, ai_field_confidences = ?,
       enrichment_validation_json = ?, ai_confidence = ?, enriched_revision = ?,
       metadata_review_status = 'needs_context', metadata_review_note = ?, metadata_provenance = 'ai_suggested',
@@ -554,7 +626,7 @@ async function enrichPhoto(env: PhotoPipelineBindings, job: PhotoEnrichmentJob, 
     classified.accepted ? 1 : 0, metadata.description,
     classified.accepted ? 1 : 0, metadata.description,
     classified.accepted ? 1 : 0, JSON.stringify(mergedTags),
-    JSON.stringify(metadata.subjectTags), metadata.visibleText, metadata.locationType, metadata.primaryCategory,
+    JSON.stringify(metadata.subjectTags), JSON.stringify(metadata), metadata.visibleText, metadata.locationType, metadata.primaryCategory,
     JSON.stringify(metadata.sceneAttributes), metadata.detectedLanguage, metadata.textReadability,
     metadata.fieldConfidences.visibleText ?? null, JSON.stringify(metadata.fieldConfidences),
     JSON.stringify(classified.validation), metadata.confidence, job.assetRevision, reviewNote,
@@ -567,7 +639,7 @@ async function enrichPhoto(env: PhotoPipelineBindings, job: PhotoEnrichmentJob, 
   await env.DB.prepare("INSERT INTO metadata_events (id, asset_id, actor_id, event_type, payload) VALUES (?, ?, ?, 'ai_tagged', ?)")
     .bind(crypto.randomUUID(), asset.id, asset.owner_id, JSON.stringify({ source: "photo-enrichment", model, promptVersion: PHOTO_PROMPT_VERSION, schemaVersion: PHOTO_SCHEMA_VERSION, assetRevision: job.assetRevision, accepted: classified.accepted, issues: classified.issues, geographicLocationInferred: false, imageTransformedForAi: preparedImage.transformed })).run();
   await markJob(env, job.jobId, classified.accepted ? "completed" : "needs_review", classified.accepted ? {} : { error: classified.issues.join(","), errorClass: "validation" });
-  await recordProvenance(env, job, attempt, classified.accepted ? "completed" : "needs_review", { model, errorClass: classified.accepted ? undefined : "validation", result: metadata, validation: { ...classified.validation, imageInput: { transformed: preparedImage.transformed, mode: preparedImage.aiInput ? "public-url" : "data-uri", bytes: image?.byteLength ?? null } } });
+  await recordProvenance(env, job, attempt, classified.accepted ? "completed" : "needs_review", { model, errorClass: classified.accepted ? undefined : "validation", result: metadata, validation: { ...classified.validation, imageInput: { transformed: preparedImage.transformed, mode: preparedImage.aiInput ? "public-url" : "data-uri", bytes: image?.byteLength ?? null }, modelResponse: normalizeVisionResult(vision) } });
   recordMetric(env, "photo_ai_enrichment_completed", trace, 1, [classified.accepted ? "accepted" : "needs-review", metadata.visibleText ? "ocr-hit" : "ocr-empty", preparedImage.transformed ? "resized" : "original"]);
   logEvent("info", "photo.ai_enrichment.completed", trace, { assetId: asset.id, jobId: job.jobId, revision: job.assetRevision, accepted: classified.accepted, issueCount: classified.issues.length, imageTransformedForAi: preparedImage.transformed, imageInputMode: preparedImage.aiInput ? "public-url" : "data-uri", imageBytes: image?.byteLength ?? null });
 }
@@ -683,10 +755,11 @@ export async function processPhotoJob(env: PhotoPipelineBindings, job: PhotoEnri
     const message = error instanceof Error ? error.message : "photo-job-failed";
     const errorClass: PhotoJobErrorClass = error instanceof PhotoPipelineError ? error.errorClass : "retryable";
     const deadLettered = errorClass === "permanent" || attempt >= MAX_ATTEMPTS;
+    const quotaCooldown = /4006|daily free allocation|neurons/i.test(message);
     await markJob(env, job.jobId, deadLettered ? "dead_lettered" : "failed", {
       error: message,
       errorClass,
-      nextAttemptMinutes: deadLettered ? undefined : Math.min(60, 2 ** attempt),
+      nextAttemptMinutes: deadLettered ? undefined : quotaCooldown ? 24 * 60 : Math.min(60, 2 ** attempt),
     });
     if (job.operation === "sync_index") {
       await env.DB.prepare("UPDATE assets SET vector_index_status = 'error', index_terminal_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND asset_revision = ?")

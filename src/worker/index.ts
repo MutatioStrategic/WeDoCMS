@@ -25,12 +25,19 @@ import {
   type AuditBindings,
   type StoredAuditEvent,
 } from "./audit";
+import {
+  auditAnalyticsStatus,
+  searchR2AuditCatalog,
+  type AuditAnalyticsConfig,
+  type AuditCatalogRow,
+} from "./audit-analytics";
 import { IntegrationContainer } from "../integrations";
 import { canonicalContract, ocrValidation, sanitizeOcrResult, sha256Hex } from "./seller-workflow";
 import {
   enqueuePhotoJob,
   processPhotoJob,
   replayPhotoJob,
+  requeuePhotoEnrichment,
   retryQueuedPhotoJobs,
   searchPhotoIndex,
   type PhotoEnrichmentJob,
@@ -74,6 +81,11 @@ type SecretBindings = {
   R2_ACCESS_KEY_ID?: string;
   R2_SECRET_ACCESS_KEY?: string;
   R2_BUCKET_NAME?: string;
+  R2_ANALYTICS_BUCKET?: string;
+  R2_ANALYTICS_NAMESPACE?: string;
+  R2_ANALYTICS_TABLE?: string;
+  R2_SQL_ENDPOINT?: string;
+  R2_SQL_AUTH_TOKEN?: string;
   TURNSTILE_SECRET?: string;
   TURNSTILE_HOSTNAMES?: string;
   STREAM_WEBHOOK_SECRET?: string;
@@ -491,6 +503,17 @@ async function writeVideoPoster(env: Bindings, originalKey: string, previousPost
   return key;
 }
 
+async function listR2Keys(bucket: R2Bucket, prefix: string): Promise<string[]> {
+  const keys: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await bucket.list({ prefix, limit: 1000, ...(cursor ? { cursor } : {}) });
+    keys.push(...page.objects.map((object) => object.key));
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+  return keys;
+}
+
 const assetRowToDomain = (row: Record<string, unknown>, env?: Pick<SecretBindings, "STREAM_CUSTOMER_CODE" | "STREAM_PUBLIC_PLAYBACK_ENABLED">): Asset => ({
   id: String(row.id),
   kind: row.kind as Asset["kind"],
@@ -514,6 +537,7 @@ const assetRowToDomain = (row: Record<string, unknown>, env?: Pick<SecretBinding
   contributor: String(row.contributor ?? "Veld Studio"),
   workflowStage: (row.workflow_stage as Asset["workflowStage"]) ?? "ingestion",
   aiTags: JSON.parse(String(row.ai_tags ?? "[]")) as string[],
+  aiSuggestedMetadata: JSON.parse(String(row.ai_metadata_suggestion_json ?? "{}")) as Asset["aiSuggestedMetadata"],
   visualLocationType: (row.visual_location_type as Asset["visualLocationType"]) ?? "unknown",
   primaryCategory: (row.primary_category as Asset["primaryCategory"]) ?? "other",
   sceneAttributes: JSON.parse(String(row.scene_attributes ?? "[]")) as string[],
@@ -938,6 +962,7 @@ app.post("/api/onboarding/contract", async (c) => {
     resourceType: "seller_contract",
     resourceId: contractId,
     data: { version: payload.termsVersion, signatureMethod: payload.signatureMethod, signatureReference: payload.signatureReference, contentSha256, signedAt },
+    organizationId: user.organizationId,
     residencyRegion: actor.residencyRegion,
     actorResidencyRegion: actor.residencyRegion,
   });
@@ -1012,7 +1037,7 @@ app.post("/api/admin/onboarding/tenders/:id/decision", async (c) => {
       payout_status = CASE WHEN ? = 'approved' THEN 'verified' ELSE payout_status END,
       active_at = CASE WHEN ? = 'approved' THEN ? ELSE active_at END, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?`).bind(payload.decision, payload.decision, payload.decision, now, tender.contributor_id),
   ]);
-  const actor: AuditActor = { id: admin.id, type: "admin", residencyRegion: admin.residencyRegion };
+  const actor: AuditActor = { id: admin.id, organizationId: admin.organizationId, type: "admin", residencyRegion: admin.residencyRegion };
   const audit = await appendAuditEvent(c.env, {
     streamId: `contributor:${String(tender.contributor_id)}`,
     actorId: admin.id,
@@ -1021,6 +1046,7 @@ app.post("/api/admin/onboarding/tenders/:id/decision", async (c) => {
     resourceType: "onboarding_tender",
     resourceId: c.req.param("id"),
     data: { decision: payload.decision, notes: payload.notes },
+    organizationId: admin.organizationId,
     residencyRegion: actor.residencyRegion,
     actorResidencyRegion: actor.residencyRegion,
   });
@@ -1339,9 +1365,9 @@ app.post("/api/subscriptions/checkout", async (c) => {
   const photographer = await c.env.DB.prepare("SELECT id, email, role FROM users WHERE id = ? AND role = 'contributor'").bind(payload.photographerId).first<{ id: string; email: string; role: string }>();
   if (!photographer || photographer.id === user.id) return c.json({ error: "Photographer not found" }, 404);
   const priceCents = Math.max(100, Number(c.env.PHOTOGRAPHER_SUBSCRIPTION_PRICE_CENTS ?? 10_000)) * Math.ceil(payload.durationDays / 30);
-  let subscription = await c.env.DB.prepare("SELECT id, status FROM photographer_subscriptions WHERE organization_id = ? AND photographer_id = ? AND subscriber_id = ?")
-    .bind(user.organizationId, photographer.id, user.id).first<{ id: string; status: string }>();
-  if (subscription?.status === "active") return c.json({ error: "Photographer subscription is already active" }, 409);
+  let subscription = await c.env.DB.prepare("SELECT id, status, expires_at FROM photographer_subscriptions WHERE organization_id = ? AND photographer_id = ? AND subscriber_id = ?")
+    .bind(user.organizationId, photographer.id, user.id).first<{ id: string; status: string; expires_at: string | null }>();
+  if (subscription?.status === "active" && (!subscription.expires_at || subscription.expires_at > new Date().toISOString())) return c.json({ error: "Photographer subscription is already active" }, 409);
   const subscriptionId = subscription?.id ?? crypto.randomUUID();
   await c.env.DB.prepare(`
     INSERT INTO photographer_subscriptions (id, organization_id, photographer_id, subscriber_id, status, price_cents, currency, duration_days)
@@ -1373,6 +1399,20 @@ app.get("/api/my/subscriptions", async (c) => {
   if (!user) return c.json({ error: "Authentication required" }, 401);
   const rows = await c.env.DB.prepare(`SELECT s.id, s.photographer_id, u.display_name AS photographer_name, s.status, s.price_cents, s.currency, s.duration_days, s.paid_at, s.expires_at, s.created_at FROM photographer_subscriptions s JOIN users u ON u.id = s.photographer_id WHERE s.organization_id = ? AND s.subscriber_id = ? ORDER BY s.created_at DESC LIMIT 100`).bind(user.organizationId, user.id).all<Record<string, unknown>>();
   return c.json({ results: rows.results });
+});
+
+app.get("/api/subscriptions/:id", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const row = await c.env.DB.prepare(`SELECT s.id, s.photographer_id, u.display_name AS photographer_name, s.subscriber_id,
+      s.status, s.price_cents, s.currency, s.duration_days, s.payment_provider, s.payment_reference,
+      s.paid_at, s.expires_at, s.created_at, s.updated_at
+    FROM photographer_subscriptions s JOIN users u ON u.id = s.photographer_id
+    WHERE s.id = ? AND s.organization_id = ? AND (s.subscriber_id = ? OR s.photographer_id = ?)`)
+    .bind(c.req.param("id"), user.organizationId, user.id, user.id)
+    .first<Record<string, unknown>>();
+  if (!row) return c.json({ error: "Subscription not found" }, 404);
+  return c.json({ subscription: row });
 });
 
 app.post("/api/subscriptions/:id/cancel", async (c) => {
@@ -1430,10 +1470,19 @@ app.post("/api/webhooks/payments", async (c) => {
   if (duplicate) return c.json({ accepted: true, duplicate: true, status: duplicate.status });
   const eventId = crypto.randomUUID();
   try {
-    await c.env.DB.prepare("INSERT INTO payment_webhook_events (id, provider, provider_event_id, event_type, licence_id, amount_cents, currency, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(eventId, payload.provider, payload.eventId, payload.type, payload.licenceId, payload.amountCents, payload.currency.toUpperCase(), body).run();
+    await c.env.DB.prepare("INSERT INTO payment_webhook_events (id, provider, provider_event_id, event_type, licence_id, subscription_id, product_type, amount_cents, currency, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(eventId, payload.provider, payload.eventId, payload.type, payload.licenceId ?? null, payload.subscriptionId ?? null, payload.productType, payload.amountCents, payload.currency.toUpperCase(), body).run();
     let transactionId: string | null = null;
-    if (payload.type === "payment_succeeded") {
+    if (payload.productType === "photographer_subscription") {
+      const subscription = await c.env.DB.prepare("SELECT id, price_cents, duration_days, status FROM photographer_subscriptions WHERE id = ?").bind(payload.subscriptionId).first<{ id: string; price_cents: number; duration_days: number; status: string }>();
+      if (!subscription) throw new Error("Photographer subscription not found");
+      if (Number(subscription.price_cents) !== payload.amountCents && payload.type === "payment_succeeded") throw new Error("Payment amount does not match the subscription price");
+      if (payload.type === "payment_succeeded") {
+        await c.env.DB.prepare(`UPDATE photographer_subscriptions SET status = 'active', paid_at = CURRENT_TIMESTAMP, expires_at = datetime(CASE WHEN status = 'active' AND expires_at > CURRENT_TIMESTAMP THEN expires_at ELSE CURRENT_TIMESTAMP END, '+' || duration_days || ' days'), payment_provider = ?, payment_reference = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).bind(payload.provider, payload.paymentReference ?? payload.eventId, subscription.id).run();
+      } else if (payload.type === "refund" || payload.type === "chargeback") {
+        await c.env.DB.prepare("UPDATE photographer_subscriptions SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(subscription.id).run();
+      }
+    } else if (payload.type === "payment_succeeded") {
       const current = await c.env.DB.prepare("SELECT status, price_cents FROM licences WHERE id = ?").bind(payload.licenceId).first<{ status: string; price_cents: number }>();
       if (!current) throw new Error("Licence not found");
       if (Number(current.price_cents) !== payload.amountCents) throw new Error("Payment amount does not match the licence price");
@@ -1441,16 +1490,18 @@ app.post("/api/webhooks/payments", async (c) => {
         const existingSale = await c.env.DB.prepare("SELECT id FROM ledger_transactions WHERE licence_id = ? AND transaction_type = 'sale' ORDER BY created_at DESC LIMIT 1").bind(payload.licenceId).first<{ id: string }>();
         transactionId = existingSale?.id ?? null;
       } else {
-      transactionId = (await postSaleSettlement(c.env, payload.licenceId, { amountCents: payload.amountCents, currency: payload.currency, taxCents: 0, idempotencyKey: `${payload.provider}:${payload.eventId}` })).transactionId;
+      transactionId = (await postSaleSettlement(c.env, payload.licenceId!, { amountCents: payload.amountCents, currency: payload.currency, taxCents: 0, idempotencyKey: `${payload.provider}:${payload.eventId}` })).transactionId;
       await c.env.DB.prepare("UPDATE licences SET payment_provider = ?, payment_reference = ?, paid_at = CURRENT_TIMESTAMP, status = 'paid', price_cents = ? WHERE id = ? AND status = 'pending'").bind(payload.provider, payload.paymentReference ?? payload.eventId, payload.amountCents, payload.licenceId).run();
       }
     } else if (payload.type === "refund" || payload.type === "chargeback") {
-      transactionId = await postPaymentReversal(c.env, payload.licenceId, { amountCents: payload.amountCents, currency: payload.currency, idempotencyKey: `${payload.provider}:${payload.eventId}`, type: payload.type });
+      transactionId = await postPaymentReversal(c.env, payload.licenceId!, { amountCents: payload.amountCents, currency: payload.currency, idempotencyKey: `${payload.provider}:${payload.eventId}`, type: payload.type });
     }
     await c.env.DB.prepare("UPDATE payment_webhook_events SET status = 'processed', processed_at = CURRENT_TIMESTAMP WHERE id = ?").bind(eventId).run();
     if (payload.type === "payment_succeeded") {
-      const licenceOrg = await c.env.DB.prepare("SELECT organization_id FROM licences WHERE id = ?").bind(payload.licenceId).first<{ organization_id: string }>();
-      if (licenceOrg) c.executionCtx.waitUntil(dispatchWebhookEvent(c.env, licenceOrg.organization_id, "licence.paid", { licenceId: payload.licenceId, amountCents: payload.amountCents, currency: payload.currency }));
+      const licenceOrg = payload.productType === "photographer_subscription"
+        ? await c.env.DB.prepare("SELECT organization_id FROM photographer_subscriptions WHERE id = ?").bind(payload.subscriptionId).first<{ organization_id: string }>()
+        : await c.env.DB.prepare("SELECT organization_id FROM licences WHERE id = ?").bind(payload.licenceId).first<{ organization_id: string }>();
+      if (licenceOrg) c.executionCtx.waitUntil(dispatchWebhookEvent(c.env, licenceOrg.organization_id, payload.productType === "photographer_subscription" ? "photographer.subscription.paid" : "licence.paid", { licenceId: payload.licenceId, subscriptionId: payload.subscriptionId, amountCents: payload.amountCents, currency: payload.currency }));
     }
     return c.json({ accepted: true, eventId, transactionId, type: payload.type });
   } catch (error) {
@@ -1624,7 +1675,7 @@ app.get("/api/health", (c) => c.json(validateContractResponse("GET /api/health 2
   environment: c.env.APP_ENV ?? "unknown",
 })));
 
-type AuditActor = { id: string; type: "user" | "contributor" | "service" | "admin"; residencyRegion: "za" | "eu" };
+type AuditActor = { id: string; organizationId: string; type: "user" | "contributor" | "service" | "admin"; residencyRegion: "za" | "eu" };
 
 async function requestUser(c: { env: Bindings; req: { raw: Request } }): Promise<RequestUser | null> {
   return getRequestUser(c.env, c.req.raw);
@@ -1636,7 +1687,7 @@ async function requestActor(c: { env: Bindings; req: { raw: Request; header(name
   const requestedResidency = c.req.header("x-residency-region");
   if (requestedResidency && requestedResidency !== user.residencyRegion) return null;
   const type = user.role === "admin" ? "admin" : user.role === "contributor" ? "contributor" : "user";
-  return { id: user.id, type, residencyRegion: user.residencyRegion };
+  return { id: user.id, organizationId: user.organizationId, type, residencyRegion: user.residencyRegion };
 }
 
 function allowedRole(user: RequestUser | null, roles: string[]): boolean {
@@ -1660,7 +1711,7 @@ type ApprovalLedgerCategory = "user_account" | "image";
 type ApprovalLedgerEntry = {
   id: string;
   category: ApprovalLedgerCategory;
-  source: "signed_audit" | "workflow_event";
+  source: "signed_audit" | "workflow_event" | "r2_data_catalog";
   occurredAt: string;
   action: string;
   decision: string;
@@ -1670,7 +1721,7 @@ type ApprovalLedgerEntry = {
   streamId: string | null;
   sequence: number | null;
   notes: string | null;
-  integrity: { status: "verified" | "failed" | "legacy"; hashValid: boolean | null; signatureValid: boolean | null; hash: string | null; r2Key: string | null };
+  integrity: { status: "verified" | "failed" | "legacy" | "catalog"; hashValid: boolean | null; signatureValid: boolean | null; hash: string | null; r2Key: string | null };
 };
 
 function auditActorTypeForRole(role: string): "user" | "contributor" | "admin" {
@@ -1752,6 +1803,7 @@ async function appendAssetApprovalAudit(c: AppContext, actor: RequestUser, input
         assetRevision: input.assetRevision ?? null,
         notes: input.notes ?? null,
       }),
+      organizationId: actor.organizationId,
       residencyRegion: actor.residencyRegion,
       actorResidencyRegion: actor.residencyRegion,
     });
@@ -1771,6 +1823,38 @@ const approvalLedgerQuerySchema = z.object({
   source: z.enum(["all", "signed_audit", "workflow_event"]).default("all"),
   limit: z.coerce.number().int().min(1).max(500).default(200),
 });
+
+const adminAuditSearchQuerySchema = z.object({
+  q: z.string().trim().max(120).optional(),
+  action: z.string().regex(/^[a-z0-9._:-]{2,120}$/).optional(),
+  resourceType: z.string().regex(/^[A-Za-z0-9._:-]{1,80}$/).optional(),
+  from: z.string().datetime({ offset: true }).optional(),
+  to: z.string().datetime({ offset: true }).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});
+
+function catalogLedgerEntry(row: AuditCatalogRow): ApprovalLedgerEntry {
+  let data: Record<string, unknown> = {};
+  try { data = JSON.parse(row.data_json) as Record<string, unknown>; } catch { data = {}; }
+  const category = ledgerCategoryForAction(row.action);
+  const resourceTitle = typeof data.title === "string" && data.title.trim() ? data.title : row.resource_id;
+  const subjectId = category === "image" && typeof data.ownerId === "string" ? data.ownerId : row.resource_id;
+  return {
+    id: row.event_id,
+    category,
+    source: "r2_data_catalog",
+    occurredAt: row.occurred_at,
+    action: ledgerTitleForAction(row.action),
+    decision: ledgerDecision(row.action, data),
+    actor: { id: row.actor_id, name: row.actor_id, role: row.actor_type },
+    subject: { id: subjectId, name: subjectId, type: category === "image" ? "seller" : "user account" },
+    resource: { type: row.resource_type, id: row.resource_id, title: resourceTitle },
+    streamId: row.stream_id,
+    sequence: row.sequence || null,
+    notes: typeof data.notes === "string" && data.notes.trim() ? data.notes.trim() : null,
+    integrity: { status: "catalog", hashValid: null, signatureValid: null, hash: row.event_hash, r2Key: null },
+  };
+}
 
 function auditLedgerEntry(row: Record<string, unknown>, event: StoredAuditEvent, verification: { hashValid: boolean; signatureValid: boolean }): ApprovalLedgerEntry {
   const category = ledgerCategoryForAction(event.action);
@@ -1934,7 +2018,86 @@ app.get("/api/admin/approval-ledger", async (c) => {
       verifiedIntegrity: limited.filter((entry) => entry.integrity.status === "verified").length,
       failedIntegrity: limited.filter((entry) => entry.integrity.status === "failed").length,
     },
+    analytics: auditAnalyticsStatus(c.env as AuditAnalyticsConfig),
     results: limited,
+  });
+});
+
+app.get("/api/admin/analytics/audit-search", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["admin"])) return c.json({ error: "Admin access required" }, 403);
+  const filters = adminAuditSearchQuerySchema.parse({
+    q: c.req.query("q") || undefined,
+    action: c.req.query("action") || undefined,
+    resourceType: c.req.query("resourceType") || undefined,
+    from: c.req.query("from") || undefined,
+    to: c.req.query("to") || undefined,
+    limit: c.req.query("limit") ?? 50,
+  });
+  const clauses = [
+    "e.residency_region = ?",
+    `(e.stream_id IN (SELECT 'contributor:' || user_id FROM organization_memberships WHERE organization_id = ? AND status = 'active')
+      OR EXISTS (SELECT 1 FROM assets scoped_asset WHERE e.resource_type = 'asset' AND scoped_asset.id = e.resource_id AND scoped_asset.organization_id = ?)
+      OR EXISTS (SELECT 1 FROM onboarding_tenders scoped_tender WHERE e.resource_type = 'onboarding_tender' AND scoped_tender.id = e.resource_id AND scoped_tender.organization_id = ?)
+      OR EXISTS (SELECT 1 FROM seller_contracts scoped_contract WHERE e.resource_type = 'seller_contract' AND scoped_contract.id = e.resource_id AND scoped_contract.organization_id = ?)
+      OR EXISTS (SELECT 1 FROM contributor_verification_cases scoped_case JOIN organization_memberships scoped_membership ON scoped_membership.user_id = scoped_case.contributor_id AND scoped_membership.organization_id = ? AND scoped_membership.status = 'active' WHERE e.resource_type = 'verification_case' AND scoped_case.id = e.resource_id))`,
+  ];
+  const values: (string | number)[] = [user.residencyRegion, user.organizationId, user.organizationId, user.organizationId, user.organizationId, user.organizationId];
+  if (filters.q) {
+    clauses.push("(e.action LIKE ? OR e.resource_type LIKE ? OR e.resource_id LIKE ? OR e.actor_id LIKE ? OR e.data_json LIKE ?)");
+    const pattern = `%${filters.q}%`;
+    values.push(pattern, pattern, pattern, pattern, pattern);
+  }
+  if (filters.action) { clauses.push("e.action = ?"); values.push(filters.action); }
+  if (filters.resourceType) { clauses.push("e.resource_type = ?"); values.push(filters.resourceType); }
+  if (filters.from) { clauses.push("e.occurred_at >= ?"); values.push(filters.from); }
+  if (filters.to) { clauses.push("e.occurred_at <= ?"); values.push(filters.to); }
+  const rows = await c.env.DB.prepare(`SELECT e.*,
+      actor.display_name AS actor_name, actor.role AS actor_role,
+      asset.title AS asset_title, asset.owner_id AS asset_owner_id, asset_owner.display_name AS asset_owner_name,
+      tender.contributor_id AS tender_contributor_id, tender_user.display_name AS tender_contributor_name,
+      contract.contributor_id AS contract_contributor_id, contract_user.display_name AS contract_contributor_name,
+      verification.contributor_id AS verification_contributor_id, verification_user.display_name AS verification_contributor_name
+    FROM audit_log_events e
+      LEFT JOIN users actor ON actor.id = e.actor_id
+      LEFT JOIN assets asset ON e.resource_type = 'asset' AND asset.id = e.resource_id AND asset.organization_id = ?
+      LEFT JOIN users asset_owner ON asset_owner.id = asset.owner_id
+      LEFT JOIN onboarding_tenders tender ON e.resource_type = 'onboarding_tender' AND tender.id = e.resource_id AND tender.organization_id = ?
+      LEFT JOIN users tender_user ON tender_user.id = tender.contributor_id
+      LEFT JOIN seller_contracts contract ON e.resource_type = 'seller_contract' AND contract.id = e.resource_id AND contract.organization_id = ?
+      LEFT JOIN users contract_user ON contract_user.id = contract.contributor_id
+      LEFT JOIN contributor_verification_cases verification ON e.resource_type = 'verification_case' AND verification.id = e.resource_id
+      LEFT JOIN users verification_user ON verification_user.id = verification.contributor_id
+    WHERE ${clauses.join(" AND ")}
+    ORDER BY e.occurred_at DESC LIMIT ?`).bind(user.organizationId, user.organizationId, user.organizationId, ...values, filters.limit).all<Record<string, unknown>>();
+  const d1Entries: ApprovalLedgerEntry[] = [];
+  for (const row of rows.results as Record<string, unknown>[]) {
+    const event = storedAuditEventFromRow(row);
+    const verification = await verifyAuditEvent(c.env, event);
+    d1Entries.push(auditLedgerEntry(row, event, verification));
+  }
+
+  const connectorStatus = auditAnalyticsStatus(c.env as AuditAnalyticsConfig);
+  let catalogEntries: ApprovalLedgerEntry[] = [];
+  let catalogSearch: "ready" | "not_configured" | "unavailable" = connectorStatus.r2DataCatalog === "configured" ? "ready" : "not_configured";
+  if (connectorStatus.r2DataCatalog === "configured") {
+    try {
+      const catalogRows = await searchR2AuditCatalog(c.env as AuditAnalyticsConfig, { ...filters, organizationId: user.organizationId });
+      catalogEntries = catalogRows.map(catalogLedgerEntry);
+    } catch (error) {
+      catalogSearch = "unavailable";
+      logEvent("warn", "audit.analytics_catalog_search_failed", c.get("trace"), { error: error instanceof Error ? error.message : "unknown-error" });
+    }
+  }
+  const seen = new Set(d1Entries.map((entry) => entry.id));
+  const results = [...d1Entries, ...catalogEntries.filter((entry) => !seen.has(entry.id))]
+    .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt))
+    .slice(0, filters.limit);
+  return c.json({
+    organization: { id: user.organizationId, name: user.organizationName },
+    filters,
+    connectors: { ...connectorStatus, catalogSearch },
+    results,
   });
 });
 
@@ -1959,6 +2122,7 @@ app.post("/api/audit/events", async (c) => {
     const result = await appendAuditEvent(c.env, {
       ...payload,
       data: redactAuditData(payload.data),
+      organizationId: actor.organizationId,
       actorId: actor.id,
       actorType: actor.type,
       residencyRegion,
@@ -2044,6 +2208,7 @@ app.post("/api/verification/cases", async (c) => {
     resourceType: "verification_case",
     resourceId: caseId,
     data: { subjectType: payload.subjectType, provider: payload.provider, retentionUntil },
+    organizationId: actor.organizationId,
     residencyRegion: payload.residencyRegion,
     actorResidencyRegion: actor.residencyRegion,
   });
@@ -2087,6 +2252,7 @@ app.post("/api/verification/cases/:caseId/documents", async (c) => {
     resourceType: "verification_document",
     resourceId: documentId,
     data: { caseId: c.req.param("caseId"), documentType: payload.documentType, contentSha256: payload.contentSha256 },
+    organizationId: actor.organizationId,
     residencyRegion: actor.residencyRegion,
     actorResidencyRegion: actor.residencyRegion,
   });
@@ -2213,27 +2379,12 @@ app.post("/api/webhooks/kyc", async (c) => {
 app.on(["GET", "HEAD"], "/api/assets/:id/preview", async (c) => {
   const user = await requestUser(c);
   const row = await c.env.DB.prepare(`
-    SELECT a.id, a.organization_id, a.owner_id, a.kind, a.status, a.source_file_name, a.preview_key, a.preview_640_key, a.preview_1200_key, a.original_key,
-      EXISTS(
-        SELECT 1 FROM licences l
-        WHERE l.asset_id = a.id AND l.organization_id = a.organization_id
-          AND l.buyer_id = ? AND l.status = 'paid'
-      ) AS paid_entitlement,
-      EXISTS(
-        SELECT 1 FROM photographer_subscriptions s
-        WHERE s.organization_id = a.organization_id AND s.photographer_id = a.owner_id
-          AND s.subscriber_id = ? AND s.status = 'active' AND s.paid_at IS NOT NULL
-          AND (s.expires_at IS NULL OR s.expires_at > CURRENT_TIMESTAMP)
-      ) AS subscription_entitlement
+    SELECT a.id, a.organization_id, a.owner_id, a.kind, a.status, a.source_file_name, a.preview_key, a.preview_640_key, a.preview_1200_key, a.original_key
     FROM assets a
     WHERE a.id = ?
-  `).bind(user?.id ?? "", user?.id ?? "", c.req.param("id")).first<Record<string, unknown>>();
-  const entitled = Boolean(user && row && String(row.organization_id) === user.organizationId && (
-    String(row.owner_id) === user.id || allowedRole(user, ["editor", "admin"])
-      || Number(row.paid_entitlement ?? 0) === 1 || Number(row.subscription_entitlement ?? 0) === 1
-  ));
+  `).bind(c.req.param("id")).first<Record<string, unknown>>();
   const requestedWidth = c.req.query("width") === "640" ? 640 : c.req.query("width") === "1200" ? 1200 : undefined;
-  const mediaKey = row ? entitled ? previewMediaKey(row, true) : responsivePreviewKey(row, requestedWidth) : null;
+  const mediaKey = row ? responsivePreviewKey(row, requestedWidth) : null;
   const canInspectPrivate = Boolean(user && row && String(row.organization_id) === user.organizationId
     && (String(row.owner_id) === user.id || allowedRole(user, ["editor", "admin"])));
   if (!row || !mediaKey || (row.status !== "published" && !canInspectPrivate)) {
@@ -2244,8 +2395,8 @@ app.on(["GET", "HEAD"], "/api/assets/:id/preview", async (c) => {
     ? await c.env.MEDIA_BUCKET.head(mediaKey)
     : await c.env.MEDIA_BUCKET.get(mediaKey, c.req.header("Range") ? { range: c.req.raw.headers } : undefined);
   if (!object) return c.json({ error: "Media preview is unavailable" }, 404);
-  const response = createMediaResponse(c.req.raw, object as R2ObjectBody, entitled ? originalContentType(row) : previewContentType(row));
-  response.headers.set("Cache-Control", entitled ? "private, no-store" : row.kind === "image" ? "public, max-age=3600, stale-while-revalidate=86400" : "private, max-age=60");
+  const response = createMediaResponse(c.req.raw, object as R2ObjectBody, previewContentType(row));
+  response.headers.set("Cache-Control", row.kind === "image" ? "public, max-age=3600, stale-while-revalidate=86400" : "private, max-age=60");
   return response;
 });
 
@@ -2525,9 +2676,9 @@ app.post("/api/admin/media/previews/rebuild", async (c) => {
     // An empty body means rebuild every image with a private original in this organisation.
   }
   const assets = await c.env.DB.prepare(`
-    SELECT id, original_key, preview_key
+    SELECT id, kind, original_key, preview_key, video_poster_key
     FROM assets
-    WHERE organization_id = ? AND kind = 'image' AND original_key IS NOT NULL
+    WHERE organization_id = ? AND kind IN ('image', 'video') AND original_key IS NOT NULL
     ORDER BY updated_at DESC LIMIT 500
   `).bind(user.organizationId).all<Record<string, unknown>>();
   const requested = payload.assetIds ? new Set(payload.assetIds) : null;
@@ -2537,15 +2688,85 @@ app.post("/api/admin/media/previews/rebuild", async (c) => {
   for (const asset of selected) {
     try {
       const originalKey = String(asset.original_key);
-      const preview = await writeWatermarkedPreview(c.env, originalKey, asset.preview_key as string | null);
-      await c.env.DB.prepare("UPDATE assets SET preview_key = ?, preview_640_key = ?, preview_1200_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?")
-        .bind(preview.key, preview.variants.preview640Key, preview.variants.preview1200Key, asset.id, user.organizationId).run();
+      if (asset.kind === "video") {
+        const posterKey = await writeVideoPoster(c.env, originalKey, asset.video_poster_key as string | null);
+        await c.env.DB.prepare("UPDATE assets SET video_poster_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?").bind(posterKey, asset.id, user.organizationId).run();
+      } else {
+        const preview = await writeWatermarkedPreview(c.env, originalKey, asset.preview_key as string | null);
+        await c.env.DB.prepare("UPDATE assets SET preview_key = ?, preview_640_key = ?, preview_1200_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?")
+          .bind(preview.key, preview.variants.preview640Key, preview.variants.preview1200Key, asset.id, user.organizationId).run();
+      }
       rebuilt += 1;
     } catch (error) {
       failures.push({ assetId: String(asset.id), error: error instanceof Error ? error.message : "preview transformation failed" });
     }
   }
   return c.json({ rebuilt, total: selected.length, failed: failures.length, failures, transformation: `webp-${PREVIEW_MAX_DIMENSION}-q${PREVIEW_QUALITY}-watermarked` }, failures.length ? 207 : 200);
+});
+
+app.get("/api/admin/media/integrity", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["admin", "editor"])) return c.json({ error: "Editor access required" }, 403);
+  const result = await c.env.DB.prepare(`SELECT id, organization_id, owner_id, kind, source_file_name, source_etag, original_key, preview_key, preview_640_key, preview_1200_key, video_poster_key, status FROM assets WHERE organization_id = ? AND original_key IS NOT NULL ORDER BY created_at ASC`).bind(user.organizationId).all<Record<string, unknown>>();
+  const assets = result.results;
+  const imageAssets = assets.filter((asset) => asset.kind === "image");
+  const referenced = new Set(assets.flatMap((asset) => [asset.preview_key, asset.preview_640_key, asset.preview_1200_key, asset.video_poster_key].filter((key): key is string => typeof key === "string" && key.length > 0)));
+  const previewObjects = await listR2Keys(c.env.MEDIA_BUCKET, "previews/");
+  const groups = new Map<string, Record<string, unknown>[]>();
+  for (const asset of assets) {
+    const identity = `${asset.owner_id}|${asset.source_etag}|${asset.source_file_name}`;
+    const group = groups.get(identity) ?? [];
+    group.push(asset);
+    groups.set(identity, group);
+  }
+  const duplicateGroups = [...groups.values()].filter((group) => group.length > 1).map((group) => ({ identity: `${group[0].source_file_name}`, assetIds: group.map((asset) => asset.id), originalKeys: group.map((asset) => asset.original_key), sourceEtag: group[0].source_etag }));
+  const incompleteImageIds = imageAssets.filter((asset) => !(asset.preview_key && asset.preview_640_key && asset.preview_1200_key)).map((asset) => String(asset.id));
+  const videoIds = assets.filter((asset) => asset.kind === "video" && !asset.video_poster_key).map((asset) => String(asset.id));
+  const stalePreviewObjects = previewObjects.filter((key) => !referenced.has(key));
+  return c.json({ generatedAt: new Date().toISOString(), assets: assets.length, images: imageAssets.length, imagePairsComplete: imageAssets.length - incompleteImageIds.length, incompleteImageIds, videoPostersComplete: assets.filter((asset) => asset.kind === "video" && asset.video_poster_key).length, videoIds, duplicateGroups, r2: { previewObjects: previewObjects.length, referencedPreviewObjects: referenced.size, stalePreviewObjects, stalePreviewObjectCount: stalePreviewObjects.length }, transformation: `webp-640/1200/${PREVIEW_MAX_DIMENSION}-q${PREVIEW_QUALITY}-watermarked` });
+});
+
+app.post("/api/admin/media/reconcile", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["admin"])) return c.json({ error: "Admin access required" }, 403);
+  const payload = z.object({ apply: z.boolean().default(false), cleanupStale: z.boolean().default(false) }).parse(await c.req.json().catch(() => ({})));
+  const rows = await c.env.DB.prepare(`SELECT a.id, a.organization_id, a.owner_id, a.kind, a.status, a.source_file_name, a.source_etag, a.original_key, a.preview_key, a.preview_640_key, a.preview_1200_key, a.video_poster_key, (SELECT COUNT(*) FROM licences l WHERE l.asset_id = a.id) AS licence_count FROM assets a WHERE a.organization_id = ? AND a.original_key IS NOT NULL ORDER BY a.created_at ASC`).bind(user.organizationId).all<Record<string, unknown>>();
+  const groups = new Map<string, Record<string, unknown>[]>();
+  for (const row of rows.results) {
+    const identity = `${row.owner_id}|${row.source_etag}|${row.source_file_name}`;
+    const group = groups.get(identity) ?? [];
+    group.push(row);
+    groups.set(identity, group);
+  }
+  const candidates: { canonicalId: string; duplicateId: string; keys: string[] }[] = [];
+  for (const group of groups.values()) {
+    if (group.length < 2 || group.some((row) => Number(row.licence_count) > 0 || row.status === "published" || !row.source_etag)) continue;
+    const canonical = group[0];
+    const canonicalObject = await c.env.MEDIA_BUCKET.head(String(canonical.original_key));
+    if (!canonicalObject || canonicalObject.httpEtag.replace(/^\"|\"$/g, "") !== String(canonical.source_etag).replace(/^\"|\"$/g, "")) continue;
+    for (const duplicate of group.slice(1)) {
+      const duplicateObject = await c.env.MEDIA_BUCKET.head(String(duplicate.original_key));
+      if (!duplicateObject || duplicateObject.httpEtag.replace(/^\"|\"$/g, "") !== String(canonical.source_etag).replace(/^\"|\"$/g, "")) continue;
+      candidates.push({ canonicalId: String(canonical.id), duplicateId: String(duplicate.id), keys: [duplicate.original_key, duplicate.preview_key, duplicate.preview_640_key, duplicate.preview_1200_key, duplicate.video_poster_key].filter((key): key is string => typeof key === "string" && key.length > 0) });
+    }
+  }
+  const referenced = new Set(rows.results.flatMap((row) => [row.preview_key, row.preview_640_key, row.preview_1200_key, row.video_poster_key].filter((key): key is string => typeof key === "string" && key.length > 0)));
+  const previewObjects = await listR2Keys(c.env.MEDIA_BUCKET, "previews/");
+  const stalePreviewObjects = previewObjects.filter((key) => !referenced.has(key));
+  if (!payload.apply) return c.json({ dryRun: true, candidates, stalePreviewObjects: payload.cleanupStale ? stalePreviewObjects : [], message: "No objects were deleted. Re-run with apply:true after reviewing the exact ETag-matched candidates." });
+  let deletedObjects = 0;
+  for (const candidate of candidates) {
+    await c.env.MEDIA_BUCKET.delete(candidate.keys);
+    await c.env.DB.prepare("UPDATE assets SET status = 'withdrawn', original_key = NULL, preview_key = NULL, preview_640_key = NULL, preview_1200_key = NULL, video_poster_key = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ? AND status <> 'published'")
+      .bind(candidate.duplicateId, user.organizationId).run();
+    deletedObjects += candidate.keys.length;
+  }
+  let staleDeleted = 0;
+  if (payload.cleanupStale && stalePreviewObjects.length) {
+    await c.env.MEDIA_BUCKET.delete(stalePreviewObjects);
+    staleDeleted = stalePreviewObjects.length;
+  }
+  return c.json({ dryRun: false, candidates, deletedObjects, withdrawnAssets: candidates.length, staleDeleted });
 });
 
 const photoJobStatusSchema = z.enum(["all", "queued", "running", "completed", "needs_review", "failed", "dead_lettered", "skipped"]);
@@ -2592,6 +2813,24 @@ app.post("/api/admin/photo-jobs/:jobId/replay", async (c) => {
   const replayedJobId = await replayPhotoJob(photoPipeline(c.env), job.id);
   if (!replayedJobId) return c.json({ error: "Photo queue is unavailable", code: "photo_queue_unavailable" }, 503);
   return c.json({ jobId: replayedJobId, status: "queued", replayed: true }, 202);
+});
+
+const photoReEnrichmentSchema = z.object({ confirmation: z.literal("re-enrich") });
+
+app.post("/api/admin/photo-jobs/:jobId/re-enrich", async (c) => {
+  const user = await requestUser(c);
+  if (!user || user.role !== "admin") return c.json({ error: "Admin access required" }, 403);
+  photoReEnrichmentSchema.parse(await c.req.json());
+  const job = await c.env.DB.prepare(`SELECT j.id, j.operation, j.status FROM photo_ai_jobs j JOIN assets a ON a.id = j.asset_id
+    WHERE j.id = ? AND a.organization_id = ?`).bind(c.req.param("jobId"), user.organizationId)
+    .first<{ id: string; operation: PhotoJobOperation; status: string }>();
+  if (!job || job.operation !== "enrich") return c.json({ error: "Re-enrichable AI job not found" }, 404);
+  if (!["completed", "needs_review", "failed", "dead_lettered", "skipped"].includes(job.status)) {
+    return c.json({ error: "Photo job is not ready for re-enrichment", code: "photo_job_not_re_enrichable" }, 409);
+  }
+  const requeuedJobId = await requeuePhotoEnrichment(photoPipeline(c.env), job.id);
+  if (!requeuedJobId) return c.json({ error: "Photo queue is unavailable or the asset revision changed", code: "photo_queue_unavailable" }, 503);
+  return c.json({ jobId: requeuedJobId, status: "queued", reEnriched: true }, 202);
 });
 
 app.post("/api/analytics/events", async (c) => {

@@ -433,6 +433,87 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/admin/photo-jobs/{jobId}/re-enrich:
+    post:
+      operationId: reEnrichPhotoJob
+      summary: Explicitly re-run an image enrichment job for an admin-controlled review
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirmation]
+              properties:
+                confirmation: { type: string, enum: [re-enrich] }
+      responses:
+        '202':
+          description: Enrichment queued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [jobId, status, reEnriched]
+                properties:
+                  jobId: { type: string }
+                  status: { type: string, enum: [queued] }
+                  reEnriched: { type: boolean, enum: [true] }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/admin/analytics/audit-search:
+    get:
+      operationId: searchAdminAuditAnalytics
+      summary: Search tenant-scoped audit history across D1 and the optional R2 Data Catalog copy
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 120 }
+        - name: action
+          in: query
+          schema: { type: string, pattern: '^[a-z0-9._:-]{2,120}$' }
+        - name: resourceType
+          in: query
+          schema: { type: string, pattern: '^[A-Za-z0-9._:-]{1,80}$' }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        '200':
+          description: Tenant-scoped merged audit search results and connector status
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [organization, filters, connectors, results]
+                properties:
+                  organization: { type: object, additionalProperties: true }
+                  filters: { type: object, additionalProperties: true }
+                  connectors: { type: object, additionalProperties: true }
+                  results: { type: array, items: { type: object, additionalProperties: true } }
+                additionalProperties: false
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
   /api/uploads:
     post:
       operationId: createUploadSession
@@ -570,7 +651,7 @@ paths:
   /api/assets/{id}/preview:
     get:
       operationId: getAssetPreview
-      summary: Stream a preview; unpaid video viewers receive the watermarked preview and paid viewers receive the licensed original
+      summary: Stream a responsive watermarked preview; originals are available only from the authorized download route
       parameters:
         - name: id
           in: path
@@ -580,6 +661,9 @@ paths:
           in: header
           required: false
           schema: { type: string }
+        - name: width
+          in: query
+          schema: { type: integer, enum: [640, 1200, 1800], default: 1800 }
       responses:
         '200': { description: Preview bytes; cacheable public WebP for images }
         '404': { description: Published preview unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
@@ -614,13 +698,87 @@ paths:
           schema: { type: string }
       responses:
         '200':
-          description: Original source bytes delivered as a binary attachment
+          description: Short-lived signed R2 redirect to the authorized original
           content:
             application/octet-stream:
               schema: { type: string, format: binary }
         '401': { description: Authentication required, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
         '403': { description: Paid licence required, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
         '404': { description: Original unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/assets/{id}/poster:
+    get:
+      operationId: getVideoPoster
+      summary: Stream a watermarked video poster
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Watermarked poster image }
+        '404': { description: Poster unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/subscriptions/checkout:
+    post:
+      operationId: createPhotographerSubscriptionCheckout
+      summary: Create hosted checkout for a photographer subscription
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [photographerId, successUrl, cancelUrl]
+              properties:
+                photographerId: { type: string }
+                durationDays: { type: integer, enum: [30, 90, 365], default: 30 }
+                successUrl: { type: string, maxLength: 2048 }
+                cancelUrl: { type: string, maxLength: 2048 }
+      responses:
+        '201':
+          description: Hosted checkout URL created
+          headers:
+            Location: { description: Subscription resource, schema: { type: string } }
+        '409': { description: Subscription already active }
+        '503': { description: Payment provider unavailable }
+  /api/my/subscriptions:
+    get:
+      operationId: listMyPhotographerSubscriptions
+      summary: List the signed-in buyer's photographer subscriptions
+      security: [{ sessionCookie: [] }]
+      responses: { '200': { description: Subscription records } }
+  /api/subscriptions/{id}/cancel:
+    post:
+      operationId: cancelPhotographerSubscription
+      summary: Cancel a pending or active photographer subscription
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses: { '200': { description: Subscription cancelled }, '404': { description: Subscription not found } }
+  /api/admin/media/integrity:
+    get:
+      operationId: getMediaIntegrityReport
+      summary: Verify canonical media pairs, posters, duplicates, and stale previews
+      security: [{ sessionCookie: [] }]
+      responses: { '200': { description: Integrity report } }
+  /api/admin/media/reconcile:
+    post:
+      operationId: reconcileDuplicateMedia
+      summary: Dry-run or apply ETag-verified duplicate and stale-preview cleanup
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                apply: { type: boolean, default: false }
+                cleanupStale: { type: boolean, default: false }
+      responses: { '200': { description: Reconciliation result } }
   /api/assets/facets:
     get:
       operationId: getAssetFacets
@@ -810,7 +968,7 @@ components:
       additionalProperties: true
     ApprovalLedgerResponse:
       type: object
-      required: [organization, filters, summary, results]
+      required: [organization, filters, summary, analytics, results]
       properties:
         organization:
           type: object
@@ -839,6 +997,14 @@ components:
             verifiedIntegrity: { type: integer, minimum: 0 }
             failedIntegrity: { type: integer, minimum: 0 }
           additionalProperties: false
+        analytics:
+          type: object
+          required: [pipeline, r2DataCatalog, table]
+          properties:
+            pipeline: { type: string, enum: [configured, not_configured] }
+            r2DataCatalog: { type: string, enum: [configured, not_configured] }
+            table: { type: string }
+          additionalProperties: true
         results:
           type: array
           items:
@@ -847,7 +1013,7 @@ components:
             properties:
               id: { type: string }
               category: { type: string, enum: [user_account, image] }
-              source: { type: string, enum: [signed_audit, workflow_event] }
+              source: { type: string, enum: [signed_audit, workflow_event, r2_data_catalog] }
               occurredAt: { type: string }
               action: { type: string }
               decision: { type: string }
@@ -1108,6 +1274,8 @@ components:
         contentType: { type: string, pattern: '^(image|video)/' }
         sizeBytes: { type: integer, minimum: 1, maximum: 30000000000 }
         assetId: { type: string }
+        idempotencyKey: { type: string, minLength: 8, maxLength: 200 }
+        sha256: { type: string, pattern: '^[a-fA-F0-9]{64}$' }
       additionalProperties: false
     UploadResponse:
       type: object
@@ -1119,6 +1287,7 @@ components:
         uploadUrl: { type: string }
         expiresInSeconds: { type: integer, minimum: 1 }
         message: { type: string }
+        idempotent: { type: boolean }
       additionalProperties: false
     UploadCompleteResponse:
       type: object

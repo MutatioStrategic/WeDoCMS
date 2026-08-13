@@ -8,6 +8,7 @@ export type MetadataReviewStatus = "reviewed" | "needs_context" | "blocked";
 export type MetadataProvenance = "contributor" | "editor" | "ai_suggested";
 export type VisualLocationType = "urban_street" | "coastal_landscape" | "market_scene" | "indoor" | "residential" | "rural_landscape" | "industrial" | "event" | "transport" | "nature" | "sports" | "food" | "other" | "unknown";
 export type PhotoCategory = "people" | "lifestyle" | "travel" | "nature" | "architecture" | "food" | "business" | "transport" | "arts_culture" | "sport" | "news_editorial" | "objects" | "other";
+export type AiMetadataSuggestion = Record<string, unknown>;
 
 export type MatchSignal = {
   field: "title" | "description" | "caption" | "location" | "subject" | "context" | "trust";
@@ -57,6 +58,7 @@ export type Asset = {
   contributor: string;
   workflowStage: WorkflowStage;
   aiTags: string[];
+  aiSuggestedMetadata?: AiMetadataSuggestion;
   visualLocationType?: VisualLocationType;
   primaryCategory?: PhotoCategory;
   sceneAttributes?: string[];
