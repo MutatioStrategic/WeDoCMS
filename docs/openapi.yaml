@@ -567,6 +567,41 @@ paths:
       responses:
         '200': { description: Asset record, content: { application/json: { schema: { $ref: '#/components/schemas/Asset' } } } }
         '404': { description: Asset unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/assets/{id}/preview:
+    get:
+      operationId: getAssetPreview
+      summary: Stream the public optimized, watermarked preview
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: range
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        '200': { description: Preview bytes; cacheable public WebP for images }
+        '404': { description: Published preview unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/assets/{id}/original:
+    get:
+      operationId: downloadAssetOriginal
+      summary: Download the private original after a paid licence or elevated access
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Original source bytes delivered as a binary attachment
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '401': { description: Authentication required, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '403': { description: Paid licence required, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '404': { description: Original unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
   /api/assets/facets:
     get:
       operationId: getAssetFacets
