@@ -17,7 +17,7 @@
     {
       "binding": "DB",
       "database_name": "veld-archive",
-      "database_id": "replace-with-cloudflare-d1-id",
+      "database_id": "8403b7a9-c787-4976-808a-5263da1411a7",
       "migrations_dir": "./migrations"
     }
   ],
