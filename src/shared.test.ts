@@ -75,4 +75,10 @@ describe("asset domain contract", () => {
     expect(archiveDomain.confidenceLabel(.9)).toBe("high");
     expect(archiveDomain.evaluateLicenceRequest(asset, { assetId: asset.id, licenceType: "editorial", territory: "ZA", durationDays: 30 }).allowed).toBe(true);
   });
+
+  it("approves only the exact metadata revision a human reviewed", () => {
+    expect(archiveDomain.canApproveMetadataRevision({ assetRevision: 4, reviewedRevision: 4, metadataReviewStatus: "reviewed" })).toBe(true);
+    expect(archiveDomain.canApproveMetadataRevision({ assetRevision: 5, reviewedRevision: 4, metadataReviewStatus: "reviewed" })).toBe(false);
+    expect(archiveDomain.canApproveMetadataRevision({ assetRevision: 4, reviewedRevision: 4, metadataReviewStatus: "needs_context" })).toBe(false);
+  });
 });

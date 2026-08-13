@@ -14,6 +14,8 @@
 - [ ] Configure media-processing queues, image transformations, and Stream direct uploads.
 - [ ] Configure signed Stream playback and webhook delivery.
 - [ ] Provision Workers AI and Vectorize; enable semantic search only after index tests pass.
+- [ ] Benchmark the configured vision model against a labelled seller-photo corpus, including low-light, rotated text, multilingual text, and unreadable images; record category/location-type and visible-text accuracy thresholds.
+- [ ] Exercise retry, permanent, validation, stale-revision, dead-letter, replay, rejection deletion, and withdrawal deletion paths in staging.
 - [ ] Replace all demo visual cards with approved, licensed media.
 
 ## Rights and money

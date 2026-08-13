@@ -58,6 +58,22 @@ export const assetSchema = z.object({
   contributor: z.string(),
   workflowStage: z.enum(["ingestion", "ai_tagging", "curator_correction", "approval"]),
   aiTags: z.array(z.string()),
+  visualLocationType: z.enum(["urban_street", "coastal_landscape", "market_scene", "indoor", "residential", "rural_landscape", "industrial", "event", "transport", "nature", "sports", "food", "other", "unknown"]).optional(),
+  primaryCategory: z.enum(["people", "lifestyle", "travel", "nature", "architecture", "food", "business", "transport", "arts_culture", "sport", "news_editorial", "objects", "other"]).optional(),
+  sceneAttributes: z.array(z.string()).optional(),
+  visibleText: z.string().optional(),
+  detectedLanguage: z.string().optional(),
+  textReadability: z.enum(["clear", "partial", "unreadable", "no_text"]).optional(),
+  ocrConfidence: z.number().min(0).max(1).nullable().optional(),
+  aiFieldConfidences: z.record(z.number().min(0).max(1)).optional(),
+  enrichmentValidation: z.object({ accepted: z.boolean().optional(), issues: z.array(z.string()).optional() }).passthrough().optional(),
+  geographicLocationSource: z.enum(["none", "seller", "exif", "evidence", "editor"]).optional(),
+  assetRevision: z.number().int().positive().optional(),
+  enrichedRevision: z.number().int().positive().nullable().optional(),
+  reviewedRevision: z.number().int().positive().nullable().optional(),
+  approvedRevision: z.number().int().positive().nullable().optional(),
+  indexedRevision: z.number().int().positive().nullable().optional(),
+  vectorIndexStatus: z.enum(["not_indexed", "pending", "indexed", "error"]).optional(),
   curatorNotes: z.string(),
   metadataReviewStatus: z.enum(["reviewed", "needs_context", "blocked"]).optional(),
   metadataReviewNote: z.string().optional(),
@@ -72,7 +88,7 @@ export const assetSchema = z.object({
 
 export const searchResponseSchema = z.object({
   query: z.string(),
-  mode: z.enum(["keyword", "semantic-preview"]),
+  mode: z.enum(["keyword", "semantic-preview", "hybrid"]),
   results: z.array(assetSchema),
   facets: z.array(z.object({ label: z.string(), value: z.string(), count: z.number().int().nonnegative() })),
 });
@@ -111,6 +127,10 @@ export const governanceActionRequestSchema = z.object({
   modelReleaseStatus: releaseStatusSchema.optional(),
   propertyReleaseStatus: releaseStatusSchema.optional(),
   aiTags: z.array(z.string().trim().min(1).max(80)).max(30).optional(),
+  visualLocationType: z.enum(["urban_street", "coastal_landscape", "market_scene", "indoor", "residential", "rural_landscape", "industrial", "event", "transport", "nature", "sports", "food", "other", "unknown"]).optional(),
+  primaryCategory: z.enum(["people", "lifestyle", "travel", "nature", "architecture", "food", "business", "transport", "arts_culture", "sport", "news_editorial", "objects", "other"]).optional(),
+  sceneAttributes: z.array(z.enum(["indoor", "outdoor", "daylight", "night", "sunrise_sunset", "people_present", "no_people", "crowd", "single_person", "group", "vehicle", "building", "landscape", "close_up", "wide_view", "aerial", "food_present", "text_present", "copy_space"])).max(30).optional(),
+  visibleText: z.string().trim().max(2000).optional(),
   monetizationModel: z.enum(["membership", "individual_license", "custom_quote"]).optional(),
   licensePriceCents: z.number().int().nonnegative().max(100_000_000).nullable().optional(),
 });
@@ -154,6 +174,32 @@ export const licenceRequestSchema = z.object({
   licenceType: z.enum(["editorial", "commercial", "advertising", "social", "broadcast", "exclusive"]),
   territory: z.string().min(1).max(80),
   durationDays: z.number().int().positive().max(3650),
+});
+
+export const paymentWebhookRequestSchema = z.object({
+  provider: z.string().trim().min(2).max(80),
+  eventId: z.string().trim().min(4).max(240),
+  type: z.enum(["payment_succeeded", "payment_failed", "refund", "chargeback"]),
+  licenceId: z.string().min(1).max(120),
+  paymentReference: z.string().trim().max(240).optional(),
+  amountCents: z.number().int().positive().max(100_000_000),
+  currency: z.string().length(3),
+});
+
+export const streamWebhookRequestSchema = z.object({
+  uid: z.string().trim().max(240).optional(),
+  readyToStream: z.boolean().optional(),
+  status: z.object({
+    state: z.string().trim().max(80).optional(),
+    pctComplete: z.string().trim().max(40).optional(),
+    errorReasonCode: z.string().trim().max(120).optional(),
+    errorReasonText: z.string().trim().max(500).optional(),
+  }).optional(),
+  meta: z.object({
+    filename: z.string().trim().max(240).optional(),
+    filetype: z.string().trim().max(120).optional(),
+    name: z.string().trim().max(240).optional(),
+  }).optional(),
 });
 
 export const contractResponseValidationErrorSchema = z.object({

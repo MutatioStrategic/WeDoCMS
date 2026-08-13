@@ -37,6 +37,10 @@ jobs:
             if curl --silent --fail http://127.0.0.1:8787/api/health >/dev/null; then break; fi
             sleep 1
           done
+          curl --silent --fail http://127.0.0.1:8787/api/health >/dev/null
+          npm run test:contracts:openapi
+          npm run test:contracts:consumer
+          npm run test:contracts:provider
           npm run test:auth
           npm run test:penetration
           npm run test:payments

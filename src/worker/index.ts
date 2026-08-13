@@ -30,6 +30,7 @@ import { canonicalContract, ocrValidation, sanitizeOcrResult, sha256Hex } from "
 import {
   enqueuePhotoJob,
   processPhotoJob,
+  replayPhotoJob,
   retryQueuedPhotoJobs,
   searchPhotoIndex,
   type PhotoEnrichmentJob,
@@ -55,8 +56,10 @@ import {
   governanceActionResponseSchema,
   healthResponseSchema,
   licenceRequestSchema as contractLicenceRequestSchema,
+  paymentWebhookRequestSchema,
   searchResponseSchema,
   sessionResponseSchema,
+  streamWebhookRequestSchema,
   uploadCompleteResponseSchema,
   uploadRequestSchema as contractUploadRequestSchema,
   uploadResponseSchema,
@@ -347,6 +350,22 @@ const assetRowToDomain = (row: Record<string, unknown>): Asset => ({
   contributor: String(row.contributor ?? "Veld Studio"),
   workflowStage: (row.workflow_stage as Asset["workflowStage"]) ?? "ingestion",
   aiTags: JSON.parse(String(row.ai_tags ?? "[]")) as string[],
+  visualLocationType: (row.visual_location_type as Asset["visualLocationType"]) ?? "unknown",
+  primaryCategory: (row.primary_category as Asset["primaryCategory"]) ?? "other",
+  sceneAttributes: JSON.parse(String(row.scene_attributes ?? "[]")) as string[],
+  visibleText: String(row.ocr_text ?? ""),
+  detectedLanguage: String(row.detected_language ?? "none"),
+  textReadability: (row.text_readability as Asset["textReadability"]) ?? "no_text",
+  ocrConfidence: row.ocr_confidence == null ? null : Number(row.ocr_confidence),
+  aiFieldConfidences: JSON.parse(String(row.ai_field_confidences ?? "{}")) as Record<string, number>,
+  enrichmentValidation: JSON.parse(String(row.enrichment_validation_json ?? "{}")) as Asset["enrichmentValidation"],
+  geographicLocationSource: (row.geographic_location_source as Asset["geographicLocationSource"]) ?? "none",
+  assetRevision: Number(row.asset_revision ?? 1),
+  enrichedRevision: row.enriched_revision == null ? null : Number(row.enriched_revision),
+  reviewedRevision: row.reviewed_revision == null ? null : Number(row.reviewed_revision),
+  approvedRevision: row.approved_revision == null ? null : Number(row.approved_revision),
+  indexedRevision: row.indexed_revision == null ? null : Number(row.indexed_revision),
+  vectorIndexStatus: (row.vector_index_status as Asset["vectorIndexStatus"]) ?? "not_indexed",
   curatorNotes: String(row.curator_notes ?? ""),
   metadataReviewStatus: row.metadata_review_status as Asset["metadataReviewStatus"] | undefined,
   metadataReviewNote: row.metadata_review_note as string | undefined,
@@ -375,6 +394,8 @@ const searchSchema = z.object({
   q: z.string().trim().max(240).default(""),
   kind: z.enum(["all", "image", "video"]).default("all"),
   location: z.string().trim().max(80).optional(),
+  locationType: z.enum(["urban_street", "coastal_landscape", "market_scene", "indoor", "residential", "rural_landscape", "industrial", "event", "transport", "nature", "sports", "food", "other", "unknown"]).optional(),
+  category: z.enum(["people", "lifestyle", "travel", "nature", "architecture", "food", "business", "transport", "arts_culture", "sport", "news_editorial", "objects", "other"]).optional(),
   status: z.enum(["published", "needs_review", "all"]).default("published"),
 });
 
@@ -412,6 +433,13 @@ app.get("/api/governance/assets", async (c) => {
 
 const governanceActionSchema = contractGovernanceActionRequestSchema;
 
+function governancePayloadEditsMetadata(payload: z.infer<typeof governanceActionSchema>): boolean {
+  return [payload.title, payload.caption, payload.subjectTags, payload.culturalTags, payload.aiTags,
+    payload.curatorNotes, payload.rightsStatus, payload.modelReleaseStatus, payload.propertyReleaseStatus,
+    payload.monetizationModel, payload.licensePriceCents, payload.visualLocationType,
+    payload.primaryCategory, payload.sceneAttributes, payload.visibleText].some((value) => value !== undefined);
+}
+
 app.post("/api/governance/assets/:id/action", async (c) => {
   const actor = await requestUser(c);
   if (!actor || !allowedRole(actor, ["contributor", "editor", "admin"])) return c.json({ error: "Contributor or editor access required" }, 403);
@@ -422,32 +450,76 @@ app.post("/api/governance/assets/:id/action", async (c) => {
   const safetyIssue = payload.culturalTags ? metadataSafetyIssue(payload.culturalTags) : null;
   if (safetyIssue) return c.json({ error: safetyIssue, code: "metadata_context_required" }, 422);
   const assetId = c.req.param("id");
-  const exists = await c.env.DB.prepare("SELECT id, owner_id, organization_id, kind FROM assets WHERE id = ? AND organization_id = ?").bind(assetId, actor.organizationId).first<{ id: string; owner_id: string; organization_id: string; kind: "image" | "video" }>();
+  let exists: { id: string; owner_id: string; organization_id: string; kind: "image" | "video"; status: string; asset_revision: number; reviewed_revision: number | null; metadata_review_status: string } | null;
+  try {
+    exists = await c.env.DB.prepare(`SELECT id, owner_id, organization_id, kind, status, asset_revision,
+      reviewed_revision, metadata_review_status FROM assets WHERE id = ? AND organization_id = ?`)
+      .bind(assetId, actor.organizationId).first<{ id: string; owner_id: string; organization_id: string; kind: "image" | "video"; status: string; asset_revision: number; reviewed_revision: number | null; metadata_review_status: string }>();
+  } catch (error) {
+    logEvent("error", "metadata.workflow_schema_unavailable", c.get("trace"), { assetId, error: error instanceof Error ? error.message : "unknown-error" });
+    return c.json({ error: "Metadata workflow is unavailable until its database migration is applied", code: "metadata_schema_unavailable" }, 503);
+  }
   if (!exists) return c.json({ error: "Asset not found" }, 404);
   if (exists.owner_id !== actor.id && !allowedRole(actor, ["editor", "admin"])) return c.json({ error: "Forbidden" }, 403);
+  if (payload.action === "approve" && governancePayloadEditsMetadata(payload)) {
+    return c.json({ error: "Save the metadata correction before approving this revision", code: "review_revision_required" }, 422);
+  }
+  if (payload.action === "approve" && !archiveDomain.canApproveMetadataRevision({ assetRevision: exists.asset_revision, reviewedRevision: exists.reviewed_revision, metadataReviewStatus: exists.metadata_review_status as Asset["metadataReviewStatus"] })) {
+    return c.json({ error: "The current metadata revision must be reviewed before approval", code: "review_revision_required" }, 422);
+  }
   const stage = payload.action === "run_ai_tagging" ? "ai_tagging" : payload.action === "approve" ? "approval" : "curator_correction";
   const status = payload.action === "approve" ? "published" : payload.action === "reject" ? "rejected" : "needs_review";
-  await c.env.DB.prepare(`
-    UPDATE assets SET status = ?, workflow_stage = ?, title = COALESCE(?, title), caption = COALESCE(?, caption),
-      subject_tags = COALESCE(?, subject_tags), cultural_tags = COALESCE(?, cultural_tags), ai_tags = COALESCE(?, ai_tags),
-      curator_notes = COALESCE(?, curator_notes), rights_status = COALESCE(?, rights_status),
-      model_release_status = COALESCE(?, model_release_status), property_release_status = COALESCE(?, property_release_status),
-      monetization_model = COALESCE(?, monetization_model),
+  if (payload.action === "run_ai_tagging") {
+    await c.env.DB.prepare(`UPDATE assets SET status = 'needs_review', workflow_stage = 'ai_tagging',
+      asset_revision = asset_revision + 1, enriched_revision = NULL, reviewed_revision = NULL, approved_revision = NULL,
+      human_verified = 0, metadata_review_status = 'needs_context', metadata_provenance = 'ai_suggested',
+      metadata_review_note = 'AI enrichment is queued for this media revision.', vector_index_status = 'pending',
+      updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?`).bind(assetId, actor.organizationId).run();
+  } else if (payload.action === "save_correction") {
+    await c.env.DB.prepare(`UPDATE assets SET status = 'needs_review', workflow_stage = 'curator_correction',
+      title = COALESCE(?, title), caption = COALESCE(?, caption), subject_tags = COALESCE(?, subject_tags),
+      cultural_tags = COALESCE(?, cultural_tags), ai_tags = COALESCE(?, ai_tags), curator_notes = COALESCE(?, curator_notes),
+      rights_status = COALESCE(?, rights_status), model_release_status = COALESCE(?, model_release_status),
+      property_release_status = COALESCE(?, property_release_status), monetization_model = COALESCE(?, monetization_model),
       license_price_cents = CASE WHEN ? = 'individual_license' THEN ? WHEN ? IN ('membership', 'custom_quote') THEN NULL ELSE license_price_cents END,
-      human_verified = ?, updated_at = CURRENT_TIMESTAMP, last_reviewed_at = CURRENT_TIMESTAMP
-    WHERE id = ? AND organization_id = ?
-  `).bind(
-    status, stage, payload.title ?? null, payload.caption ?? null,
-    payload.subjectTags ? JSON.stringify(payload.subjectTags) : null,
-    payload.culturalTags ? JSON.stringify(payload.culturalTags) : null,
-    payload.aiTags ? JSON.stringify(payload.aiTags) : null,
-    payload.curatorNotes ?? null, payload.rightsStatus ?? null, payload.modelReleaseStatus ?? null,
-    payload.propertyReleaseStatus ?? null, payload.monetizationModel ?? null,
-    payload.monetizationModel ?? null, payload.licensePriceCents ?? null, payload.monetizationModel ?? null,
-    payload.action === "approve" ? 1 : 0, assetId, actor.organizationId,
-  ).run();
+      visual_location_type = COALESCE(?, visual_location_type), primary_category = COALESCE(?, primary_category),
+      scene_attributes = COALESCE(?, scene_attributes), ocr_text = COALESCE(?, ocr_text),
+      asset_revision = asset_revision + 1, reviewed_revision = asset_revision + 1, approved_revision = NULL,
+      human_verified = 0, metadata_review_status = 'reviewed', metadata_provenance = 'editor',
+      metadata_review_note = 'Seller/editor confirmed the description, visible location type, category, attributes, visible text, and evidence-backed geographic context.',
+      updated_at = CURRENT_TIMESTAMP, last_reviewed_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?`)
+      .bind(
+        payload.title ?? null, payload.caption ?? null,
+        payload.subjectTags ? JSON.stringify(payload.subjectTags) : null,
+        payload.culturalTags ? JSON.stringify(payload.culturalTags) : null,
+        payload.aiTags ? JSON.stringify(payload.aiTags) : null,
+        payload.curatorNotes ?? null, payload.rightsStatus ?? null, payload.modelReleaseStatus ?? null,
+        payload.propertyReleaseStatus ?? null, payload.monetizationModel ?? null,
+        payload.monetizationModel ?? null, payload.licensePriceCents ?? null, payload.monetizationModel ?? null,
+        payload.visualLocationType ?? null, payload.primaryCategory ?? null,
+        payload.sceneAttributes ? JSON.stringify(payload.sceneAttributes) : null, payload.visibleText ?? null,
+        assetId, actor.organizationId,
+      ).run();
+  } else if (payload.action === "approve") {
+    await c.env.DB.prepare(`UPDATE assets SET status = 'published', workflow_stage = 'approval', human_verified = 1,
+      approved_revision = asset_revision, metadata_review_status = 'reviewed', metadata_provenance = 'editor',
+      vector_index_status = 'pending', index_terminal_reason = NULL, updated_at = CURRENT_TIMESTAMP,
+      last_reviewed_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?`).bind(assetId, actor.organizationId).run();
+  } else {
+    await c.env.DB.prepare(`UPDATE assets SET status = 'rejected', workflow_stage = 'curator_correction', human_verified = 0,
+      asset_revision = asset_revision + 1, reviewed_revision = NULL, approved_revision = NULL,
+      vector_index_status = 'pending', index_terminal_reason = 'rejected', updated_at = CURRENT_TIMESTAMP,
+      last_reviewed_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?`).bind(assetId, actor.organizationId).run();
+  }
+  const revisionRow = await c.env.DB.prepare("SELECT asset_revision FROM assets WHERE id = ? AND organization_id = ?")
+    .bind(assetId, actor.organizationId).first<{ asset_revision: number }>();
   await c.env.DB.prepare("INSERT INTO metadata_events (id, asset_id, actor_id, event_type, payload) VALUES (?, ?, ?, ?, ?)")
-    .bind(crypto.randomUUID(), assetId, actor.id, payload.action === "run_ai_tagging" ? "ai_tagged" : payload.action === "save_correction" ? "curator_corrected" : payload.action === "approve" ? "approved" : "rejected", JSON.stringify(payload)).run();
+    .bind(crypto.randomUUID(), assetId, actor.id, payload.action === "run_ai_tagging" ? "ai_tagged" : payload.action === "save_correction" ? "curator_corrected" : payload.action === "approve" ? "approved" : "rejected", JSON.stringify({ ...payload, assetRevision: revisionRow?.asset_revision })).run();
+  if (payload.action !== "run_ai_tagging") {
+    await c.env.DB.prepare(`UPDATE photo_ai_provenance SET reviewed_by = ?, review_outcome = ?, reviewed_at = CURRENT_TIMESTAMP
+      WHERE id = (SELECT id FROM photo_ai_provenance WHERE asset_id = ? ORDER BY created_at DESC LIMIT 1)`)
+      .bind(actor.id, payload.action === "save_correction" ? "reviewed" : payload.action, assetId).run();
+  }
   let indexing = "not_required";
   if (payload.action === "run_ai_tagging") {
     indexing = (await enqueuePhotoJobBestEffort(c.env, assetId, "enrich")) ? "enrichment_queued" : "enrichment_retry_pending";
@@ -706,10 +778,11 @@ app.post("/api/assets", async (c) => {
     return c.json({ error: "Individual licences must have a price of at least ZAR 1.00" }, 422);
   }
   const id = crypto.randomUUID();
-  await c.env.DB.prepare(`INSERT INTO assets (id, organization_id, owner_id, kind, status, title, description, caption, province, city, locality, landmark, subject_tags, cultural_tags, rights_status, model_release_status, property_release_status, monetization_model, license_price_cents, workflow_stage)
-    VALUES (?, ?, ?, ?, 'needs_review', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'curator_correction')`)
-    .bind(id, user.organizationId, user.id, payload.kind, payload.title, payload.description, payload.caption, payload.province ?? null, payload.city ?? null, payload.locality ?? null, payload.landmark ?? null, JSON.stringify(payload.subjectTags), JSON.stringify(payload.culturalTags), payload.rightsStatus, payload.modelReleaseStatus, payload.propertyReleaseStatus, payload.monetizationModel, payload.monetizationModel === "individual_license" ? payload.licensePriceCents : null).run();
-  return c.json(validateContractResponse("POST /api/assets 201", assetCreateResponseSchema, { id, status: "needs_review" }), 201);
+  const geographicLocationSource = payload.province || payload.city || payload.locality || payload.landmark ? "seller" : "none";
+  await c.env.DB.prepare(`INSERT INTO assets (id, organization_id, owner_id, kind, status, title, description, caption, province, city, locality, landmark, subject_tags, cultural_tags, rights_status, model_release_status, property_release_status, monetization_model, license_price_cents, workflow_stage, geographic_location_source)
+    VALUES (?, ?, ?, ?, 'needs_review', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'curator_correction', ?)`)
+    .bind(id, user.organizationId, user.id, payload.kind, payload.title, payload.description, payload.caption, payload.province ?? null, payload.city ?? null, payload.locality ?? null, payload.landmark ?? null, JSON.stringify(payload.subjectTags), JSON.stringify(payload.culturalTags), payload.rightsStatus, payload.modelReleaseStatus, payload.propertyReleaseStatus, payload.monetizationModel, payload.monetizationModel === "individual_license" ? payload.licensePriceCents : null, geographicLocationSource).run();
+  return c.json(validateContractResponse("POST /api/assets 201", assetCreateResponseSchema, { id, status: "needs_review" }), 201, { Location: `/api/assets/${id}` });
 });
 
 app.patch("/api/assets/:id", async (c) => {
@@ -731,8 +804,14 @@ app.patch("/api/assets/:id", async (c) => {
   }
   const safetyIssue = metadataSafetyIssue((next.culturalTags ?? []) as string[]);
   if (safetyIssue) return c.json({ error: safetyIssue, code: "metadata_context_required" }, 422);
-  await c.env.DB.prepare(`UPDATE assets SET kind = ?, title = ?, description = ?, caption = ?, province = ?, city = ?, locality = ?, landmark = ?, subject_tags = ?, cultural_tags = ?, rights_status = ?, model_release_status = ?, property_release_status = ?, monetization_model = ?, license_price_cents = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?`)
-    .bind(next.kind, next.title, next.description ?? "", next.caption ?? "", next.province ?? null, next.city ?? null, next.locality ?? null, next.landmark ?? null, JSON.stringify(next.subjectTags ?? []), JSON.stringify(next.culturalTags ?? []), next.rightsStatus ?? "pending", next.modelReleaseStatus ?? "unknown", next.propertyReleaseStatus ?? "unknown", next.monetizationModel ?? "membership", next.monetizationModel === "individual_license" ? next.licensePriceCents : null, id, user.organizationId).run();
+  const locationWasEdited = payload.province !== undefined || payload.city !== undefined || payload.locality !== undefined || payload.landmark !== undefined;
+  await c.env.DB.prepare(`UPDATE assets SET kind = ?, title = ?, description = ?, caption = ?, province = ?, city = ?, locality = ?, landmark = ?, subject_tags = ?, cultural_tags = ?, rights_status = ?, model_release_status = ?, property_release_status = ?, monetization_model = ?, license_price_cents = ?,
+    geographic_location_source = CASE WHEN ? = 1 THEN 'seller' ELSE geographic_location_source END,
+    asset_revision = asset_revision + 1, reviewed_revision = NULL, approved_revision = NULL, human_verified = 0,
+    status = 'needs_review', workflow_stage = 'curator_correction', metadata_review_status = 'needs_context',
+    metadata_review_note = 'Seller metadata changed; review the current revision before publication.',
+    vector_index_status = 'pending', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?`)
+    .bind(next.kind, next.title, next.description ?? "", next.caption ?? "", next.province ?? null, next.city ?? null, next.locality ?? null, next.landmark ?? null, JSON.stringify(next.subjectTags ?? []), JSON.stringify(next.culturalTags ?? []), next.rightsStatus ?? "pending", next.modelReleaseStatus ?? "unknown", next.propertyReleaseStatus ?? "unknown", next.monetizationModel ?? "membership", next.monetizationModel === "individual_license" ? next.licensePriceCents : null, locationWasEdited ? 1 : 0, id, user.organizationId).run();
   return c.json({ ok: true, id });
 });
 
@@ -756,12 +835,35 @@ app.post("/api/admin/assets/:id/review", async (c) => {
   const user = await requestUser(c);
   if (!user || !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Editor access required" }, 403);
   const payload = editorialReviewSchema.parse(await c.req.json());
+  const asset = await c.env.DB.prepare(`SELECT id, kind, asset_revision, reviewed_revision, metadata_review_status
+    FROM assets WHERE id = ? AND organization_id = ?`).bind(c.req.param("id"), user.organizationId)
+    .first<{ id: string; kind: "image" | "video"; asset_revision: number; reviewed_revision: number | null; metadata_review_status: string }>();
+  if (!asset) return c.json({ error: "Asset not found" }, 404);
+  if (payload.decision === "approved" && !archiveDomain.canApproveMetadataRevision({ assetRevision: asset.asset_revision, reviewedRevision: asset.reviewed_revision, metadataReviewStatus: asset.metadata_review_status as Asset["metadataReviewStatus"] })) {
+    return c.json({ error: "Save a correction for the current metadata revision before approval", code: "review_revision_required" }, 422);
+  }
   const status = payload.decision === "approved" ? "published" : payload.decision === "withdrawn" ? "withdrawn" : payload.decision === "rejected" ? "rejected" : "needs_review";
-  await c.env.DB.batch([
-    c.env.DB.prepare("UPDATE assets SET status = ?, workflow_stage = ?, human_verified = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?").bind(status, payload.decision === "approved" ? "approval" : "curator_correction", payload.decision === "approved" ? 1 : 0, c.req.param("id"), user.organizationId),
-    c.env.DB.prepare("INSERT INTO metadata_events (id, asset_id, actor_id, event_type, payload) SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM assets WHERE id = ? AND organization_id = ?)").bind(crypto.randomUUID(), c.req.param("id"), user.id, payload.decision === "approved" ? "approved" : payload.decision === "rejected" ? "rejected" : "curator_corrected", JSON.stringify({ notes: payload.notes }), c.req.param("id"), user.organizationId),
-  ]);
-  return c.json({ ok: true, status });
+  if (payload.decision === "approved") {
+    await c.env.DB.prepare(`UPDATE assets SET status = 'published', workflow_stage = 'approval', human_verified = 1,
+      approved_revision = asset_revision, vector_index_status = 'pending', index_terminal_reason = NULL,
+      curator_notes = ?, updated_at = CURRENT_TIMESTAMP, last_reviewed_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND organization_id = ?`).bind(payload.notes, asset.id, user.organizationId).run();
+  } else {
+    await c.env.DB.prepare(`UPDATE assets SET status = ?, workflow_stage = 'curator_correction', human_verified = 0,
+      asset_revision = asset_revision + 1, reviewed_revision = NULL, approved_revision = NULL,
+      vector_index_status = 'pending', index_terminal_reason = ?, curator_notes = ?, updated_at = CURRENT_TIMESTAMP,
+      last_reviewed_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?`)
+      .bind(status, status, payload.notes, asset.id, user.organizationId).run();
+  }
+  await c.env.DB.prepare("INSERT INTO metadata_events (id, asset_id, actor_id, event_type, payload) VALUES (?, ?, ?, ?, ?)")
+    .bind(crypto.randomUUID(), asset.id, user.id, payload.decision === "approved" ? "approved" : payload.decision === "rejected" || payload.decision === "withdrawn" ? "rejected" : "curator_corrected", JSON.stringify({ notes: payload.notes, decision: payload.decision })).run();
+  await c.env.DB.prepare(`UPDATE photo_ai_provenance SET reviewed_by = ?, review_outcome = ?, reviewed_at = CURRENT_TIMESTAMP
+    WHERE id = (SELECT id FROM photo_ai_provenance WHERE asset_id = ? ORDER BY created_at DESC LIMIT 1)`)
+    .bind(user.id, payload.decision, asset.id).run();
+  const indexing = asset.kind === "image" && payload.decision !== "needs_changes"
+    ? (await enqueuePhotoJobBestEffort(c.env, asset.id, "sync_index") ? "index_sync_queued" : "index_sync_retry_pending")
+    : "not_required";
+  return c.json({ ok: true, status, indexing });
 });
 
 const licenceRequestSchema: z.ZodType<LicenceRequest> = contractLicenceRequestSchema;
@@ -841,7 +943,7 @@ app.post("/api/payments/:licenceId/session", async (c) => {
     });
     await c.env.DB.prepare("UPDATE licences SET payment_provider = ?, payment_reference = COALESCE(payment_reference, ?) WHERE id = ? AND organization_id = ? AND status = 'pending'")
       .bind(c.env.PAYMENT_PROVIDER, session.providerReference ?? session.id, licence.id, user.organizationId).run();
-    return c.json({ licenceId: licence.id, provider: session.provider, checkoutUrl: session.checkoutUrl, status: session.status }, 201);
+    return c.json({ licenceId: licence.id, provider: session.provider, checkoutUrl: session.checkoutUrl, status: session.status }, 201, { Location: `/api/payments/${licence.id}/session` });
   } catch (error) {
     logEvent("error", "payment.checkout_session_failed", c.get("trace"), { licenceId: licence.id, provider: c.env.PAYMENT_PROVIDER, error: error instanceof Error ? error.message : "unknown" });
     return c.json({ error: "Payment provider could not create a checkout session" }, 503);
@@ -898,15 +1000,7 @@ app.post("/api/payments/:licenceId/settled", async (c) => {
   }
 });
 
-const paymentWebhookSchema = z.object({
-  provider: z.string().trim().min(2).max(80),
-  eventId: z.string().trim().min(4).max(240),
-  type: z.enum(["payment_succeeded", "payment_failed", "refund", "chargeback"]),
-  licenceId: z.string().min(1).max(120),
-  paymentReference: z.string().trim().max(240).optional(),
-  amountCents: z.number().int().positive().max(100_000_000),
-  currency: z.string().length(3),
-});
+const paymentWebhookSchema = paymentWebhookRequestSchema;
 
 async function verifyPaymentWebhook(secret: string, signature: string, body: string): Promise<boolean> {
   const expected = hex(await hmac(utf8(secret), body));
@@ -940,9 +1034,9 @@ app.post("/api/webhooks/payments", async (c) => {
   const duplicate = await c.env.DB.prepare("SELECT id, status FROM payment_webhook_events WHERE provider = ? AND provider_event_id = ?").bind(payload.provider, payload.eventId).first<{ id: string; status: string }>();
   if (duplicate) return c.json({ accepted: true, duplicate: true, status: duplicate.status });
   const eventId = crypto.randomUUID();
-  await c.env.DB.prepare("INSERT INTO payment_webhook_events (id, provider, provider_event_id, event_type, licence_id, amount_cents, currency, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-    .bind(eventId, payload.provider, payload.eventId, payload.type, payload.licenceId, payload.amountCents, payload.currency.toUpperCase(), body).run();
   try {
+    await c.env.DB.prepare("INSERT INTO payment_webhook_events (id, provider, provider_event_id, event_type, licence_id, amount_cents, currency, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(eventId, payload.provider, payload.eventId, payload.type, payload.licenceId, payload.amountCents, payload.currency.toUpperCase(), body).run();
     let transactionId: string | null = null;
     if (payload.type === "payment_succeeded") {
       const current = await c.env.DB.prepare("SELECT status, price_cents FROM licences WHERE id = ?").bind(payload.licenceId).first<{ status: string; price_cents: number }>();
@@ -1437,22 +1531,26 @@ app.get("/api/assets", async (c) => {
     q: c.req.query("q") ?? "",
     kind: c.req.query("kind") ?? "all",
     location: c.req.query("location"),
+    locationType: c.req.query("locationType"),
+    category: c.req.query("category"),
     status: c.req.query("status") ?? "published",
   });
 
   let rows: Record<string, unknown>[] = [];
-  let usedVectorIndex = false;
-  if (params.q) {
+  let searchHandled = false;
+  let searchMode: SearchResponse["mode"] = "keyword";
+  if (params.q && params.status === "published") {
     try {
       const semantic = await searchPhotoIndex(photoPipeline(c.env), params.q, params);
       rows = semantic.rows;
-      usedVectorIndex = semantic.usedVectorIndex;
+      searchMode = semantic.mode;
+      searchHandled = true;
     } catch (error) {
-      logEvent("error", "photo.search.vector_failed", c.get("trace"), { error: error instanceof Error ? error.message : "unknown-error" });
+      logEvent("error", "photo.search.hybrid_failed", c.get("trace"), { error: error instanceof Error ? error.message : "unknown-error" });
     }
   }
 
-  if (!usedVectorIndex) {
+  if (!searchHandled) {
     const clauses = [params.status === "all" ? "1 = 1" : "a.status = ?"];
     const values: string[] = params.status === "all" ? [] : [params.status];
 
@@ -1461,14 +1559,16 @@ app.get("/api/assets", async (c) => {
       values.push(params.kind);
     }
     if (params.location) {
-      clauses.push("(a.city LIKE ? OR a.province LIKE ? OR a.locality LIKE ? OR a.landmark LIKE ?)");
+      clauses.push("(a.country LIKE ? OR a.city LIKE ? OR a.province LIKE ? OR a.locality LIKE ? OR a.landmark LIKE ?)");
       const location = `%${params.location}%`;
-      values.push(location, location, location, location);
+      values.push(location, location, location, location, location);
     }
+    if (params.locationType) { clauses.push("a.visual_location_type = ?"); values.push(params.locationType); }
+    if (params.category) { clauses.push("a.primary_category = ?"); values.push(params.category); }
     if (params.q) {
-      clauses.push("(a.title LIKE ? OR a.description LIKE ? OR a.caption LIKE ? OR a.subject_tags LIKE ? OR a.cultural_tags LIKE ? OR a.ai_tags LIKE ? OR a.ocr_text LIKE ?)");
+      clauses.push("(a.title LIKE ? OR a.description LIKE ? OR a.caption LIKE ? OR a.subject_tags LIKE ? OR a.cultural_tags LIKE ? OR a.ai_tags LIKE ? OR a.ocr_text LIKE ? OR a.visual_location_type LIKE ? OR a.primary_category LIKE ? OR a.scene_attributes LIKE ?)");
       const query = `%${params.q}%`;
-      values.push(query, query, query, query, query, query, query);
+      values.push(query, query, query, query, query, query, query, query, query, query);
     }
 
     const result = await c.env.DB.prepare(`
@@ -1483,7 +1583,7 @@ app.get("/api/assets", async (c) => {
   }
   const response: SearchResponse = {
     query: params.q,
-    mode: usedVectorIndex ? "semantic-preview" : "keyword",
+    mode: searchMode,
     results: rows.map(assetRowToDomain),
     facets: [
       { label: "South Africa", value: "South Africa", count: rows.length },
@@ -1506,6 +1606,43 @@ app.post("/api/admin/photo-index/rebuild", async (c) => {
     if (await enqueuePhotoJobBestEffort(c.env, asset.id, "sync_index")) queued += 1;
   }
   return c.json({ queued, total: assets.results.length, message: "Published photos queued for idempotent re-indexing." }, 202);
+});
+
+const photoJobStatusSchema = z.enum(["all", "queued", "running", "completed", "needs_review", "failed", "dead_lettered", "skipped"]);
+
+app.get("/api/admin/photo-jobs", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["admin", "editor"])) return c.json({ error: "Editor access required" }, 403);
+  const status = photoJobStatusSchema.parse(c.req.query("status") ?? "all");
+  const result = await c.env.DB.prepare(`SELECT j.*, a.title, a.status AS asset_status, a.workflow_stage,
+      a.asset_revision AS current_asset_revision, a.approved_revision, a.indexed_revision
+    FROM photo_ai_jobs j JOIN assets a ON a.id = j.asset_id
+    WHERE a.organization_id = ? AND (? = 'all' OR j.status = ?)
+    ORDER BY CASE j.status WHEN 'dead_lettered' THEN 1 WHEN 'failed' THEN 2 WHEN 'needs_review' THEN 3 ELSE 4 END,
+      j.updated_at DESC LIMIT 200`)
+    .bind(user.organizationId, status, status).all<Record<string, unknown>>();
+  return c.json({ status, results: result.results });
+});
+
+app.get("/api/admin/photo-jobs/:jobId/provenance", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["admin", "editor"])) return c.json({ error: "Editor access required" }, 403);
+  const result = await c.env.DB.prepare(`SELECT p.* FROM photo_ai_provenance p
+    JOIN assets a ON a.id = p.asset_id WHERE p.job_id = ? AND a.organization_id = ? ORDER BY p.attempt ASC, p.created_at ASC`)
+    .bind(c.req.param("jobId"), user.organizationId).all<Record<string, unknown>>();
+  return c.json({ jobId: c.req.param("jobId"), results: result.results });
+});
+
+app.post("/api/admin/photo-jobs/:jobId/replay", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["admin", "editor"])) return c.json({ error: "Editor access required" }, 403);
+  const job = await c.env.DB.prepare(`SELECT j.id FROM photo_ai_jobs j JOIN assets a ON a.id = j.asset_id
+    WHERE j.id = ? AND a.organization_id = ? AND j.status IN ('failed', 'dead_lettered', 'needs_review', 'skipped')`)
+    .bind(c.req.param("jobId"), user.organizationId).first<{ id: string }>();
+  if (!job) return c.json({ error: "Replayable photo job not found" }, 404);
+  const replayedJobId = await replayPhotoJob(photoPipeline(c.env), job.id);
+  if (!replayedJobId) return c.json({ error: "Photo queue is unavailable", code: "photo_queue_unavailable" }, 503);
+  return c.json({ jobId: replayedJobId, status: "queued", replayed: true }, 202);
 });
 
 app.post("/api/analytics/events", async (c) => {
@@ -1696,7 +1833,7 @@ app.post("/api/uploads", async (c) => {
     uploadUrl,
     expiresInSeconds: uploadUrl ? 900 : null,
     message: "Upload directly to private R2 with this short-lived PUT URL, then call the completion endpoint.",
-  }), 201);
+  }), 201, { Location: `/api/uploads/${id}/complete` });
 });
 
 app.post("/api/uploads/:uploadId/complete", async (c) => {
@@ -1751,10 +1888,14 @@ app.post("/api/uploads/:uploadId/complete", async (c) => {
 
   const assetId = session.asset_id ?? crypto.randomUUID();
   const assetStatement = session.asset_id
-    ? c.env.DB.prepare("UPDATE assets SET original_key = ?, source_file_name = ?, status = 'needs_review', workflow_stage = 'curator_correction', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?")
-      .bind(session.object_key, session.filename, assetId, session.organization_id)
-    : c.env.DB.prepare("INSERT INTO assets (id, organization_id, owner_id, kind, status, title, source_file_name, original_key, workflow_stage) VALUES (?, ?, ?, ?, 'needs_review', ?, ?, ?, 'curator_correction')")
-      .bind(assetId, session.organization_id, session.owner_id, session.content_type.startsWith("video/") ? "video" : "image", session.filename, session.filename, session.object_key);
+    ? c.env.DB.prepare(`UPDATE assets SET original_key = ?, source_file_name = ?, source_etag = ?,
+        status = 'needs_review', workflow_stage = 'ai_tagging', asset_revision = asset_revision + 1,
+        enriched_revision = NULL, reviewed_revision = NULL, approved_revision = NULL, human_verified = 0,
+        metadata_review_status = 'needs_context', metadata_review_note = 'Uploaded media is queued for AI enrichment and human review.',
+        vector_index_status = 'pending', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?`)
+      .bind(session.object_key, session.filename, object.etag, assetId, session.organization_id)
+    : c.env.DB.prepare("INSERT INTO assets (id, organization_id, owner_id, kind, status, title, source_file_name, original_key, source_etag, workflow_stage) VALUES (?, ?, ?, ?, 'needs_review', ?, ?, ?, ?, 'ai_tagging')")
+      .bind(assetId, session.organization_id, session.owner_id, session.content_type.startsWith("video/") ? "video" : "image", session.filename, session.filename, session.object_key, object.etag);
   const persistence = await c.env.DB.batch([
     assetStatement,
     c.env.DB.prepare(`
@@ -1802,12 +1943,7 @@ app.post("/api/security/turnstile", async (c) => {
   return c.json(result, result.verified ? 200 : 403);
 });
 
-type StreamWebhookPayload = {
-  uid?: string;
-  readyToStream?: boolean;
-  status?: { state?: string; pctComplete?: string; errorReasonCode?: string; errorReasonText?: string };
-  meta?: { filename?: string; filetype?: string; name?: string };
-};
+type StreamWebhookPayload = z.infer<typeof streamWebhookRequestSchema>;
 
 async function verifyStreamWebhook(secret: string, signature: string, body: string): Promise<boolean> {
   const values = new Map(signature.split(",").map((part) => {
@@ -1832,7 +1968,7 @@ app.post("/api/webhooks/stream", async (c) => {
     return c.json({ error: "Invalid Stream webhook signature" }, 401);
   }
 
-  const payload = JSON.parse(body) as StreamWebhookPayload;
+  const payload: StreamWebhookPayload = streamWebhookRequestSchema.parse(JSON.parse(body));
   const streamUid = payload.uid ?? "unknown";
   const state = payload.status?.state ?? "unknown";
   const providerEventId = hex(await crypto.subtle.digest("SHA-256", utf8(body)));
@@ -1869,13 +2005,20 @@ app.onError((error, c) => {
     });
     return c.json(body, 500);
   }
-  const validation = error instanceof z.ZodError;
+  const malformedJson = error instanceof SyntaxError && /JSON|json|Unexpected token/i.test(error.message);
+  const validation = error instanceof z.ZodError || malformedJson;
   logEvent(validation ? "warn" : "error", "request.error_handled", c.get("trace"), {
     method: c.req.method,
     path: c.req.path,
     error: validation ? "validation_error" : error instanceof Error ? error.message : "unknown-error",
   });
-  const body = { error: validation ? "Invalid request" : "Internal server error", ...(validation ? { issues: error.issues.map((issue) => ({ path: issue.path, code: issue.code })) } : {}) };
+  const body = {
+    error: validation ? "Invalid request" : "Internal server error",
+    ...(validation ? {
+      ...(malformedJson ? { code: "invalid_json" } : {}),
+      issues: malformedJson ? [{ path: [], code: "invalid_json" }] : (error as z.ZodError).issues.map((issue) => ({ path: issue.path, code: issue.code })),
+    } : {}),
+  };
   return c.json(validateContractResponse("error response", errorResponseSchema, body), validation ? 400 : 500);
 });
 
@@ -1883,8 +2026,33 @@ type QueueMessage = R2EventMessage | PhotoEnrichmentJob;
 
 function isPhotoEnrichmentJob(message: QueueMessage): message is PhotoEnrichmentJob {
   if (!("type" in message)) return false;
-  const candidate = message as { type?: unknown; assetId?: unknown; operation?: unknown };
-  return candidate.type === "photo.enrich" && typeof candidate.assetId === "string" && typeof candidate.operation === "string";
+  const candidate = message as { type?: unknown; jobId?: unknown; assetId?: unknown; operation?: unknown; assetRevision?: unknown; sourceEtag?: unknown };
+  return candidate.type === "photo.enrich" && typeof candidate.jobId === "string" && typeof candidate.assetId === "string"
+    && (candidate.operation === "enrich" || candidate.operation === "sync_index")
+    && Number.isInteger(candidate.assetRevision)
+    && (candidate.sourceEtag === null || typeof candidate.sourceEtag === "string");
+}
+
+async function normalizePhotoEnrichmentJob(env: Bindings, message: QueueMessage): Promise<PhotoEnrichmentJob | null> {
+  if (isPhotoEnrichmentJob(message)) return message;
+  const candidate = message as { type?: unknown; jobId?: unknown; assetId?: unknown; operation?: unknown };
+  if (candidate.type !== "photo.enrich" || typeof candidate.jobId !== "string" || typeof candidate.assetId !== "string"
+    || (candidate.operation !== "enrich" && candidate.operation !== "sync_index")) return null;
+  const persisted = await env.DB.prepare("SELECT asset_revision, source_etag FROM photo_ai_jobs WHERE id = ? AND asset_id = ? AND operation = ?")
+    .bind(candidate.jobId, candidate.assetId, candidate.operation).first<{ asset_revision: number; source_etag: string | null }>();
+  return persisted ? {
+    type: "photo.enrich",
+    jobId: candidate.jobId,
+    assetId: candidate.assetId,
+    operation: candidate.operation,
+    assetRevision: persisted.asset_revision,
+    sourceEtag: persisted.source_etag,
+  } : null;
+}
+
+function isR2EventMessage(message: QueueMessage): message is R2EventMessage {
+  const candidate = message as { action?: unknown; bucket?: unknown; object?: { key?: unknown } };
+  return typeof candidate.action === "string" && typeof candidate.bucket === "string" && typeof candidate.object?.key === "string";
 }
 
 const worker: ExportedHandler<Bindings, QueueMessage> = {
@@ -1908,10 +2076,14 @@ const worker: ExportedHandler<Bindings, QueueMessage> = {
     for (const message of batch.messages) {
       const trace = traceContext(new Request(`https://internal/queue/${message.id}`));
       try {
-        if (isPhotoEnrichmentJob(message.body)) {
-          await processPhotoJob(photoPipeline(env), message.body, trace);
-        } else {
+        const photoJob = await normalizePhotoEnrichmentJob(env, message.body);
+        if (photoJob) {
+          await processPhotoJob(photoPipeline(env), photoJob, trace);
+        } else if (isR2EventMessage(message.body)) {
           await replicateR2Event(env, message.body, trace);
+        } else {
+          logEvent("warn", "queue.message.invalid", trace, { messageId: message.id });
+          recordMetric(env, "queue_invalid_message", trace, 1, ["unsupported-payload"]);
         }
         message.ack();
       } catch (error) {

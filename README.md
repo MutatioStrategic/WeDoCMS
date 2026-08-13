@@ -22,8 +22,9 @@ Veld Archive is a Cloudflare-native foundation for a trusted South African photo
 - Confidence-prioritized editorial review queue with server-side metadata safety checks that reject stereotype or identity-inference labels.
 - Vendor-neutral payout and DAM integration layer with Stripe Connect, South African bank, mobile-money, SEPA, Adobe Experience Manager, and Bynder adapters.
 - Optional verification-document OCR using Cloudflare Workers AI's `@cf/moondream/moondream3.1-9B-A2B`; OCR output is assistive, masks full identity/bank numbers, and always requires human/KYC-provider review.
-- Photo AI pipeline: image upload → queued Workers AI visual metadata/OCR → seller/editor correction and approval → one-time embedding → Vectorize upsert. Buyer searches query the stored vectors and never OCR-scan the repository.
-- Idempotent `photo_ai_jobs` records, queue retries/dead-letter handling, scheduled recovery, vector deletion for rejected photos, and an admin re-index endpoint (`POST /api/admin/photo-index/rebuild`).
+- Photo AI pipeline: scanned image upload → revision-pinned Workers AI description, visible-location type, category, attributes, and visible-text extraction → seller/editor correction → approval of that exact revision → D1 FTS5 + Vectorize indexing. The model never asserts country, province, city, locality, or landmark from pixels; those fields require seller metadata, EXIF, or editor evidence.
+- Hybrid buyer retrieval combines D1 FTS5 lexical/structured matches with semantic Vectorize matches and human-verification weighting. Buyer searches query approved stored metadata and vectors; they never OCR-scan the repository.
+- Revision/ETag-aware `photo_ai_jobs` records, retryable/permanent/validation/stale failure classes, scheduled recovery, D1 dead-letter state, revision-specific vector IDs, rejection/withdrawal deletion, provenance history, admin replay (`POST /api/admin/photo-jobs/:jobId/replay`), and re-indexing (`POST /api/admin/photo-index/rebuild`).
 
 The visual cards are intentionally placeholder previews. They do not claim to be real photographs and should be replaced by uploaded, licensed media before production launch.
 
@@ -43,6 +44,8 @@ The frontend runs on Vite. To run the Worker API locally after installing Wrangl
 ```powershell
 npm run worker:dev
 ```
+
+Consumer and provider contract stubs are documented in [API contract testing](docs/api-contract-testing.md). Run `npm run test:contracts:openapi` and `npm run test:contracts:consumer` without a Worker; run `npm run test:contracts:provider` against a local or configured Worker.
 
 Apply the initial database migration with Wrangler after replacing the D1 ID in `wrangler.jsonc`:
 
@@ -85,9 +88,9 @@ Apply subsequent migrations in order as well; `0004_explainability_safety.sql` a
 11. Configure the KYC provider to POST only signed, metadata-only decisions to `/api/webhooks/kyc`; never send raw identity documents through the audit endpoint. The webhook uses HMAC-SHA256 in `x-kyc-signature`.
 12. Create the photo Vectorize index with the same embedding preset used by the Worker: `wrangler vectorize create veld-archive-photo-index --preset @cf/baai/bge-base-en-v1.5`. The committed config already binds it as `PHOTO_INDEX`.
 13. Create the queues before deployment: `wrangler queues create veld-archive-photo-enrichment` and `wrangler queues create veld-archive-photo-enrichment-dlq`. The committed config binds the producer and consumer.
-14. The committed config includes the Workers AI binding. Run `npx wrangler types` after any binding change. `PHOTO_VISION_MODEL` controls visual metadata/OCR and `PHOTO_EMBEDDING_MODEL` must remain dimension-compatible with the Vectorize index; missing AI is treated as a retryable job failure, not a buyer-search scan.
+14. The committed config includes the Workers AI binding. Run `npx wrangler types` after any binding change. `PHOTO_VISION_MODEL` controls visual metadata/OCR and `PHOTO_EMBEDDING_MODEL` must remain dimension-compatible with the Vectorize index; missing AI is treated as a retryable job failure, while the approved D1 FTS5 document remains available for keyword retrieval.
 15. Keep verification-document OCR disabled until intentionally enabled. Set `OCR_ENABLED=true` only for the intended environment. The admin-only endpoint is `POST /api/verification/documents/:documentId/ocr`; it verifies the registered SHA-256 before inference and never changes the KYC case decision.
-16. Apply `0006_photo_ai_search.sql`, then run `npm run build` before `npm run worker:deploy`.
+16. Apply `0006_photo_ai_search.sql` and `0013_photo_enrichment_orchestration.sql`, then run `npm run build` before `npm run worker:deploy`. During rollout, drain or replay pre-0013 photo messages because new queue envelopes include `assetRevision` and `sourceEtag`.
 
 ## Audit endpoints
 

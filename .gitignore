@@ -1,5 +1,6 @@
 node_modules/
 dist/
+contracts/reports/
 .wrangler/
 .security-dry-run/
 security-dry-run/

@@ -45,8 +45,14 @@ sequenceDiagram
   API-->>UI: Pending review confirmation
   C->>UI: Submit metadata and media
   UI->>API: Create asset / upload session
-  API->>DB: Store auditable metadata
-  API-->>UI: Needs review status
+  API->>DB: Scan upload and advance media revision
+  API-->>UI: AI enrichment queued
+  API->>DB: Store description, visible setting, category, attributes and visible text as suggestions
+  C->>UI: Review/correct suggestions and evidence-backed location
+  UI->>API: Save reviewed metadata revision
+  C->>UI: Approve reviewed revision
+  API->>DB: Add approved revision to FTS5 and queue Vectorize upsert
+  API-->>UI: Published; index current or pending
   C->>UI: Check contributor insights
 ```
 
@@ -71,3 +77,5 @@ flowchart LR
 - Asset cards open a detail/evidence modal and the modal closes by close button, backdrop, and Escape.
 - Protected workflows explain sign-in and backend requirements rather than silently failing.
 - Form validation prevents incomplete submissions and successful actions show confirmation state.
+- AI may classify a visible setting such as `market_scene`; only seller, EXIF, or editor evidence may populate geographic location fields.
+- Approval is unavailable until the current metadata revision is explicitly reviewed, and buyer search ignores stale revisions.

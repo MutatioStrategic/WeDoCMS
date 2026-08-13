@@ -67,6 +67,13 @@ paths:
         - name: location
           in: query
           schema: { type: string, maxLength: 80 }
+        - name: locationType
+          in: query
+          description: Pixel-derived visible setting classification; never a geographic claim
+          schema: { type: string, enum: [urban_street, coastal_landscape, market_scene, indoor, residential, rural_landscape, industrial, event, transport, nature, sports, food, other, unknown] }
+        - name: category
+          in: query
+          schema: { type: string, enum: [people, lifestyle, travel, nature, architecture, food, business, transport, arts_culture, sport, news_editorial, objects, other] }
         - name: status
           in: query
           schema: { type: string, enum: [published, needs_review, all], default: published }
@@ -96,6 +103,10 @@ paths:
       responses:
         '201':
           description: Asset created
+          headers:
+            Location:
+              description: Relative URL of the created asset resource
+              schema: { type: string }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/AssetCreateResponse' }
@@ -167,6 +178,85 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/admin/photo-jobs:
+    get:
+      operationId: listPhotoJobs
+      summary: List enrichment and index jobs for operational review
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [all, queued, running, completed, needs_review, failed, dead_lettered, skipped], default: all }
+      responses:
+        '200':
+          description: Tenant-scoped photo jobs
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, results]
+                properties:
+                  status: { type: string }
+                  results: { type: array, items: { type: object, additionalProperties: true } }
+                additionalProperties: true
+        '403':
+          description: Editor access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/admin/photo-jobs/{jobId}/provenance:
+    get:
+      operationId: getPhotoJobProvenance
+      summary: Inspect model, revision, prompt/schema version, attempt, and review outcomes
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Photo job provenance
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [jobId, results]
+                properties:
+                  jobId: { type: string }
+                  results: { type: array, items: { type: object, additionalProperties: true } }
+                additionalProperties: true
+  /api/admin/photo-jobs/{jobId}/replay:
+    post:
+      operationId: replayPhotoJob
+      summary: Replay a failed, dead-lettered, validation, or stale photo job
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '202':
+          description: Job queued for a fresh bounded attempt
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [jobId, status, replayed]
+                properties:
+                  jobId: { type: string }
+                  status: { type: string, enum: [queued] }
+                  replayed: { type: boolean, enum: [true] }
+                additionalProperties: false
+        '404':
+          description: Replayable job not found in this tenant
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
   /api/uploads:
     post:
       operationId: createUploadSession
@@ -181,6 +271,10 @@ paths:
       responses:
         '201':
           description: Short-lived upload URL returned
+          headers:
+            Location:
+              description: Relative URL of the upload completion resource
+              schema: { type: string }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/UploadResponse' }
@@ -260,9 +354,21 @@ paths:
       responses:
         '201':
           description: Hosted checkout URL returned
+          headers:
+            Location:
+              description: Relative URL of the hosted payment session resource
+              schema: { type: string }
           content:
             application/json:
-              schema: { type: object, required: [licenceId, provider, checkoutUrl, status], additionalProperties: true }
+              schema:
+                type: object
+                required: [licenceId, provider, checkoutUrl, status]
+                properties:
+                  licenceId: { type: string }
+                  provider: { type: string }
+                  checkoutUrl: { type: string }
+                  status: { type: string }
+                additionalProperties: true
         '401':
           description: Authenticated buyer required
           content:
@@ -339,7 +445,12 @@ components:
             type: object
             required: [path, code]
             properties:
-              path: { type: array, items: {} }
+              path:
+                type: array
+                items:
+                  oneOf:
+                    - { type: string }
+                    - { type: integer }
               code: { type: string }
       additionalProperties: true
     HealthResponse:
@@ -355,7 +466,7 @@ components:
       required: [id, email, displayName, role, onboardingStatus, organizationId, organizationName, residencyRegion, sessionId, csrfToken]
       properties:
         id: { type: string }
-        email: { type: string, format: email }
+        email: { type: string }
         displayName: { type: string }
         role: { type: string }
         onboardingStatus: { type: string }
@@ -371,7 +482,7 @@ components:
           required: [authenticated, user]
           properties:
             authenticated: { type: boolean, enum: [false] }
-            user: { nullable: true }
+            user: { type: object, nullable: true }
           additionalProperties: false
         - $ref: '#/components/schemas/AuthenticatedSessionResponse'
     AuthenticatedSessionResponse:
@@ -413,6 +524,22 @@ components:
         contributor: { type: string }
         workflowStage: { type: string, enum: [ingestion, ai_tagging, curator_correction, approval] }
         aiTags: { type: array, items: { type: string } }
+        visualLocationType: { type: string, enum: [urban_street, coastal_landscape, market_scene, indoor, residential, rural_landscape, industrial, event, transport, nature, sports, food, other, unknown] }
+        primaryCategory: { type: string, enum: [people, lifestyle, travel, nature, architecture, food, business, transport, arts_culture, sport, news_editorial, objects, other] }
+        sceneAttributes: { type: array, items: { type: string } }
+        visibleText: { type: string }
+        detectedLanguage: { type: string }
+        textReadability: { type: string, enum: [clear, partial, unreadable, no_text] }
+        ocrConfidence: { type: number, minimum: 0, maximum: 1, nullable: true }
+        aiFieldConfidences: { type: object, additionalProperties: { type: number, minimum: 0, maximum: 1 } }
+        enrichmentValidation: { type: object, additionalProperties: true }
+        geographicLocationSource: { type: string, enum: [none, seller, exif, evidence, editor] }
+        assetRevision: { type: integer, minimum: 1 }
+        enrichedRevision: { type: integer, minimum: 1, nullable: true }
+        reviewedRevision: { type: integer, minimum: 1, nullable: true }
+        approvedRevision: { type: integer, minimum: 1, nullable: true }
+        indexedRevision: { type: integer, minimum: 1, nullable: true }
+        vectorIndexStatus: { type: string, enum: [not_indexed, pending, indexed, error] }
         curatorNotes: { type: string }
         metadataReviewStatus: { type: string, enum: [reviewed, needs_context, blocked] }
         metadataReviewNote: { type: string }
@@ -429,7 +556,7 @@ components:
       required: [query, mode, results, facets]
       properties:
         query: { type: string }
-        mode: { type: string, enum: [keyword, semantic-preview] }
+        mode: { type: string, enum: [keyword, semantic-preview, hybrid] }
         results: { type: array, items: { $ref: '#/components/schemas/Asset' } }
         facets:
           type: array
@@ -483,6 +610,10 @@ components:
         modelReleaseStatus: { type: string, enum: [unknown, not_required, pending, verified] }
         propertyReleaseStatus: { type: string, enum: [unknown, not_required, pending, verified] }
         aiTags: { type: array, maxItems: 30, items: { type: string, minLength: 1, maxLength: 80 } }
+        visualLocationType: { type: string, enum: [urban_street, coastal_landscape, market_scene, indoor, residential, rural_landscape, industrial, event, transport, nature, sports, food, other, unknown] }
+        primaryCategory: { type: string, enum: [people, lifestyle, travel, nature, architecture, food, business, transport, arts_culture, sport, news_editorial, objects, other] }
+        sceneAttributes: { type: array, maxItems: 30, items: { type: string } }
+        visibleText: { type: string, maxLength: 2000 }
         monetizationModel: { type: string, enum: [membership, individual_license, custom_quote] }
         licensePriceCents: { type: integer, minimum: 0, maximum: 100000000, nullable: true }
       additionalProperties: false
@@ -512,7 +643,7 @@ components:
         uploadId: { type: string }
         objectKey: { type: string }
         strategy: { type: string, enum: [r2-presigned-put] }
-        uploadUrl: { type: string, format: uri }
+        uploadUrl: { type: string }
         expiresInSeconds: { type: integer, minimum: 1 }
         message: { type: string }
       additionalProperties: false
@@ -546,6 +677,15 @@ components:
         currency: { type: string, enum: [ZAR] }
         monetizationModel: { type: string, enum: [membership, individual_license, custom_quote] }
         allowed: { type: boolean }
-        checks: { type: array, items: { type: object, required: [label, passed, detail], additionalProperties: false } }
+        checks:
+          type: array
+          items:
+            type: object
+            required: [label, passed, detail]
+            properties:
+              label: { type: string }
+              passed: { type: boolean }
+              detail: { type: string }
+            additionalProperties: false
         blockingReasons: { type: array, items: { type: string } }
       additionalProperties: true
