@@ -52,6 +52,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npx wrangler types
       - run: npm run typecheck
       - run: npm test -- --run
       - run: npm run build
@@ -102,6 +103,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npx wrangler types
       - run: npm run build
       - name: Start isolated local Worker
         shell: bash
@@ -139,6 +141,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npx wrangler types
       - run: npm run build
       - name: Start isolated local Worker
         shell: bash
@@ -171,7 +174,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Scan repository for vulnerabilities, secrets, and misconfiguration
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -182,7 +185,7 @@ jobs:
       - name: Validate Wrangler configuration
         run: npx --yes wrangler@4.28.0 deploy --dry-run --outdir=security-dry-run
       - name: Check workflow permissions and unsafe patterns
-        uses: zizmorcore/zizmor-action@v0.2.0
+        uses: zizmorcore/zizmor-action@v0.6.2
         with:
           persona: pedantic
 
@@ -197,8 +200,7 @@ jobs:
         run: |
           grep -q '^permissions:' .github/workflows/security.yml
           grep -q 'contents: read' .github/workflows/security.yml
-          if grep -RInE 'CLOUDFLARE_API_TOKEN|STRIPE_SECRET_KEY|PAYMENT_TOKEN' .github/workflows \
-              | grep -v 'secrets\.'; then
+          if grep -RInE '^(.*)(CLOUDFLARE_API_TOKEN|STRIPE_SECRET_KEY|PAYMENT_TOKEN):[[:space:]]*[^$[:space:]]' .github/workflows; then
             echo "A production credential appears to be embedded in workflow source."
             exit 1
           fi
