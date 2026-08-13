@@ -34,6 +34,7 @@ export const sessionResponseSchema = z.union([
 ]);
 
 const releaseStatusSchema = z.enum(["unknown", "not_required", "pending", "verified"]);
+const mediaReferenceSchema = z.string().refine((value) => value.startsWith("/") || /^https?:\/\//i.test(value), "Media reference must be a same-origin path or HTTPS URL");
 
 export const assetSchema = z.object({
   id: z.string().min(1),
@@ -82,6 +83,9 @@ export const assetSchema = z.object({
   sourceUrl: z.string().nullable().optional(),
   sourceLicense: z.string().nullable().optional(),
   sourceAttribution: z.string().nullable().optional(),
+  previewUrl: mediaReferenceSchema.nullable().optional(),
+  streamUid: z.string().nullable().optional(),
+  streamEmbedUrl: z.string().url().nullable().optional(),
   monetizationModel: z.enum(["membership", "individual_license", "custom_quote"]).optional(),
   licensePriceCents: z.number().int().nonnegative().nullable().optional(),
 }).passthrough();

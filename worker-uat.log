@@ -1,0 +1,1314 @@
+
+ ⛅️ wrangler 4.122.0
+────────────────────
+Your Worker has access to the following bindings:
+Binding                                                                             Resource                      Mode
+env.PHOTO_ENRICHMENT_QUEUE (veld-archive-photo-enrichment)                          Queue                         local
+env.DB (veld-archive)                                                               D1 Database                   local
+env.PHOTO_INDEX (veld-archive-photo-index)                                          Vectorize Index               not supported
+env.MEDIA_BUCKET (veld-archive-media)                                               R2 Bucket                     local
+env.MEDIA_DR_BUCKET (veld-archive-media-dr)                                         R2 Bucket                     local
+env.BACKUP_BUCKET (veld-archive-backups-dr)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_ZA (veld-archive-audit-za)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_EU (veld-archive-audit-eu (eu))                                    R2 Bucket                     local
+env.KYC_BUCKET_ZA (veld-archive-kyc-za)                                             R2 Bucket                     local
+env.KYC_BUCKET_EU (veld-archive-kyc-eu (eu))                                        R2 Bucket                     local
+env.OBSERVABILITY (veld_archive_observability)                                      Analytics Engine Dataset      local
+env.ASSETS                                                                          Assets                        local
+env.APP_ENV ("development")                                                         Environment Variable          local
+env.ALLOWED_ORIGINS ("http://localhost:5173,http://127.0.0....")                    Environment Variable          local
+env.TURNSTILE_HOSTNAMES ("localhost,127.0.0.1")                                     Environment Variable          local
+env.DEFAULT_ORGANIZATION_ID ("org-demo")                                            Environment Variable          local
+env.RATE_LIMIT_WINDOW_SECONDS ("60")                                                Environment Variable          local
+env.RATE_LIMIT_DEFAULT_PER_WINDOW ("120")                                           Environment Variable          local
+env.UPLOAD_DAILY_QUOTA_BYTES ("50000000000")                                        Environment Variable          local
+env.ORG_STORAGE_QUOTA_BYTES ("500000000000")                                        Environment Variable          local
+env.MEDIA_SCANNER_URL ("")                                                          Environment Variable          local
+env.R2_BUCKET_NAME ("veld-archive-media")                                           Environment Variable          local
+env.R2_DR_BUCKET_NAME ("veld-archive-media-dr")                                     Environment Variable          local
+env.BACKUP_BUCKET_NAME ("veld-archive-backups-dr")                                  Environment Variable          local
+env.CHAOS_TESTING_ENABLED ("false")                                                 Environment Variable          local
+env.UPLOAD_MAX_SIZE_BYTES ("30000000000")                                           Environment Variable          local
+env.AUDIT_SIGNING_KEY_ID ("audit-ed25519-v1")                                       Environment Variable          local
+env.AUDIT_RETENTION_DAYS ("2555")                                                   Environment Variable          local
+env.AUDIT_ALLOWED_RESIDENCIES ("za,eu")                                             Environment Variable          local
+env.KYC_PROVIDER ("replace-with-your-kyc-provider")                                 Environment Variable          local
+env.OCR_ENABLED ("false")                                                           Environment Variable          local
+env.OCR_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                                 Environment Variable          local
+env.PHOTO_VISION_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                        Environment Variable          local
+env.PHOTO_EMBEDDING_MODEL ("@cf/baai/bge-base-en-v1.5")                             Environment Variable          local
+env.PHOTO_INDEX_NAMESPACE ("published-photos-v1")                                   Environment Variable          local
+env.PAYOUT_MIN_CENTS ("10000")                                                      Environment Variable          local
+env.SESSION_SECRET ("(hidden)")                                                     Environment Variable          local
+env.PAYMENT_WEBHOOK_SECRET ("(hidden)")                                             Environment Variable          local
+env.STREAM_WEBHOOK_SECRET ("(hidden)")                                              Environment Variable          local
+
+⎔ Starting local server...
+Wrangler detected this dev session is running in an AI agent.
+The Local Explorer API is available at http://127.0.0.1:8787/cdn-cgi/local/explorer/api
+Useful routes:
+  GET http://127.0.0.1:8787/cdn-cgi/local/explorer/api/local/workers - local Workers and bindings
+  GET http://127.0.0.1:8787/cdn-cgi/local/explorer/api/storage/kv/namespaces - KV namespaces
+  GET http://127.0.0.1:8787/cdn-cgi/local/explorer/api/d1/database - D1 databases
+  GET http://127.0.0.1:8787/cdn-cgi/local/explorer/api/r2/buckets - R2 buckets
+  GET http://127.0.0.1:8787/cdn-cgi/local/explorer/api/workers/durable_objects/namespaces - Durable Object namespaces
+  GET http://127.0.0.1:8787/cdn-cgi/local/explorer/api/workflows - Workflows
+  POST http://127.0.0.1:8787/cdn-cgi/local/explorer/api/local/observability/query - run a read-only SQL query (SELECT/WITH only) over captured request traces and console logs. Tables: spans, logs (read attributes via json(attributes)). Example:
+    curl -X POST http://127.0.0.1:8787/cdn-cgi/local/explorer/api/local/observability/query -H 'Content-Type: application/json' -d '{"sql":"SELECT service, name, outcome, duration_ms FROM spans WHERE parent_id IS NULL LIMIT 20"}'
+If the routes above don't cover what you need, fetch the full OpenAPI schema (large - use only as a last resort):
+  GET http://127.0.0.1:8787/cdn-cgi/local/explorer/api - OpenAPI schema
+⎔ Connection status updated
+Your Worker has access to the following bindings:
+Binding                                                                             Resource                      Mode
+env.PHOTO_ENRICHMENT_QUEUE (veld-archive-photo-enrichment)                          Queue                         local
+env.DB (veld-archive)                                                               D1 Database                   local
+env.PHOTO_INDEX (veld-archive-photo-index)                                          Vectorize Index               not supported
+env.MEDIA_BUCKET (veld-archive-media)                                               R2 Bucket                     local
+env.MEDIA_DR_BUCKET (veld-archive-media-dr)                                         R2 Bucket                     local
+env.BACKUP_BUCKET (veld-archive-backups-dr)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_ZA (veld-archive-audit-za)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_EU (veld-archive-audit-eu (eu))                                    R2 Bucket                     local
+env.KYC_BUCKET_ZA (veld-archive-kyc-za)                                             R2 Bucket                     local
+env.KYC_BUCKET_EU (veld-archive-kyc-eu (eu))                                        R2 Bucket                     local
+env.OBSERVABILITY (veld_archive_observability)                                      Analytics Engine Dataset      local
+env.ASSETS                                                                          Assets                        local
+env.APP_ENV ("development")                                                         Environment Variable          local
+env.ALLOWED_ORIGINS ("http://localhost:5173,http://127.0.0....")                    Environment Variable          local
+env.TURNSTILE_HOSTNAMES ("localhost,127.0.0.1")                                     Environment Variable          local
+env.DEFAULT_ORGANIZATION_ID ("org-demo")                                            Environment Variable          local
+env.RATE_LIMIT_WINDOW_SECONDS ("60")                                                Environment Variable          local
+env.RATE_LIMIT_DEFAULT_PER_WINDOW ("120")                                           Environment Variable          local
+env.UPLOAD_DAILY_QUOTA_BYTES ("50000000000")                                        Environment Variable          local
+env.ORG_STORAGE_QUOTA_BYTES ("500000000000")                                        Environment Variable          local
+env.MEDIA_SCANNER_URL ("")                                                          Environment Variable          local
+env.R2_BUCKET_NAME ("veld-archive-media")                                           Environment Variable          local
+env.R2_DR_BUCKET_NAME ("veld-archive-media-dr")                                     Environment Variable          local
+env.BACKUP_BUCKET_NAME ("veld-archive-backups-dr")                                  Environment Variable          local
+env.CHAOS_TESTING_ENABLED ("false")                                                 Environment Variable          local
+env.UPLOAD_MAX_SIZE_BYTES ("30000000000")                                           Environment Variable          local
+env.AUDIT_SIGNING_KEY_ID ("audit-ed25519-v1")                                       Environment Variable          local
+env.AUDIT_RETENTION_DAYS ("2555")                                                   Environment Variable          local
+env.AUDIT_ALLOWED_RESIDENCIES ("za,eu")                                             Environment Variable          local
+env.KYC_PROVIDER ("replace-with-your-kyc-provider")                                 Environment Variable          local
+env.OCR_ENABLED ("false")                                                           Environment Variable          local
+env.OCR_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                                 Environment Variable          local
+env.PHOTO_VISION_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                        Environment Variable          local
+env.PHOTO_EMBEDDING_MODEL ("@cf/baai/bge-base-en-v1.5")                             Environment Variable          local
+env.PHOTO_INDEX_NAMESPACE ("published-photos-v1")                                   Environment Variable          local
+env.PAYOUT_MIN_CENTS ("10000")                                                      Environment Variable          local
+env.SESSION_SECRET ("(hidden)")                                                     Environment Variable          local
+env.PAYMENT_WEBHOOK_SECRET ("(hidden)")                                             Environment Variable          local
+env.STREAM_WEBHOOK_SECRET ("(hidden)")                                              Environment Variable          local
+
+[wrangler:info] Ready on http://127.0.0.1:8787
+{"timestamp":"2026-08-13T14:32:20.430Z","level":"error","event":"request.error_handled","traceId":"50335c74ade2ea3352028d2d6d9e3d73","spanId":"f4d191f4d001b900","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:20.431Z","level":"info","event":"request.completed","traceId":"50335c74ade2ea3352028d2d6d9e3d73","spanId":"f4d191f4d001b900","method":"GET","path":"/api/health","status":500,"durationMs":13}
+[wrangler:info] GET /api/health 500 Internal Server Error (23ms)
+{"timestamp":"2026-08-13T14:32:20.966Z","level":"error","event":"request.error_handled","traceId":"8d63a40313d808b51d387d72c8ca87b6","spanId":"82d201d4e35a43ee","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:20.967Z","level":"info","event":"request.completed","traceId":"8d63a40313d808b51d387d72c8ca87b6","spanId":"82d201d4e35a43ee","method":"GET","path":"/api/health","status":500,"durationMs":5}
+[wrangler:info] GET /api/health 500 Internal Server Error (8ms)
+{"timestamp":"2026-08-13T14:32:21.493Z","level":"error","event":"request.error_handled","traceId":"006a08d1f1db6026260b7ec9a39cce34","spanId":"01311b28a2a58420","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:21.493Z","level":"info","event":"request.completed","traceId":"006a08d1f1db6026260b7ec9a39cce34","spanId":"01311b28a2a58420","method":"GET","path":"/api/health","status":500,"durationMs":6}
+[wrangler:info] GET /api/health 500 Internal Server Error (9ms)
+{"timestamp":"2026-08-13T14:32:22.017Z","level":"error","event":"request.error_handled","traceId":"7418139a6db135f8d29894d3884b4908","spanId":"5166e3b0a209eddd","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:22.017Z","level":"info","event":"request.completed","traceId":"7418139a6db135f8d29894d3884b4908","spanId":"5166e3b0a209eddd","method":"GET","path":"/api/health","status":500,"durationMs":5}
+[wrangler:info] GET /api/health 500 Internal Server Error (7ms)
+{"timestamp":"2026-08-13T14:32:22.532Z","level":"error","event":"request.error_handled","traceId":"aa51e19f840d337e9c8b75c81463d6f4","spanId":"9378c30f770c8cf2","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:22.533Z","level":"info","event":"request.completed","traceId":"aa51e19f840d337e9c8b75c81463d6f4","spanId":"9378c30f770c8cf2","method":"GET","path":"/api/health","status":500,"durationMs":5}
+[wrangler:info] GET /api/health 500 Internal Server Error (8ms)
+{"timestamp":"2026-08-13T14:32:23.057Z","level":"error","event":"request.error_handled","traceId":"6b5bca9e3b0e3dd860042b84c057aa3e","spanId":"eac4f6fb947385de","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:23.057Z","level":"info","event":"request.completed","traceId":"6b5bca9e3b0e3dd860042b84c057aa3e","spanId":"eac4f6fb947385de","method":"GET","path":"/api/health","status":500,"durationMs":4}
+[wrangler:info] GET /api/health 500 Internal Server Error (8ms)
+{"timestamp":"2026-08-13T14:32:23.569Z","level":"error","event":"request.error_handled","traceId":"39bcfb131af19084729b6729818a1e33","spanId":"68a9547dde534d1e","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:23.570Z","level":"info","event":"request.completed","traceId":"39bcfb131af19084729b6729818a1e33","spanId":"68a9547dde534d1e","method":"GET","path":"/api/health","status":500,"durationMs":5}
+[wrangler:info] GET /api/health 500 Internal Server Error (8ms)
+{"timestamp":"2026-08-13T14:32:24.094Z","level":"error","event":"request.error_handled","traceId":"a5eea8720b80d6cfdbf477a2964b3b82","spanId":"75cb13110dcf3bfe","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:24.094Z","level":"info","event":"request.completed","traceId":"a5eea8720b80d6cfdbf477a2964b3b82","spanId":"75cb13110dcf3bfe","method":"GET","path":"/api/health","status":500,"durationMs":5}
+[wrangler:info] GET /api/health 500 Internal Server Error (8ms)
+{"timestamp":"2026-08-13T14:32:24.613Z","level":"error","event":"request.error_handled","traceId":"475efdd8cd2853219d7deae1d78bbc58","spanId":"86faa933239cdd87","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:24.613Z","level":"info","event":"request.completed","traceId":"475efdd8cd2853219d7deae1d78bbc58","spanId":"86faa933239cdd87","method":"GET","path":"/api/health","status":500,"durationMs":4}
+[wrangler:info] GET /api/health 500 Internal Server Error (7ms)
+{"timestamp":"2026-08-13T14:32:25.126Z","level":"error","event":"request.error_handled","traceId":"6449207fe86ce86ab8f70a9911889be6","spanId":"df4f7546067f95bc","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:25.126Z","level":"info","event":"request.completed","traceId":"6449207fe86ce86ab8f70a9911889be6","spanId":"df4f7546067f95bc","method":"GET","path":"/api/health","status":500,"durationMs":4}
+[wrangler:info] GET /api/health 500 Internal Server Error (7ms)
+{"timestamp":"2026-08-13T14:32:25.651Z","level":"error","event":"request.error_handled","traceId":"5155eb44253204260f2bb1fbe072bea5","spanId":"3a5df1df42480c39","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:25.651Z","level":"info","event":"request.completed","traceId":"5155eb44253204260f2bb1fbe072bea5","spanId":"3a5df1df42480c39","method":"GET","path":"/api/health","status":500,"durationMs":5}
+[wrangler:info] GET /api/health 500 Internal Server Error (7ms)
+{"timestamp":"2026-08-13T14:32:26.161Z","level":"error","event":"request.error_handled","traceId":"28599e419c7c25eac76914a6ec3cdc50","spanId":"1fec5d27bab58e49","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:26.161Z","level":"info","event":"request.completed","traceId":"28599e419c7c25eac76914a6ec3cdc50","spanId":"1fec5d27bab58e49","method":"GET","path":"/api/health","status":500,"durationMs":4}
+[wrangler:info] GET /api/health 500 Internal Server Error (8ms)
+{"timestamp":"2026-08-13T14:32:26.686Z","level":"error","event":"request.error_handled","traceId":"e7e687d5eeaccb1bf5c4dfb946575a1d","spanId":"eb6a2196f3e0eb73","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:26.686Z","level":"info","event":"request.completed","traceId":"e7e687d5eeaccb1bf5c4dfb946575a1d","spanId":"eb6a2196f3e0eb73","method":"GET","path":"/api/health","status":500,"durationMs":4}
+[wrangler:info] GET /api/health 500 Internal Server Error (7ms)
+{"timestamp":"2026-08-13T14:32:27.198Z","level":"error","event":"request.error_handled","traceId":"a23deaaae258d1955c4a86dfd873f99f","spanId":"342455a8e2ed857f","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:27.199Z","level":"info","event":"request.completed","traceId":"a23deaaae258d1955c4a86dfd873f99f","spanId":"342455a8e2ed857f","method":"GET","path":"/api/health","status":500,"durationMs":4}
+[wrangler:info] GET /api/health 500 Internal Server Error (7ms)
+{"timestamp":"2026-08-13T14:32:27.722Z","level":"error","event":"request.error_handled","traceId":"274b961806042df84fb7bddb5745c2de","spanId":"7e05688b912c78c8","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:27.722Z","level":"info","event":"request.completed","traceId":"274b961806042df84fb7bddb5745c2de","spanId":"7e05688b912c78c8","method":"GET","path":"/api/health","status":500,"durationMs":5}
+[wrangler:info] GET /api/health 500 Internal Server Error (7ms)
+{"timestamp":"2026-08-13T14:32:28.232Z","level":"error","event":"request.error_handled","traceId":"b26a7060abffe360336a3c86e6655d9c","spanId":"0d9e0e55710528c1","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:28.232Z","level":"info","event":"request.completed","traceId":"b26a7060abffe360336a3c86e6655d9c","spanId":"0d9e0e55710528c1","method":"GET","path":"/api/health","status":500,"durationMs":4}
+[wrangler:info] GET /api/health 500 Internal Server Error (7ms)
+{"timestamp":"2026-08-13T14:32:28.746Z","level":"error","event":"request.error_handled","traceId":"80a1b4cedcc38c379fcd10ae4258a338","spanId":"44560db455486412","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:28.746Z","level":"info","event":"request.completed","traceId":"80a1b4cedcc38c379fcd10ae4258a338","spanId":"44560db455486412","method":"GET","path":"/api/health","status":500,"durationMs":5}
+[wrangler:info] GET /api/health 500 Internal Server Error (7ms)
+{"timestamp":"2026-08-13T14:32:29.259Z","level":"error","event":"request.error_handled","traceId":"973508d8d7891384631aaddf47cd8ca0","spanId":"a773789c016accb3","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:29.260Z","level":"info","event":"request.completed","traceId":"973508d8d7891384631aaddf47cd8ca0","spanId":"a773789c016accb3","method":"GET","path":"/api/health","status":500,"durationMs":5}
+[wrangler:info] GET /api/health 500 Internal Server Error (8ms)
+{"timestamp":"2026-08-13T14:32:29.782Z","level":"error","event":"request.error_handled","traceId":"f35a200c488e574430489c80a5e9e88e","spanId":"6bcfacbec0187d6c","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:29.782Z","level":"info","event":"request.completed","traceId":"f35a200c488e574430489c80a5e9e88e","spanId":"6bcfacbec0187d6c","method":"GET","path":"/api/health","status":500,"durationMs":3}
+[wrangler:info] GET /api/health 500 Internal Server Error (7ms)
+{"timestamp":"2026-08-13T14:32:30.296Z","level":"error","event":"request.error_handled","traceId":"310a02adcbe78b84c2e6591fd4b37e7b","spanId":"b74234351b836c62","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:30.296Z","level":"info","event":"request.completed","traceId":"310a02adcbe78b84c2e6591fd4b37e7b","spanId":"b74234351b836c62","method":"GET","path":"/api/health","status":500,"durationMs":4}
+[wrangler:info] GET /api/health 500 Internal Server Error (7ms)
+{"timestamp":"2026-08-13T14:32:30.812Z","level":"error","event":"request.error_handled","traceId":"bd8416cb7a139864e03fcefab1c2f6a2","spanId":"2c387cf3db7dc999","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:30.812Z","level":"info","event":"request.completed","traceId":"bd8416cb7a139864e03fcefab1c2f6a2","spanId":"2c387cf3db7dc999","method":"GET","path":"/api/health","status":500,"durationMs":5}
+[wrangler:info] GET /api/health 500 Internal Server Error (8ms)
+{"timestamp":"2026-08-13T14:32:31.323Z","level":"error","event":"request.error_handled","traceId":"51df541c12ef9b209bb629c076c6abee","spanId":"bc9ae98e94d4e2c0","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:31.324Z","level":"info","event":"request.completed","traceId":"51df541c12ef9b209bb629c076c6abee","spanId":"bc9ae98e94d4e2c0","method":"GET","path":"/api/health","status":500,"durationMs":5}
+[wrangler:info] GET /api/health 500 Internal Server Error (9ms)
+{"timestamp":"2026-08-13T14:32:31.847Z","level":"error","event":"request.error_handled","traceId":"e8fef793de959e53e7f3ba5f677d1ba3","spanId":"c534a85b3fbf6754","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:31.847Z","level":"info","event":"request.completed","traceId":"e8fef793de959e53e7f3ba5f677d1ba3","spanId":"c534a85b3fbf6754","method":"GET","path":"/api/health","status":500,"durationMs":4}
+[wrangler:info] GET /api/health 500 Internal Server Error (7ms)
+{"timestamp":"2026-08-13T14:32:32.361Z","level":"error","event":"request.error_handled","traceId":"2e023ba1f4b058f7845cce9909f33a3b","spanId":"8b66933f164ed571","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:32.361Z","level":"info","event":"request.completed","traceId":"2e023ba1f4b058f7845cce9909f33a3b","spanId":"8b66933f164ed571","method":"GET","path":"/api/health","status":500,"durationMs":5}
+[wrangler:info] GET /api/health 500 Internal Server Error (8ms)
+{"timestamp":"2026-08-13T14:32:32.875Z","level":"error","event":"request.error_handled","traceId":"0abc8f1d748bd030c2be03a1f900417c","spanId":"f36101b1e976c296","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:32.875Z","level":"info","event":"request.completed","traceId":"0abc8f1d748bd030c2be03a1f900417c","spanId":"f36101b1e976c296","method":"GET","path":"/api/health","status":500,"durationMs":4}
+[wrangler:info] GET /api/health 500 Internal Server Error (8ms)
+{"timestamp":"2026-08-13T14:32:33.400Z","level":"error","event":"request.error_handled","traceId":"ab45abef826940f88df2941ff5ae50be","spanId":"a42c6277f3ed1ec2","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:33.400Z","level":"info","event":"request.completed","traceId":"ab45abef826940f88df2941ff5ae50be","spanId":"a42c6277f3ed1ec2","method":"GET","path":"/api/health","status":500,"durationMs":4}
+[wrangler:info] GET /api/health 500 Internal Server Error (8ms)
+{"timestamp":"2026-08-13T14:32:33.924Z","level":"error","event":"request.error_handled","traceId":"3dffe99aa0e85969bdfd02a8a710f966","spanId":"360e05b8b2ea7ca6","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:33.925Z","level":"info","event":"request.completed","traceId":"3dffe99aa0e85969bdfd02a8a710f966","spanId":"360e05b8b2ea7ca6","method":"GET","path":"/api/health","status":500,"durationMs":4}
+[wrangler:info] GET /api/health 500 Internal Server Error (8ms)
+{"timestamp":"2026-08-13T14:32:34.437Z","level":"error","event":"request.error_handled","traceId":"dfd8c495c82a34f65800cd883f3642ea","spanId":"845b468011a5d69b","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:34.437Z","level":"info","event":"request.completed","traceId":"dfd8c495c82a34f65800cd883f3642ea","spanId":"845b468011a5d69b","method":"GET","path":"/api/health","status":500,"durationMs":4}
+[wrangler:info] GET /api/health 500 Internal Server Error (6ms)
+{"timestamp":"2026-08-13T14:32:34.961Z","level":"error","event":"request.error_handled","traceId":"3e42697954a014079985c9f952fbfab0","spanId":"df9f214448fb862b","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:34.961Z","level":"info","event":"request.completed","traceId":"3e42697954a014079985c9f952fbfab0","spanId":"df9f214448fb862b","method":"GET","path":"/api/health","status":500,"durationMs":5}
+[wrangler:info] GET /api/health 500 Internal Server Error (8ms)
+{"timestamp":"2026-08-13T14:32:35.481Z","level":"error","event":"request.error_handled","traceId":"297e2d3b31e6592e1b651e417aee689b","spanId":"cdd325e36e5a74d1","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:35.481Z","level":"info","event":"request.completed","traceId":"297e2d3b31e6592e1b651e417aee689b","spanId":"cdd325e36e5a74d1","method":"GET","path":"/api/health","status":500,"durationMs":4}
+[wrangler:info] GET /api/health 500 Internal Server Error (7ms)
+⎔ Reloading local server...
+⎔ Connection status updated
+Your Worker has access to the following bindings:
+Binding                                                                             Resource                      Mode
+env.PHOTO_ENRICHMENT_QUEUE (veld-archive-photo-enrichment)                          Queue                         local
+env.DB (veld-archive)                                                               D1 Database                   local
+env.PHOTO_INDEX (veld-archive-photo-index)                                          Vectorize Index               not supported
+env.MEDIA_BUCKET (veld-archive-media)                                               R2 Bucket                     local
+env.MEDIA_DR_BUCKET (veld-archive-media-dr)                                         R2 Bucket                     local
+env.BACKUP_BUCKET (veld-archive-backups-dr)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_ZA (veld-archive-audit-za)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_EU (veld-archive-audit-eu (eu))                                    R2 Bucket                     local
+env.KYC_BUCKET_ZA (veld-archive-kyc-za)                                             R2 Bucket                     local
+env.KYC_BUCKET_EU (veld-archive-kyc-eu (eu))                                        R2 Bucket                     local
+env.OBSERVABILITY (veld_archive_observability)                                      Analytics Engine Dataset      local
+env.ASSETS                                                                          Assets                        local
+env.APP_ENV ("development")                                                         Environment Variable          local
+env.ALLOWED_ORIGINS ("http://localhost:5173,http://127.0.0....")                    Environment Variable          local
+env.TURNSTILE_HOSTNAMES ("localhost,127.0.0.1")                                     Environment Variable          local
+env.DEFAULT_ORGANIZATION_ID ("org-demo")                                            Environment Variable          local
+env.RATE_LIMIT_WINDOW_SECONDS ("60")                                                Environment Variable          local
+env.RATE_LIMIT_DEFAULT_PER_WINDOW ("120")                                           Environment Variable          local
+env.UPLOAD_DAILY_QUOTA_BYTES ("50000000000")                                        Environment Variable          local
+env.ORG_STORAGE_QUOTA_BYTES ("500000000000")                                        Environment Variable          local
+env.MEDIA_SCANNER_URL ("")                                                          Environment Variable          local
+env.R2_BUCKET_NAME ("veld-archive-media")                                           Environment Variable          local
+env.R2_DR_BUCKET_NAME ("veld-archive-media-dr")                                     Environment Variable          local
+env.BACKUP_BUCKET_NAME ("veld-archive-backups-dr")                                  Environment Variable          local
+env.CHAOS_TESTING_ENABLED ("false")                                                 Environment Variable          local
+env.UPLOAD_MAX_SIZE_BYTES ("30000000000")                                           Environment Variable          local
+env.AUDIT_SIGNING_KEY_ID ("audit-ed25519-v1")                                       Environment Variable          local
+env.AUDIT_RETENTION_DAYS ("2555")                                                   Environment Variable          local
+env.AUDIT_ALLOWED_RESIDENCIES ("za,eu")                                             Environment Variable          local
+env.KYC_PROVIDER ("replace-with-your-kyc-provider")                                 Environment Variable          local
+env.OCR_ENABLED ("false")                                                           Environment Variable          local
+env.OCR_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                                 Environment Variable          local
+env.PHOTO_VISION_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                        Environment Variable          local
+env.PHOTO_EMBEDDING_MODEL ("@cf/baai/bge-base-en-v1.5")                             Environment Variable          local
+env.PHOTO_INDEX_NAMESPACE ("published-photos-v1")                                   Environment Variable          local
+env.PAYOUT_MIN_CENTS ("10000")                                                      Environment Variable          local
+env.SESSION_SECRET ("(hidden)")                                                     Environment Variable          local
+env.PAYMENT_WEBHOOK_SECRET ("(hidden)")                                             Environment Variable          local
+env.STREAM_WEBHOOK_SECRET ("(hidden)")                                              Environment Variable          local
+
+⎔ Local server updated and ready
+{"timestamp":"2026-08-13T14:32:44.761Z","level":"error","event":"request.error_handled","traceId":"646ee86cdbe99de29e9b303fe6223ef3","spanId":"26583a291b863894","method":"GET","path":"/api/health","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:44.763Z","level":"info","event":"request.completed","traceId":"646ee86cdbe99de29e9b303fe6223ef3","spanId":"26583a291b863894","method":"GET","path":"/api/health","status":500,"durationMs":31}
+[wrangler:info] GET /api/health 500 Internal Server Error (39ms)
+{"timestamp":"2026-08-13T14:32:47.679Z","level":"error","event":"request.error_handled","traceId":"cf9335ccc5ffb280a9e94090346c17e3","spanId":"e949090cd8952a9a","method":"GET","path":"/api/assets","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:47.679Z","level":"info","event":"request.completed","traceId":"cf9335ccc5ffb280a9e94090346c17e3","spanId":"e949090cd8952a9a","method":"GET","path":"/api/assets","status":500,"durationMs":5}
+[wrangler:info] GET /api/assets 500 Internal Server Error (8ms)
+{"timestamp":"2026-08-13T14:32:47.688Z","level":"error","event":"request.error_handled","traceId":"b26117a53d5b021196e64978875a5224","spanId":"02926aee3c1b1715","method":"GET","path":"/api/auth/session","error":"D1_ERROR: no such table: rate_limit_buckets: SQLITE_ERROR"}
+{"timestamp":"2026-08-13T14:32:47.688Z","level":"info","event":"request.completed","traceId":"b26117a53d5b021196e64978875a5224","spanId":"02926aee3c1b1715","method":"GET","path":"/api/auth/session","status":500,"durationMs":4}
+[wrangler:info] GET /api/auth/session 500 Internal Server Error (18ms)
+{"timestamp":"2026-08-13T14:32:59.846Z","level":"info","event":"request.completed","traceId":"794695bc2ea561ed33a044e090aab7f9","spanId":"fa3071f1980c8893","method":"GET","path":"/api/auth/session","status":200,"durationMs":12}
+[wrangler:info] GET /api/auth/session 200 OK (18ms)
+{"timestamp":"2026-08-13T14:32:59.861Z","level":"info","event":"request.completed","traceId":"c4abf0d6d1bd4221a32043301a905645","spanId":"3dc4dfc87297bdb5","method":"GET","path":"/api/assets","status":200,"durationMs":11}
+[wrangler:info] GET /api/assets 200 OK (31ms)
+{"timestamp":"2026-08-13T14:33:01.559Z","level":"info","event":"request.completed","traceId":"5b9c16fd43f48c12fbc8f9a155c230ac","spanId":"800b46b28174e323","method":"GET","path":"/api/community/overview","status":200,"durationMs":27}
+[wrangler:info] GET /api/community/overview 200 OK (33ms)
+{"timestamp":"2026-08-13T14:33:01.661Z","level":"info","event":"request.completed","traceId":"476732ab8c6bdddef82d04ff1cc12490","spanId":"df3805b2a7a9c62c","method":"GET","path":"/api/community/overview","status":200,"durationMs":27}
+[wrangler:info] GET /api/community/overview 200 OK (36ms)
+{"timestamp":"2026-08-13T14:33:02.614Z","level":"info","event":"request.completed","traceId":"72cd79f489c2ad2456d34b743a0b3645","spanId":"a06697e0be7291d0","method":"GET","path":"/api/auth/session","status":200,"durationMs":9}
+[wrangler:info] GET /api/auth/session 200 OK (13ms)
+{"timestamp":"2026-08-13T14:33:02.629Z","level":"info","event":"request.completed","traceId":"23a96358ef32a90a596b7c5a145025d2","spanId":"b8abac34ea43d683","method":"GET","path":"/api/assets","status":200,"durationMs":11}
+[wrangler:info] GET /api/assets 200 OK (27ms)
+{"timestamp":"2026-08-13T14:33:02.742Z","level":"info","event":"request.completed","traceId":"450d70cf6e341a272981483f739bf825","spanId":"21fb52f6623038f8","method":"GET","path":"/api/auth/session","status":200,"durationMs":7}
+[wrangler:info] GET /api/auth/session 200 OK (11ms)
+{"timestamp":"2026-08-13T14:33:02.757Z","level":"info","event":"request.completed","traceId":"45c51dee0927b37d9b8dd21d1a02be6d","spanId":"3b47043c05f8357f","method":"GET","path":"/api/assets","status":200,"durationMs":11}
+[wrangler:info] GET /api/assets 200 OK (25ms)
+{"timestamp":"2026-08-13T14:33:03.402Z","level":"info","event":"request.completed","traceId":"07f15ee4dcb0c2dab7eec07f116d5ad2","spanId":"891274c554eebc41","method":"GET","path":"/api/community/overview","status":200,"durationMs":21}
+[wrangler:info] GET /api/community/overview 200 OK (28ms)
+{"timestamp":"2026-08-13T14:33:03.536Z","level":"info","event":"request.completed","traceId":"ea4f5bd2319cca378555ae7c899b6f87","spanId":"a525893028a0c754","method":"GET","path":"/api/community/overview","status":200,"durationMs":23}
+[wrangler:info] GET /api/community/overview 200 OK (27ms)
+⎔ Reloading local server...
+⎔ Connection status updated
+Your Worker has access to the following bindings:
+Binding                                                                             Resource                      Mode
+env.PHOTO_ENRICHMENT_QUEUE (veld-archive-photo-enrichment)                          Queue                         local
+env.DB (veld-archive)                                                               D1 Database                   local
+env.PHOTO_INDEX (veld-archive-photo-index)                                          Vectorize Index               not supported
+env.MEDIA_BUCKET (veld-archive-media)                                               R2 Bucket                     local
+env.MEDIA_DR_BUCKET (veld-archive-media-dr)                                         R2 Bucket                     local
+env.BACKUP_BUCKET (veld-archive-backups-dr)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_ZA (veld-archive-audit-za)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_EU (veld-archive-audit-eu (eu))                                    R2 Bucket                     local
+env.KYC_BUCKET_ZA (veld-archive-kyc-za)                                             R2 Bucket                     local
+env.KYC_BUCKET_EU (veld-archive-kyc-eu (eu))                                        R2 Bucket                     local
+env.OBSERVABILITY (veld_archive_observability)                                      Analytics Engine Dataset      local
+env.ASSETS                                                                          Assets                        local
+env.APP_ENV ("development")                                                         Environment Variable          local
+env.ALLOWED_ORIGINS ("http://localhost:5173,http://127.0.0....")                    Environment Variable          local
+env.TURNSTILE_HOSTNAMES ("localhost,127.0.0.1")                                     Environment Variable          local
+env.DEFAULT_ORGANIZATION_ID ("org-demo")                                            Environment Variable          local
+env.RATE_LIMIT_WINDOW_SECONDS ("60")                                                Environment Variable          local
+env.RATE_LIMIT_DEFAULT_PER_WINDOW ("120")                                           Environment Variable          local
+env.UPLOAD_DAILY_QUOTA_BYTES ("50000000000")                                        Environment Variable          local
+env.ORG_STORAGE_QUOTA_BYTES ("500000000000")                                        Environment Variable          local
+env.MEDIA_SCANNER_URL ("")                                                          Environment Variable          local
+env.R2_BUCKET_NAME ("veld-archive-media")                                           Environment Variable          local
+env.R2_DR_BUCKET_NAME ("veld-archive-media-dr")                                     Environment Variable          local
+env.BACKUP_BUCKET_NAME ("veld-archive-backups-dr")                                  Environment Variable          local
+env.CHAOS_TESTING_ENABLED ("false")                                                 Environment Variable          local
+env.UPLOAD_MAX_SIZE_BYTES ("30000000000")                                           Environment Variable          local
+env.AUDIT_SIGNING_KEY_ID ("audit-ed25519-v1")                                       Environment Variable          local
+env.AUDIT_RETENTION_DAYS ("2555")                                                   Environment Variable          local
+env.AUDIT_ALLOWED_RESIDENCIES ("za,eu")                                             Environment Variable          local
+env.KYC_PROVIDER ("replace-with-your-kyc-provider")                                 Environment Variable          local
+env.OCR_ENABLED ("false")                                                           Environment Variable          local
+env.OCR_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                                 Environment Variable          local
+env.PHOTO_VISION_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                        Environment Variable          local
+env.PHOTO_EMBEDDING_MODEL ("@cf/baai/bge-base-en-v1.5")                             Environment Variable          local
+env.PHOTO_INDEX_NAMESPACE ("published-photos-v1")                                   Environment Variable          local
+env.PAYOUT_MIN_CENTS ("10000")                                                      Environment Variable          local
+env.SESSION_SECRET ("(hidden)")                                                     Environment Variable          local
+env.PAYMENT_WEBHOOK_SECRET ("(hidden)")                                             Environment Variable          local
+env.STREAM_WEBHOOK_SECRET ("(hidden)")                                              Environment Variable          local
+
+⎔ Local server updated and ready
+{"timestamp":"2026-08-13T14:33:10.624Z","level":"info","event":"request.completed","traceId":"63630d2cbed16dcc86d47e7fa0185b78","spanId":"25f64bdfafc89cf2","method":"GET","path":"/api/health","status":200,"durationMs":16}
+[wrangler:info] GET /api/health 200 OK (25ms)
+{"timestamp":"2026-08-13T14:33:50.346Z","level":"info","event":"request.completed","traceId":"fb7e661b1d6a87e9765145994c742896","spanId":"8bdb3d53a1c29e1f","method":"GET","path":"/api/auth/session","status":200,"durationMs":12}
+[wrangler:info] GET /api/auth/session 200 OK (17ms)
+{"timestamp":"2026-08-13T14:33:50.362Z","level":"info","event":"request.completed","traceId":"deae8f865429b917a5cdade2738e2d24","spanId":"c06d7bd35b118bee","method":"GET","path":"/api/assets","status":200,"durationMs":12}
+[wrangler:info] GET /api/assets 200 OK (31ms)
+{"timestamp":"2026-08-13T14:33:50.376Z","level":"info","event":"request.completed","traceId":"7209da19aa615c4b8b27fda68b32abee","spanId":"86fac956151f4543","method":"GET","path":"/api/assets","status":200,"durationMs":11}
+[wrangler:info] GET /api/assets 200 OK (48ms)
+{"timestamp":"2026-08-13T14:33:50.395Z","level":"info","event":"request.completed","traceId":"3d26c5baa0cb962a31bd0b7e996c92bb","spanId":"e5c4b234db4e7a22","method":"GET","path":"/api/auth/session","status":200,"durationMs":7}
+[wrangler:info] GET /api/auth/session 200 OK (18ms)
+{"timestamp":"2026-08-13T14:33:51.368Z","level":"info","event":"request.completed","traceId":"313677b2b34044b994c7991b656b5d93","spanId":"3ec5a396d06bb580","method":"POST","path":"/api/auth/dev-login","status":200,"durationMs":22}
+[wrangler:info] POST /api/auth/dev-login 200 OK (25ms)
+{"timestamp":"2026-08-13T14:33:52.598Z","level":"info","event":"request.completed","traceId":"55ae0312c9ee027924f4c773477b63da","spanId":"baf41df7281e4a1e","method":"GET","path":"/api/analytics/contributor","status":200,"durationMs":15}
+[wrangler:info] GET /api/analytics/contributor 200 OK (18ms)
+{"timestamp":"2026-08-13T14:33:52.615Z","level":"info","event":"request.completed","traceId":"56ec752f3d37e31dd5d34af33f36c9ed","spanId":"061038c88bc380c9","method":"GET","path":"/api/analytics/contributor","status":200,"durationMs":14}
+[wrangler:info] GET /api/analytics/contributor 200 OK (23ms)
+⎔ Reloading local server...
+⎔ Connection status updated
+Your Worker has access to the following bindings:
+Binding                                                                             Resource                      Mode
+env.PHOTO_ENRICHMENT_QUEUE (veld-archive-photo-enrichment)                          Queue                         local
+env.DB (veld-archive)                                                               D1 Database                   local
+env.PHOTO_INDEX (veld-archive-photo-index)                                          Vectorize Index               not supported
+env.MEDIA_BUCKET (veld-archive-media)                                               R2 Bucket                     local
+env.MEDIA_DR_BUCKET (veld-archive-media-dr)                                         R2 Bucket                     local
+env.BACKUP_BUCKET (veld-archive-backups-dr)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_ZA (veld-archive-audit-za)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_EU (veld-archive-audit-eu (eu))                                    R2 Bucket                     local
+env.KYC_BUCKET_ZA (veld-archive-kyc-za)                                             R2 Bucket                     local
+env.KYC_BUCKET_EU (veld-archive-kyc-eu (eu))                                        R2 Bucket                     local
+env.OBSERVABILITY (veld_archive_observability)                                      Analytics Engine Dataset      local
+env.ASSETS                                                                          Assets                        local
+env.APP_ENV ("development")                                                         Environment Variable          local
+env.ALLOWED_ORIGINS ("http://localhost:5173,http://127.0.0....")                    Environment Variable          local
+env.TURNSTILE_HOSTNAMES ("localhost,127.0.0.1")                                     Environment Variable          local
+env.DEFAULT_ORGANIZATION_ID ("org-demo")                                            Environment Variable          local
+env.RATE_LIMIT_WINDOW_SECONDS ("60")                                                Environment Variable          local
+env.RATE_LIMIT_DEFAULT_PER_WINDOW ("120")                                           Environment Variable          local
+env.UPLOAD_DAILY_QUOTA_BYTES ("50000000000")                                        Environment Variable          local
+env.ORG_STORAGE_QUOTA_BYTES ("500000000000")                                        Environment Variable          local
+env.MEDIA_SCANNER_URL ("")                                                          Environment Variable          local
+env.R2_BUCKET_NAME ("veld-archive-media")                                           Environment Variable          local
+env.R2_DR_BUCKET_NAME ("veld-archive-media-dr")                                     Environment Variable          local
+env.BACKUP_BUCKET_NAME ("veld-archive-backups-dr")                                  Environment Variable          local
+env.CHAOS_TESTING_ENABLED ("false")                                                 Environment Variable          local
+env.UPLOAD_MAX_SIZE_BYTES ("30000000000")                                           Environment Variable          local
+env.AUDIT_SIGNING_KEY_ID ("audit-ed25519-v1")                                       Environment Variable          local
+env.AUDIT_RETENTION_DAYS ("2555")                                                   Environment Variable          local
+env.AUDIT_ALLOWED_RESIDENCIES ("za,eu")                                             Environment Variable          local
+env.KYC_PROVIDER ("replace-with-your-kyc-provider")                                 Environment Variable          local
+env.OCR_ENABLED ("false")                                                           Environment Variable          local
+env.OCR_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                                 Environment Variable          local
+env.PHOTO_VISION_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                        Environment Variable          local
+env.PHOTO_EMBEDDING_MODEL ("@cf/baai/bge-base-en-v1.5")                             Environment Variable          local
+env.PHOTO_INDEX_NAMESPACE ("published-photos-v1")                                   Environment Variable          local
+env.PAYOUT_MIN_CENTS ("10000")                                                      Environment Variable          local
+env.SESSION_SECRET ("(hidden)")                                                     Environment Variable          local
+env.PAYMENT_WEBHOOK_SECRET ("(hidden)")                                             Environment Variable          local
+env.STREAM_WEBHOOK_SECRET ("(hidden)")                                              Environment Variable          local
+
+⎔ Local server updated and ready
+{"timestamp":"2026-08-13T14:34:06.828Z","level":"info","event":"request.completed","traceId":"28f23abc0737c645ea179e688e42c0ab","spanId":"59c4fd522c8236df","method":"GET","path":"/api/auth/session","status":200,"durationMs":42}
+[wrangler:info] GET /api/auth/session 200 OK (269ms)
+{"timestamp":"2026-08-13T14:34:06.845Z","level":"info","event":"request.completed","traceId":"75669b71f748de3f1e19565bc790d862","spanId":"365a991f19844b79","method":"GET","path":"/api/assets","status":200,"durationMs":13}
+[wrangler:info] GET /api/assets 200 OK (288ms)
+{"timestamp":"2026-08-13T14:34:06.863Z","level":"info","event":"request.completed","traceId":"5d93ab559113a3385e4566243534494c","spanId":"ada288447058a0c7","method":"GET","path":"/api/auth/session","status":200,"durationMs":13}
+[wrangler:info] GET /api/auth/session 200 OK (259ms)
+{"timestamp":"2026-08-13T14:34:06.881Z","level":"info","event":"request.completed","traceId":"36d517acd1826b3c049dc4a81fd253fb","spanId":"2dce565cebea2c45","method":"GET","path":"/api/assets","status":200,"durationMs":12}
+[wrangler:info] GET /api/assets 200 OK (275ms)
+{"timestamp":"2026-08-13T14:34:06.904Z","level":"info","event":"request.completed","traceId":"b563509c1f64b0ecb8f65a7818dbd67d","spanId":"aed39ee82ece7517","method":"GET","path":"/api/auth/session","status":200,"durationMs":12}
+[wrangler:info] GET /api/auth/session 200 OK (30ms)
+{"timestamp":"2026-08-13T14:34:15.528Z","level":"info","event":"request.completed","traceId":"700e0380d1b9f66321459ef6c1a13905","spanId":"c00868e5a5c59eec","method":"GET","path":"/api/assets","status":200,"durationMs":11}
+[wrangler:info] GET /api/assets 200 OK (15ms)
+{"timestamp":"2026-08-13T14:34:15.540Z","level":"info","event":"request.completed","traceId":"ef951ef6690953f292481a888f60b68c","spanId":"b8b6d2786ecd66fa","method":"GET","path":"/api/auth/session","status":200,"durationMs":8}
+[wrangler:info] GET /api/auth/session 200 OK (26ms)
+{"timestamp":"2026-08-13T14:34:17.332Z","level":"info","event":"request.completed","traceId":"5256b38c11666bd1a51ff877ec81675e","spanId":"808cfad80435e368","method":"GET","path":"/api/community/overview","status":200,"durationMs":21}
+[wrangler:info] GET /api/community/overview 200 OK (29ms)
+{"timestamp":"2026-08-13T14:34:18.254Z","level":"info","event":"request.completed","traceId":"65fbaeb9aab3918b522cf731dcbfc1bc","spanId":"2c9230f51eda500b","method":"GET","path":"/api/auth/session","status":200,"durationMs":8}
+[wrangler:info] GET /api/auth/session 200 OK (11ms)
+{"timestamp":"2026-08-13T14:34:18.267Z","level":"info","event":"request.completed","traceId":"b2596cbb49d67c2afd7529e845a3afb4","spanId":"2ae991ce468454a2","method":"GET","path":"/api/assets","status":200,"durationMs":9}
+[wrangler:info] GET /api/assets 200 OK (24ms)
+{"timestamp":"2026-08-13T14:34:19.114Z","level":"info","event":"request.completed","traceId":"90c77e48ab96ace5b05f224584e9562c","spanId":"f429f419a92c82bc","method":"GET","path":"/api/community/overview","status":200,"durationMs":21}
+[wrangler:info] GET /api/community/overview 200 OK (26ms)
+⎔ Reloading local server...
+⎔ Connection status updated
+Your Worker has access to the following bindings:
+Binding                                                                             Resource                      Mode
+env.PHOTO_ENRICHMENT_QUEUE (veld-archive-photo-enrichment)                          Queue                         local
+env.DB (veld-archive)                                                               D1 Database                   local
+env.PHOTO_INDEX (veld-archive-photo-index)                                          Vectorize Index               not supported
+env.MEDIA_BUCKET (veld-archive-media)                                               R2 Bucket                     local
+env.MEDIA_DR_BUCKET (veld-archive-media-dr)                                         R2 Bucket                     local
+env.BACKUP_BUCKET (veld-archive-backups-dr)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_ZA (veld-archive-audit-za)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_EU (veld-archive-audit-eu (eu))                                    R2 Bucket                     local
+env.KYC_BUCKET_ZA (veld-archive-kyc-za)                                             R2 Bucket                     local
+env.KYC_BUCKET_EU (veld-archive-kyc-eu (eu))                                        R2 Bucket                     local
+env.OBSERVABILITY (veld_archive_observability)                                      Analytics Engine Dataset      local
+env.ASSETS                                                                          Assets                        local
+env.APP_ENV ("development")                                                         Environment Variable          local
+env.ALLOWED_ORIGINS ("http://localhost:5173,http://127.0.0....")                    Environment Variable          local
+env.TURNSTILE_HOSTNAMES ("localhost,127.0.0.1")                                     Environment Variable          local
+env.DEFAULT_ORGANIZATION_ID ("org-demo")                                            Environment Variable          local
+env.RATE_LIMIT_WINDOW_SECONDS ("60")                                                Environment Variable          local
+env.RATE_LIMIT_DEFAULT_PER_WINDOW ("120")                                           Environment Variable          local
+env.UPLOAD_DAILY_QUOTA_BYTES ("50000000000")                                        Environment Variable          local
+env.ORG_STORAGE_QUOTA_BYTES ("500000000000")                                        Environment Variable          local
+env.MEDIA_SCANNER_URL ("")                                                          Environment Variable          local
+env.R2_BUCKET_NAME ("veld-archive-media")                                           Environment Variable          local
+env.R2_DR_BUCKET_NAME ("veld-archive-media-dr")                                     Environment Variable          local
+env.BACKUP_BUCKET_NAME ("veld-archive-backups-dr")                                  Environment Variable          local
+env.CHAOS_TESTING_ENABLED ("false")                                                 Environment Variable          local
+env.UPLOAD_MAX_SIZE_BYTES ("30000000000")                                           Environment Variable          local
+env.AUDIT_SIGNING_KEY_ID ("audit-ed25519-v1")                                       Environment Variable          local
+env.AUDIT_RETENTION_DAYS ("2555")                                                   Environment Variable          local
+env.AUDIT_ALLOWED_RESIDENCIES ("za,eu")                                             Environment Variable          local
+env.KYC_PROVIDER ("replace-with-your-kyc-provider")                                 Environment Variable          local
+env.OCR_ENABLED ("false")                                                           Environment Variable          local
+env.OCR_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                                 Environment Variable          local
+env.PHOTO_VISION_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                        Environment Variable          local
+env.PHOTO_EMBEDDING_MODEL ("@cf/baai/bge-base-en-v1.5")                             Environment Variable          local
+env.PHOTO_INDEX_NAMESPACE ("published-photos-v1")                                   Environment Variable          local
+env.PAYOUT_MIN_CENTS ("10000")                                                      Environment Variable          local
+env.SESSION_SECRET ("(hidden)")                                                     Environment Variable          local
+env.PAYMENT_WEBHOOK_SECRET ("(hidden)")                                             Environment Variable          local
+env.STREAM_WEBHOOK_SECRET ("(hidden)")                                              Environment Variable          local
+
+⎔ Local server updated and ready
+{"timestamp":"2026-08-13T14:34:36.314Z","level":"info","event":"request.completed","traceId":"24be8f8fe74cf0b7884ce9bd2504d288","spanId":"60905b2dc4ecbea4","method":"GET","path":"/api/assets","status":200,"durationMs":21}
+[wrangler:info] GET /api/assets 200 OK (34ms)
+{"timestamp":"2026-08-13T14:34:36.327Z","level":"info","event":"request.completed","traceId":"e4d03f218e946a73f97da18d3d72ba18","spanId":"8c7185c9726e6ed5","method":"GET","path":"/api/auth/session","status":200,"durationMs":8}
+[wrangler:info] GET /api/auth/session 200 OK (43ms)
+{"timestamp":"2026-08-13T14:34:38.065Z","level":"info","event":"request.completed","traceId":"d8c26a84366147b16a9a2ab054e92439","spanId":"d28dfff173d5acdd","method":"GET","path":"/api/community/overview","status":200,"durationMs":22}
+[wrangler:info] GET /api/community/overview 200 OK (30ms)
+{"timestamp":"2026-08-13T14:34:39.067Z","level":"info","event":"request.completed","traceId":"c57115162723e2edc5ea609ab5c0550e","spanId":"3338a46380948e77","method":"GET","path":"/api/auth/session","status":200,"durationMs":7}
+[wrangler:info] GET /api/auth/session 200 OK (10ms)
+{"timestamp":"2026-08-13T14:34:39.082Z","level":"info","event":"request.completed","traceId":"cd281d1fccd72c43f15e964460b0c218","spanId":"ac3ae845beeef439","method":"GET","path":"/api/assets","status":200,"durationMs":10}
+[wrangler:info] GET /api/assets 200 OK (23ms)
+{"timestamp":"2026-08-13T14:34:39.878Z","level":"info","event":"request.completed","traceId":"3d607c8bdf1c385a94f8a8febced5a35","spanId":"7f86d849ad4a129d","method":"GET","path":"/api/community/overview","status":200,"durationMs":20}
+[wrangler:info] GET /api/community/overview 200 OK (24ms)
+{"timestamp":"2026-08-13T14:34:42.409Z","level":"info","event":"request.completed","traceId":"edcfdfc725fe0a19330af207481c8cdc","spanId":"a3ee4f62f1de04b7","method":"GET","path":"/api/auth/session","status":200,"durationMs":9}
+[wrangler:info] GET /api/auth/session 200 OK (11ms)
+{"timestamp":"2026-08-13T14:34:42.422Z","level":"info","event":"request.completed","traceId":"36f5ac2926c597c4f4a6e788a1d89980","spanId":"3b85e27b012d9fa7","method":"GET","path":"/api/assets","status":200,"durationMs":10}
+[wrangler:info] GET /api/assets 200 OK (25ms)
+{"timestamp":"2026-08-13T14:34:43.246Z","level":"info","event":"request.completed","traceId":"9c2a835568b16312a69613feed46e4c3","spanId":"897e3fb0f9c9da8d","method":"GET","path":"/api/community/overview","status":200,"durationMs":21}
+[wrangler:info] GET /api/community/overview 200 OK (25ms)
+{"timestamp":"2026-08-13T14:34:43.366Z","level":"info","event":"request.completed","traceId":"1b35a9d1a8331231aae254d57d22c037","spanId":"69f6ffa9c54b8756","method":"GET","path":"/api/assets","status":200,"durationMs":12}
+[wrangler:info] GET /api/assets 200 OK (15ms)
+{"timestamp":"2026-08-13T14:34:44.033Z","level":"info","event":"request.completed","traceId":"cdbddda30697b1697bc4f3767eb6c937","spanId":"813897d09cc35a42","method":"GET","path":"/api/auth/session","status":200,"durationMs":8}
+[wrangler:info] GET /api/auth/session 200 OK (10ms)
+{"timestamp":"2026-08-13T14:34:44.046Z","level":"info","event":"request.completed","traceId":"144a14662c91b7f1f817d18bbd4e0296","spanId":"4e7678402969546c","method":"GET","path":"/api/assets","status":200,"durationMs":10}
+[wrangler:info] GET /api/assets 200 OK (22ms)
+{"timestamp":"2026-08-13T14:34:44.847Z","level":"info","event":"request.completed","traceId":"74f3f844d1a08bdd524e2fcdf8c1d15e","spanId":"bbf1712a361a9002","method":"GET","path":"/api/community/overview","status":200,"durationMs":20}
+[wrangler:info] GET /api/community/overview 200 OK (24ms)
+{"timestamp":"2026-08-13T14:34:44.944Z","level":"info","event":"request.completed","traceId":"a0ae893bbc7af65a9038f761926d498a","spanId":"6aa6a0790778adcf","method":"GET","path":"/api/assets","status":200,"durationMs":11}
+[wrangler:info] GET /api/assets 200 OK (14ms)
+{"timestamp":"2026-08-13T14:34:45.524Z","level":"info","event":"request.completed","traceId":"49f1390dc1362c1af8aebda52119a35f","spanId":"024edeeffa26d969","method":"GET","path":"/api/auth/session","status":200,"durationMs":7}
+[wrangler:info] GET /api/auth/session 200 OK (11ms)
+{"timestamp":"2026-08-13T14:34:45.537Z","level":"info","event":"request.completed","traceId":"17dc39eea8cd7e6cb8ab2a7f01657d44","spanId":"052dac444747aef0","method":"GET","path":"/api/assets","status":200,"durationMs":10}
+[wrangler:info] GET /api/assets 200 OK (23ms)
+{"timestamp":"2026-08-13T14:34:46.361Z","level":"info","event":"request.completed","traceId":"6530eb8cb10a2ca3e098e0563cd59e73","spanId":"c6f36d1655578e14","method":"GET","path":"/api/community/overview","status":200,"durationMs":19}
+[wrangler:info] GET /api/community/overview 200 OK (24ms)
+{"timestamp":"2026-08-13T14:34:46.480Z","level":"info","event":"request.completed","traceId":"8ae60e0aafd33cbf57eed36068cb4912","spanId":"b3b5c5d9c68606c3","method":"GET","path":"/api/assets","status":200,"durationMs":11}
+[wrangler:info] GET /api/assets 200 OK (18ms)
+{"timestamp":"2026-08-13T14:35:23.807Z","level":"info","event":"request.completed","traceId":"046a667bb917b9cbcacff70ce780dac6","spanId":"3a91aee573a805f3","method":"GET","path":"/api/auth/session","status":200,"durationMs":9}
+[wrangler:info] GET /api/auth/session 200 OK (14ms)
+{"timestamp":"2026-08-13T14:35:23.822Z","level":"info","event":"request.completed","traceId":"05bf49123bd4e45a2b4fa91ff7fa8fef","spanId":"fcdd669a27123b0f","method":"GET","path":"/api/assets","status":200,"durationMs":11}
+[wrangler:info] GET /api/assets 200 OK (27ms)
+{"timestamp":"2026-08-13T14:35:23.836Z","level":"info","event":"request.completed","traceId":"1152a4070fcb460f06ef0ff2b6209e8a","spanId":"82382901924a4eaa","method":"GET","path":"/api/assets","status":200,"durationMs":11}
+[wrangler:info] GET /api/assets 200 OK (43ms)
+{"timestamp":"2026-08-13T14:35:23.864Z","level":"info","event":"request.completed","traceId":"4c90e32a64fb5aa0fe627936a6bcb343","spanId":"798a8de28725b0b8","method":"GET","path":"/api/auth/session","status":200,"durationMs":17}
+[wrangler:info] GET /api/auth/session 200 OK (24ms)
+{"timestamp":"2026-08-13T14:35:25.011Z","level":"info","event":"request.completed","traceId":"466c74a6918f7582dfe5410e20312743","spanId":"b9e9cef4a862b982","method":"POST","path":"/api/auth/dev-login","status":200,"durationMs":19}
+[wrangler:info] POST /api/auth/dev-login 200 OK (22ms)
+{"timestamp":"2026-08-13T14:35:25.845Z","level":"info","event":"request.completed","traceId":"d0a4b967b44172b5e22ab83ac0d60d36","spanId":"4db350cb68ba3547","method":"GET","path":"/api/analytics/contributor","status":200,"durationMs":16}
+[wrangler:info] GET /api/analytics/contributor 200 OK (19ms)
+{"timestamp":"2026-08-13T14:35:25.862Z","level":"info","event":"request.completed","traceId":"7cea37f291f01d98cf7345014f744d62","spanId":"bdec38acbc45243c","method":"GET","path":"/api/analytics/contributor","status":200,"durationMs":14}
+[wrangler:info] GET /api/analytics/contributor 200 OK (27ms)
+{"timestamp":"2026-08-13T14:35:53.605Z","level":"info","event":"request.completed","traceId":"64f70d0f3792f4734a32ef6d46cb6441","spanId":"f584bb0479c3169f","method":"GET","path":"/api/auth/session","status":200,"durationMs":11}
+[wrangler:info] GET /api/auth/session 200 OK (17ms)
+{"timestamp":"2026-08-13T14:35:53.619Z","level":"info","event":"request.completed","traceId":"5e27b04ff4eb892055cea1cdc52d645b","spanId":"9066b944f055ad37","method":"GET","path":"/api/assets","status":200,"durationMs":11}
+[wrangler:info] GET /api/assets 200 OK (28ms)
+{"timestamp":"2026-08-13T14:35:53.632Z","level":"info","event":"request.completed","traceId":"3fc5fe9dc4f5d8f41f65b9bb56c9715b","spanId":"c325928fd6f0d7a7","method":"GET","path":"/api/assets","status":200,"durationMs":9}
+[wrangler:info] GET /api/assets 200 OK (48ms)
+{"timestamp":"2026-08-13T14:35:53.652Z","level":"info","event":"request.completed","traceId":"58a0a67313d0f8ffdb2bc83042222fa3","spanId":"a4781d9fd58a5092","method":"GET","path":"/api/auth/session","status":200,"durationMs":7}
+[wrangler:info] GET /api/auth/session 200 OK (14ms)
+{"timestamp":"2026-08-13T14:35:54.626Z","level":"info","event":"request.completed","traceId":"c2bb3cb180e50b5538f3c613b2386365","spanId":"a879ac778edf8c8c","method":"POST","path":"/api/auth/dev-login","status":200,"durationMs":18}
+[wrangler:info] POST /api/auth/dev-login 200 OK (22ms)
+{"timestamp":"2026-08-13T14:35:57.350Z","level":"info","event":"request.completed","traceId":"294a244cd8c17c2ad0499e683f9f7950","spanId":"a1837775010f2a6d","method":"GET","path":"/api/analytics/contributor","status":200,"durationMs":15}
+[wrangler:info] GET /api/analytics/contributor 200 OK (21ms)
+{"timestamp":"2026-08-13T14:36:26.358Z","level":"info","event":"request.completed","traceId":"ce102383740b6b0d02c79d71933d9264","spanId":"ed6fb5534498b2e5","method":"PUT","path":"/api/onboarding","status":200,"durationMs":37}
+[wrangler:info] PUT /api/onboarding 200 OK (41ms)
+{"timestamp":"2026-08-13T14:36:27.251Z","level":"info","event":"request.completed","traceId":"084f469b6364c587b7ed63488417a561","spanId":"25a3fdf6f1eb9809","method":"POST","path":"/api/onboarding/wallet","status":422,"durationMs":29}
+[wrangler:info] POST /api/onboarding/wallet 422 Unprocessable Entity (34ms)
+{"timestamp":"2026-08-13T14:36:28.119Z","level":"info","event":"request.completed","traceId":"95e40af18cd39e4a38a6f90fa0123d54","spanId":"bae864e84375e5dd","method":"POST","path":"/api/assets","status":201,"durationMs":31}
+[wrangler:info] POST /api/assets 201 Created (35ms)
+{"timestamp":"2026-08-13T14:36:29.042Z","level":"info","event":"request.completed","traceId":"c79565a8c65016f358d074d3ae3efb3f","spanId":"a1b7ff79fb1d6914","method":"GET","path":"/api/community/overview","status":200,"durationMs":20}
+[wrangler:info] GET /api/community/overview 200 OK (25ms)
+{"timestamp":"2026-08-13T14:36:29.072Z","level":"info","event":"request.completed","traceId":"8ae6412d6dd8c9f8a07dfa72d065da4e","spanId":"0868a687cc825533","method":"GET","path":"/api/community/overview","status":200,"durationMs":21}
+[wrangler:info] GET /api/community/overview 200 OK (27ms)
+{"timestamp":"2026-08-13T14:36:35.871Z","level":"info","event":"request.completed","traceId":"b94ea25aa2dd6cb73d3f6a6e46ca47d7","spanId":"da593ac92548c5a1","method":"GET","path":"/api/community/overview","status":200,"durationMs":23}
+[wrangler:info] GET /api/community/overview 200 OK (29ms)
+⎔ Reloading local server...
+⎔ Connection status updated
+Your Worker has access to the following bindings:
+Binding                                                                             Resource                      Mode
+env.PHOTO_ENRICHMENT_QUEUE (veld-archive-photo-enrichment)                          Queue                         local
+env.DB (veld-archive)                                                               D1 Database                   local
+env.PHOTO_INDEX (veld-archive-photo-index)                                          Vectorize Index               not supported
+env.MEDIA_BUCKET (veld-archive-media)                                               R2 Bucket                     local
+env.MEDIA_DR_BUCKET (veld-archive-media-dr)                                         R2 Bucket                     local
+env.BACKUP_BUCKET (veld-archive-backups-dr)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_ZA (veld-archive-audit-za)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_EU (veld-archive-audit-eu (eu))                                    R2 Bucket                     local
+env.KYC_BUCKET_ZA (veld-archive-kyc-za)                                             R2 Bucket                     local
+env.KYC_BUCKET_EU (veld-archive-kyc-eu (eu))                                        R2 Bucket                     local
+env.OBSERVABILITY (veld_archive_observability)                                      Analytics Engine Dataset      local
+env.ASSETS                                                                          Assets                        local
+env.APP_ENV ("development")                                                         Environment Variable          local
+env.ALLOWED_ORIGINS ("http://localhost:5173,http://127.0.0....")                    Environment Variable          local
+env.TURNSTILE_HOSTNAMES ("localhost,127.0.0.1")                                     Environment Variable          local
+env.DEFAULT_ORGANIZATION_ID ("org-demo")                                            Environment Variable          local
+env.RATE_LIMIT_WINDOW_SECONDS ("60")                                                Environment Variable          local
+env.RATE_LIMIT_DEFAULT_PER_WINDOW ("120")                                           Environment Variable          local
+env.UPLOAD_DAILY_QUOTA_BYTES ("50000000000")                                        Environment Variable          local
+env.ORG_STORAGE_QUOTA_BYTES ("500000000000")                                        Environment Variable          local
+env.MEDIA_SCANNER_URL ("")                                                          Environment Variable          local
+env.R2_BUCKET_NAME ("veld-archive-media")                                           Environment Variable          local
+env.R2_DR_BUCKET_NAME ("veld-archive-media-dr")                                     Environment Variable          local
+env.BACKUP_BUCKET_NAME ("veld-archive-backups-dr")                                  Environment Variable          local
+env.CHAOS_TESTING_ENABLED ("false")                                                 Environment Variable          local
+env.UPLOAD_MAX_SIZE_BYTES ("30000000000")                                           Environment Variable          local
+env.AUDIT_SIGNING_KEY_ID ("audit-ed25519-v1")                                       Environment Variable          local
+env.AUDIT_RETENTION_DAYS ("2555")                                                   Environment Variable          local
+env.AUDIT_ALLOWED_RESIDENCIES ("za,eu")                                             Environment Variable          local
+env.KYC_PROVIDER ("replace-with-your-kyc-provider")                                 Environment Variable          local
+env.OCR_ENABLED ("false")                                                           Environment Variable          local
+env.OCR_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                                 Environment Variable          local
+env.PHOTO_VISION_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                        Environment Variable          local
+env.PHOTO_EMBEDDING_MODEL ("@cf/baai/bge-base-en-v1.5")                             Environment Variable          local
+env.PHOTO_INDEX_NAMESPACE ("published-photos-v1")                                   Environment Variable          local
+env.PAYOUT_MIN_CENTS ("10000")                                                      Environment Variable          local
+env.SESSION_SECRET ("(hidden)")                                                     Environment Variable          local
+env.PAYMENT_WEBHOOK_SECRET ("(hidden)")                                             Environment Variable          local
+env.STREAM_WEBHOOK_SECRET ("(hidden)")                                              Environment Variable          local
+
+⎔ Local server updated and ready
+{"timestamp":"2026-08-13T14:36:50.230Z","level":"info","event":"request.completed","traceId":"71b4c172459398aab3b6acb88404d832","spanId":"fb540b786b11fe26","method":"GET","path":"/api/auth/session","status":200,"durationMs":35}
+[wrangler:info] GET /api/auth/session 200 OK (44ms)
+{"timestamp":"2026-08-13T14:36:50.249Z","level":"info","event":"request.completed","traceId":"4ba8c11a48e334a51678d232e25ab781","spanId":"d6d15826468b9cc3","method":"GET","path":"/api/assets","status":200,"durationMs":14}
+[wrangler:info] GET /api/assets 200 OK (62ms)
+{"timestamp":"2026-08-13T14:36:51.995Z","level":"info","event":"request.completed","traceId":"0210b17de57ebde8d2351d30e2eef85f","spanId":"4972b3859dbd812b","method":"GET","path":"/api/community/overview","status":200,"durationMs":22}
+[wrangler:info] GET /api/community/overview 200 OK (30ms)
+{"timestamp":"2026-08-13T14:36:52.976Z","level":"info","event":"request.completed","traceId":"20b5c371ac8a76f4e0487fc6b8c51806","spanId":"a8b1d267bb12e0b6","method":"GET","path":"/api/auth/session","status":200,"durationMs":7}
+[wrangler:info] GET /api/auth/session 200 OK (10ms)
+{"timestamp":"2026-08-13T14:36:52.990Z","level":"info","event":"request.completed","traceId":"6b480ab2ed8a07c24403f0c9fc0a1ca4","spanId":"99b96d48304bc06f","method":"GET","path":"/api/assets","status":200,"durationMs":10}
+[wrangler:info] GET /api/assets 200 OK (23ms)
+{"timestamp":"2026-08-13T14:36:53.776Z","level":"info","event":"request.completed","traceId":"1d7dcba576123d2410ef0e688a7070c0","spanId":"5be83e66fdd67fab","method":"GET","path":"/api/community/overview","status":200,"durationMs":22}
+[wrangler:info] GET /api/community/overview 200 OK (28ms)
+{"timestamp":"2026-08-13T14:36:56.344Z","level":"info","event":"request.completed","traceId":"591513f30156e1df7894316b2365cd56","spanId":"fb21632d7b4bdcac","method":"GET","path":"/api/assets","status":200,"durationMs":9}
+[wrangler:info] GET /api/assets 200 OK (12ms)
+{"timestamp":"2026-08-13T14:36:56.355Z","level":"info","event":"request.completed","traceId":"0e78df015eb2af3c57485347d6b8da80","spanId":"1f7030791c676a1e","method":"GET","path":"/api/auth/session","status":200,"durationMs":6}
+[wrangler:info] GET /api/auth/session 200 OK (22ms)
+{"timestamp":"2026-08-13T14:36:57.160Z","level":"info","event":"request.completed","traceId":"c39b2403c401611285c033671f4b490e","spanId":"374f51ba40188730","method":"GET","path":"/api/community/overview","status":200,"durationMs":22}
+[wrangler:info] GET /api/community/overview 200 OK (29ms)
+{"timestamp":"2026-08-13T14:36:57.278Z","level":"info","event":"request.completed","traceId":"8a2c8c9a18cc667685579615bb204973","spanId":"075a7ce91d3af9bb","method":"GET","path":"/api/assets","status":200,"durationMs":10}
+[wrangler:info] GET /api/assets 200 OK (15ms)
+{"timestamp":"2026-08-13T14:36:57.917Z","level":"info","event":"request.completed","traceId":"d72d28d70e032f60c36a9787994322a3","spanId":"8d821798eadda92b","method":"GET","path":"/api/auth/session","status":200,"durationMs":7}
+[wrangler:info] GET /api/auth/session 200 OK (11ms)
+{"timestamp":"2026-08-13T14:36:57.931Z","level":"info","event":"request.completed","traceId":"4e9118cc45b9630efefb82e6bdcc181f","spanId":"16b0f0d8937441e3","method":"GET","path":"/api/assets","status":200,"durationMs":10}
+[wrangler:info] GET /api/assets 200 OK (24ms)
+{"timestamp":"2026-08-13T14:36:58.774Z","level":"info","event":"request.completed","traceId":"a644fd181a0795a151bfb8cafdd34857","spanId":"d8657b1a71ba872e","method":"GET","path":"/api/community/overview","status":200,"durationMs":21}
+[wrangler:info] GET /api/community/overview 200 OK (26ms)
+{"timestamp":"2026-08-13T14:36:58.889Z","level":"info","event":"request.completed","traceId":"2c64f969b5414b29e8e549ede5f78a22","spanId":"ecb926065897ff0a","method":"GET","path":"/api/assets","status":200,"durationMs":12}
+[wrangler:info] GET /api/assets 200 OK (14ms)
+{"timestamp":"2026-08-13T14:36:59.474Z","level":"info","event":"request.completed","traceId":"416c0f78743f4fe89a62e9e802b2d066","spanId":"656b8c0f6bc9989c","method":"GET","path":"/api/auth/session","status":200,"durationMs":7}
+[wrangler:info] GET /api/auth/session 200 OK (11ms)
+{"timestamp":"2026-08-13T14:36:59.491Z","level":"info","event":"request.completed","traceId":"125052ef3de23e168effe971f24e75d4","spanId":"ca92ef4cbcc82f03","method":"GET","path":"/api/assets","status":200,"durationMs":13}
+[wrangler:info] GET /api/assets 200 OK (26ms)
+{"timestamp":"2026-08-13T14:37:00.054Z","level":"info","event":"request.completed","traceId":"b2ef77e1d4e92d413642e12e3f5327ad","spanId":"f946bc635515e4ce","method":"POST","path":"/api/rights/takedown","status":201,"durationMs":50}
+[wrangler:info] POST /api/rights/takedown 201 Created (53ms)
+{"timestamp":"2026-08-13T14:37:00.323Z","level":"info","event":"request.completed","traceId":"ee7d503d2028d17473907808ac39590c","spanId":"51df5b00c09903f1","method":"GET","path":"/api/community/overview","status":200,"durationMs":21}
+[wrangler:info] GET /api/community/overview 200 OK (27ms)
+{"timestamp":"2026-08-13T14:37:00.427Z","level":"info","event":"request.completed","traceId":"9e40e4f87bf4d707ef0fdf901ec6652d","spanId":"4495f2457fffa29f","method":"GET","path":"/api/assets","status":200,"durationMs":14}
+[wrangler:info] GET /api/assets 200 OK (16ms)
+{"timestamp":"2026-08-13T14:37:31.017Z","level":"info","event":"request.completed","traceId":"dcddb8ce1acf6475a6dff332846334d7","spanId":"668c95a8005f9bc5","method":"POST","path":"/api/auth/logout","status":200,"durationMs":32}
+[wrangler:info] POST /api/auth/logout 200 OK (38ms)
+{"timestamp":"2026-08-13T14:37:31.754Z","level":"info","event":"request.completed","traceId":"e6357905ead2ea760213eb8e2b79b21e","spanId":"faefe449bb966b4e","method":"POST","path":"/api/auth/dev-login","status":200,"durationMs":21}
+[wrangler:info] POST /api/auth/dev-login 200 OK (23ms)
+{"timestamp":"2026-08-13T14:37:32.668Z","level":"info","event":"request.completed","traceId":"2f2d618e8351adb659f6b7ab9cf77845","spanId":"7f8c9fa0992c8792","method":"GET","path":"/api/governance/assets","status":200,"durationMs":15}
+[wrangler:info] GET /api/governance/assets 200 OK (19ms)
+{"timestamp":"2026-08-13T14:37:32.689Z","level":"info","event":"request.completed","traceId":"e6228cd8144511f64dce8b8df30b12b2","spanId":"5b434cbca6f542d9","method":"GET","path":"/api/governance/assets","status":200,"durationMs":14}
+[wrangler:info] GET /api/governance/assets 200 OK (16ms)
+{"timestamp":"2026-08-13T14:38:03.758Z","level":"info","event":"request.completed","traceId":"be51ce04e32274e22ff0ed71ef8995fc","spanId":"45082ca7ebab342b","method":"POST","path":"/api/governance/assets/41601a5b-2415-4f6c-8ca0-c963a8ccb704/action","status":200,"durationMs":56}
+[wrangler:info] POST /api/governance/assets/41601a5b-2415-4f6c-8ca0-c963a8ccb704/action 200 OK (61ms)
+{"timestamp":"2026-08-13T14:38:03.785Z","level":"info","event":"request.completed","traceId":"95eb5c7fc91fe011bd07f1ee4e04d427","spanId":"ce4f10660ad9b74e","method":"GET","path":"/api/governance/assets","status":200,"durationMs":17}
+[wrangler:info] GET /api/governance/assets 200 OK (22ms)
+⎔ Reloading local server...
+⎔ Connection status updated
+Your Worker has access to the following bindings:
+Binding                                                                             Resource                      Mode
+env.PHOTO_ENRICHMENT_QUEUE (veld-archive-photo-enrichment)                          Queue                         local
+env.DB (veld-archive)                                                               D1 Database                   local
+env.PHOTO_INDEX (veld-archive-photo-index)                                          Vectorize Index               not supported
+env.MEDIA_BUCKET (veld-archive-media)                                               R2 Bucket                     local
+env.MEDIA_DR_BUCKET (veld-archive-media-dr)                                         R2 Bucket                     local
+env.BACKUP_BUCKET (veld-archive-backups-dr)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_ZA (veld-archive-audit-za)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_EU (veld-archive-audit-eu (eu))                                    R2 Bucket                     local
+env.KYC_BUCKET_ZA (veld-archive-kyc-za)                                             R2 Bucket                     local
+env.KYC_BUCKET_EU (veld-archive-kyc-eu (eu))                                        R2 Bucket                     local
+env.OBSERVABILITY (veld_archive_observability)                                      Analytics Engine Dataset      local
+env.ASSETS                                                                          Assets                        local
+env.APP_ENV ("development")                                                         Environment Variable          local
+env.ALLOWED_ORIGINS ("http://localhost:5173,http://127.0.0....")                    Environment Variable          local
+env.TURNSTILE_HOSTNAMES ("localhost,127.0.0.1")                                     Environment Variable          local
+env.DEFAULT_ORGANIZATION_ID ("org-demo")                                            Environment Variable          local
+env.RATE_LIMIT_WINDOW_SECONDS ("60")                                                Environment Variable          local
+env.RATE_LIMIT_DEFAULT_PER_WINDOW ("120")                                           Environment Variable          local
+env.UPLOAD_DAILY_QUOTA_BYTES ("50000000000")                                        Environment Variable          local
+env.ORG_STORAGE_QUOTA_BYTES ("500000000000")                                        Environment Variable          local
+env.MEDIA_SCANNER_URL ("")                                                          Environment Variable          local
+env.R2_BUCKET_NAME ("veld-archive-media")                                           Environment Variable          local
+env.R2_DR_BUCKET_NAME ("veld-archive-media-dr")                                     Environment Variable          local
+env.BACKUP_BUCKET_NAME ("veld-archive-backups-dr")                                  Environment Variable          local
+env.CHAOS_TESTING_ENABLED ("false")                                                 Environment Variable          local
+env.UPLOAD_MAX_SIZE_BYTES ("30000000000")                                           Environment Variable          local
+env.AUDIT_SIGNING_KEY_ID ("audit-ed25519-v1")                                       Environment Variable          local
+env.AUDIT_RETENTION_DAYS ("2555")                                                   Environment Variable          local
+env.AUDIT_ALLOWED_RESIDENCIES ("za,eu")                                             Environment Variable          local
+env.KYC_PROVIDER ("replace-with-your-kyc-provider")                                 Environment Variable          local
+env.OCR_ENABLED ("false")                                                           Environment Variable          local
+env.OCR_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                                 Environment Variable          local
+env.PHOTO_VISION_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                        Environment Variable          local
+env.PHOTO_EMBEDDING_MODEL ("@cf/baai/bge-base-en-v1.5")                             Environment Variable          local
+env.PHOTO_INDEX_NAMESPACE ("published-photos-v1")                                   Environment Variable          local
+env.PAYOUT_MIN_CENTS ("10000")                                                      Environment Variable          local
+env.SESSION_SECRET ("(hidden)")                                                     Environment Variable          local
+env.PAYMENT_WEBHOOK_SECRET ("(hidden)")                                             Environment Variable          local
+env.STREAM_WEBHOOK_SECRET ("(hidden)")                                              Environment Variable          local
+
+⎔ Local server updated and ready
+{"timestamp":"2026-08-13T14:41:44.007Z","level":"info","event":"request.completed","traceId":"47e1f257066411408999e9813d5dbdcc","spanId":"79ed76a781527c30","method":"GET","path":"/api/auth/session","status":200,"durationMs":19}
+[wrangler:info] GET /api/auth/session 200 OK (29ms)
+{"timestamp":"2026-08-13T14:41:44.024Z","level":"info","event":"request.completed","traceId":"a57e46ea0cd7fb5d357b8d73a34d5779","spanId":"942d037e90fe7ef4","method":"GET","path":"/api/assets","status":200,"durationMs":12}
+[wrangler:info] GET /api/assets 200 OK (45ms)
+{"timestamp":"2026-08-13T14:41:44.040Z","level":"info","event":"request.completed","traceId":"bc758df83db59267a475ae3125d6c9e4","spanId":"c5e5438ef61e35c7","method":"GET","path":"/api/assets","status":200,"durationMs":11}
+[wrangler:info] GET /api/assets 200 OK (62ms)
+{"timestamp":"2026-08-13T14:41:44.060Z","level":"info","event":"request.completed","traceId":"653924e3682bfcb813c13821f497ee14","spanId":"db1066fe8febfb62","method":"GET","path":"/api/auth/session","status":200,"durationMs":9}
+[wrangler:info] GET /api/auth/session 200 OK (17ms)
+{"timestamp":"2026-08-13T14:41:45.200Z","level":"info","event":"request.completed","traceId":"91087cfdcc13dd9f55690e517d72ef81","spanId":"af867ae4f9782952","method":"POST","path":"/api/auth/dev-login","status":200,"durationMs":23}
+[wrangler:info] POST /api/auth/dev-login 200 OK (26ms)
+{"timestamp":"2026-08-13T14:41:45.929Z","level":"info","event":"request.completed","traceId":"e599ad126396cf637c01047938e28398","spanId":"6e30b954a4475482","method":"GET","path":"/api/analytics/contributor","status":200,"durationMs":17}
+[wrangler:info] GET /api/analytics/contributor 200 OK (22ms)
+{"timestamp":"2026-08-13T14:41:45.983Z","level":"info","event":"request.completed","traceId":"ef51d570730459c60d577c8164899f80","spanId":"5f9404cff208634d","method":"GET","path":"/api/analytics/contributor","status":200,"durationMs":16}
+[wrangler:info] GET /api/analytics/contributor 200 OK (64ms)
+{"timestamp":"2026-08-13T14:41:46.791Z","level":"info","event":"request.completed","traceId":"f00012c49e28e6e25be7220ae57e9bbb","spanId":"831fc1e4868bf3a4","method":"PUT","path":"/api/onboarding","status":200,"durationMs":33}
+[wrangler:info] PUT /api/onboarding 200 OK (36ms)
+{"timestamp":"2026-08-13T14:41:47.316Z","level":"info","event":"request.completed","traceId":"18ef0f781412f165038b516ae0317add","spanId":"99ff83499aaafd37","method":"GET","path":"/api/community/overview","status":200,"durationMs":22}
+[wrangler:info] GET /api/community/overview 200 OK (28ms)
+{"timestamp":"2026-08-13T14:41:47.350Z","level":"info","event":"request.completed","traceId":"f31842e6e798ec6b3565f9e3e0a5f395","spanId":"6bdcab8458641733","method":"GET","path":"/api/community/overview","status":200,"durationMs":23}
+[wrangler:info] GET /api/community/overview 200 OK (30ms)
+{"timestamp":"2026-08-13T14:41:48.141Z","level":"info","event":"request.completed","traceId":"66af1bddd057388efaad8723744ec922","spanId":"b5fe7cd66ed4d17c","method":"POST","path":"/api/rights/takedown","status":201,"durationMs":51}
+[wrangler:info] POST /api/rights/takedown 201 Created (54ms)
+{"timestamp":"2026-08-13T14:41:59.982Z","level":"info","event":"request.completed","traceId":"5ce9e0b9ec95b11963dd762768eb9cc0","spanId":"d5eb3833ccde8491","method":"GET","path":"/api/assets","status":200,"durationMs":14}
+[wrangler:info] GET /api/assets 200 OK (21ms)
+{"timestamp":"2026-08-13T14:41:59.993Z","level":"info","event":"request.completed","traceId":"fcd52a9ee75f222bee8c19a8ce6a6a78","spanId":"779c02fff65cb03f","method":"GET","path":"/api/auth/session","status":200,"durationMs":8}
+[wrangler:info] GET /api/auth/session 200 OK (28ms)
+{"timestamp":"2026-08-13T14:42:01.784Z","level":"info","event":"request.completed","traceId":"5f446679a965e4a604ab327f9daf2ced","spanId":"b665055219d93264","method":"GET","path":"/api/community/overview","status":200,"durationMs":24}
+[wrangler:info] GET /api/community/overview 200 OK (33ms)
+{"timestamp":"2026-08-13T14:42:02.753Z","level":"info","event":"request.completed","traceId":"c4c023c02d84b76ed72bc8825350f6b8","spanId":"edf1047f57b78440","method":"GET","path":"/api/auth/session","status":200,"durationMs":9}
+[wrangler:info] GET /api/auth/session 200 OK (12ms)
+{"timestamp":"2026-08-13T14:42:02.767Z","level":"info","event":"request.completed","traceId":"5acec0fb66439db740e80d47591c6a45","spanId":"3cf6bb9b9d9324c3","method":"GET","path":"/api/assets","status":200,"durationMs":10}
+[wrangler:info] GET /api/assets 200 OK (26ms)
+{"timestamp":"2026-08-13T14:42:03.550Z","level":"info","event":"request.completed","traceId":"58ee00ff4e1f2bb847c9adb33ed009ae","spanId":"a76dad5503ad689c","method":"GET","path":"/api/community/overview","status":200,"durationMs":25}
+[wrangler:info] GET /api/community/overview 200 OK (31ms)
+⎔ Reloading local server...
+⎔ Connection status updated
+Your Worker has access to the following bindings:
+Binding                                                                             Resource                      Mode
+env.PHOTO_ENRICHMENT_QUEUE (veld-archive-photo-enrichment)                          Queue                         local
+env.DB (veld-archive)                                                               D1 Database                   local
+env.PHOTO_INDEX (veld-archive-photo-index)                                          Vectorize Index               not supported
+env.MEDIA_BUCKET (veld-archive-media)                                               R2 Bucket                     local
+env.MEDIA_DR_BUCKET (veld-archive-media-dr)                                         R2 Bucket                     local
+env.BACKUP_BUCKET (veld-archive-backups-dr)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_ZA (veld-archive-audit-za)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_EU (veld-archive-audit-eu (eu))                                    R2 Bucket                     local
+env.KYC_BUCKET_ZA (veld-archive-kyc-za)                                             R2 Bucket                     local
+env.KYC_BUCKET_EU (veld-archive-kyc-eu (eu))                                        R2 Bucket                     local
+env.OBSERVABILITY (veld_archive_observability)                                      Analytics Engine Dataset      local
+env.ASSETS                                                                          Assets                        local
+env.APP_ENV ("development")                                                         Environment Variable          local
+env.ALLOWED_ORIGINS ("http://localhost:5173,http://127.0.0....")                    Environment Variable          local
+env.TURNSTILE_HOSTNAMES ("localhost,127.0.0.1")                                     Environment Variable          local
+env.DEFAULT_ORGANIZATION_ID ("org-demo")                                            Environment Variable          local
+env.RATE_LIMIT_WINDOW_SECONDS ("60")                                                Environment Variable          local
+env.RATE_LIMIT_DEFAULT_PER_WINDOW ("120")                                           Environment Variable          local
+env.UPLOAD_DAILY_QUOTA_BYTES ("50000000000")                                        Environment Variable          local
+env.ORG_STORAGE_QUOTA_BYTES ("500000000000")                                        Environment Variable          local
+env.MEDIA_SCANNER_URL ("")                                                          Environment Variable          local
+env.R2_BUCKET_NAME ("veld-archive-media")                                           Environment Variable          local
+env.R2_DR_BUCKET_NAME ("veld-archive-media-dr")                                     Environment Variable          local
+env.BACKUP_BUCKET_NAME ("veld-archive-backups-dr")                                  Environment Variable          local
+env.CHAOS_TESTING_ENABLED ("false")                                                 Environment Variable          local
+env.UPLOAD_MAX_SIZE_BYTES ("30000000000")                                           Environment Variable          local
+env.AUDIT_SIGNING_KEY_ID ("audit-ed25519-v1")                                       Environment Variable          local
+env.AUDIT_RETENTION_DAYS ("2555")                                                   Environment Variable          local
+env.AUDIT_ALLOWED_RESIDENCIES ("za,eu")                                             Environment Variable          local
+env.KYC_PROVIDER ("replace-with-your-kyc-provider")                                 Environment Variable          local
+env.OCR_ENABLED ("false")                                                           Environment Variable          local
+env.OCR_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                                 Environment Variable          local
+env.PHOTO_VISION_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                        Environment Variable          local
+env.PHOTO_EMBEDDING_MODEL ("@cf/baai/bge-base-en-v1.5")                             Environment Variable          local
+env.PHOTO_INDEX_NAMESPACE ("published-photos-v1")                                   Environment Variable          local
+env.PAYOUT_MIN_CENTS ("10000")                                                      Environment Variable          local
+env.SESSION_SECRET ("(hidden)")                                                     Environment Variable          local
+env.PAYMENT_WEBHOOK_SECRET ("(hidden)")                                             Environment Variable          local
+env.STREAM_WEBHOOK_SECRET ("(hidden)")                                              Environment Variable          local
+
+⎔ Local server updated and ready
+{"timestamp":"2026-08-13T14:44:01.971Z","level":"info","event":"request.completed","traceId":"7ea516e219aefb10fcd6eded6a165793","spanId":"a0d74dbf4dc1ca9b","method":"GET","path":"/api/auth/session","status":200,"durationMs":18}
+[wrangler:info] GET /api/auth/session 200 OK (26ms)
+{"timestamp":"2026-08-13T14:44:01.990Z","level":"info","event":"request.completed","traceId":"f6056030cf3f08b9d6a00280e03a179d","spanId":"8e2cfa4a9e72babe","method":"GET","path":"/api/assets","status":200,"durationMs":15}
+[wrangler:info] GET /api/assets 200 OK (44ms)
+{"timestamp":"2026-08-13T14:44:02.007Z","level":"info","event":"request.completed","traceId":"55bf07d7e30047844135902a70a4ae01","spanId":"e48cf2a81ef5af86","method":"GET","path":"/api/assets","status":200,"durationMs":10}
+[wrangler:info] GET /api/assets 200 OK (66ms)
+{"timestamp":"2026-08-13T14:44:02.022Z","level":"info","event":"request.completed","traceId":"83ebebdc323a2d893646081c215a1bda","spanId":"53a98351bc635bd3","method":"GET","path":"/api/auth/session","status":200,"durationMs":8}
+[wrangler:info] GET /api/auth/session 200 OK (47ms)
+{"timestamp":"2026-08-13T14:44:02.911Z","level":"info","event":"request.completed","traceId":"494fb30976e548cebfb501358973d773","spanId":"7f38028062dd0768","method":"POST","path":"/api/auth/dev-login","status":200,"durationMs":22}
+[wrangler:info] POST /api/auth/dev-login 200 OK (26ms)
+[wrangler:warn] The Workers runtime crashed unexpectedly and is being restarted (crash #1). Any additional runtime output above may indicate the cause.
+[wrangler:info] Updated and ready on http://127.0.0.1:8787
+[wrangler:warn] The Workers runtime crashed unexpectedly and is being restarted (crash #2). Any additional runtime output above may indicate the cause.
+[wrangler:info] Updated and ready on http://127.0.0.1:8787
+⎔ Reloading local server...
+⎔ Connection status updated
+Your Worker has access to the following bindings:
+Binding                                                                             Resource                      Mode
+env.PHOTO_ENRICHMENT_QUEUE (veld-archive-photo-enrichment)                          Queue                         local
+env.DB (veld-archive)                                                               D1 Database                   local
+env.PHOTO_INDEX (veld-archive-photo-index)                                          Vectorize Index               not supported
+env.MEDIA_BUCKET (veld-archive-media)                                               R2 Bucket                     local
+env.MEDIA_DR_BUCKET (veld-archive-media-dr)                                         R2 Bucket                     local
+env.BACKUP_BUCKET (veld-archive-backups-dr)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_ZA (veld-archive-audit-za)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_EU (veld-archive-audit-eu (eu))                                    R2 Bucket                     local
+env.KYC_BUCKET_ZA (veld-archive-kyc-za)                                             R2 Bucket                     local
+env.KYC_BUCKET_EU (veld-archive-kyc-eu (eu))                                        R2 Bucket                     local
+env.OBSERVABILITY (veld_archive_observability)                                      Analytics Engine Dataset      local
+env.ASSETS                                                                          Assets                        local
+env.APP_ENV ("development")                                                         Environment Variable          local
+env.ALLOWED_ORIGINS ("http://localhost:5173,http://127.0.0....")                    Environment Variable          local
+env.TURNSTILE_HOSTNAMES ("localhost,127.0.0.1")                                     Environment Variable          local
+env.DEFAULT_ORGANIZATION_ID ("org-demo")                                            Environment Variable          local
+env.RATE_LIMIT_WINDOW_SECONDS ("60")                                                Environment Variable          local
+env.RATE_LIMIT_DEFAULT_PER_WINDOW ("120")                                           Environment Variable          local
+env.UPLOAD_DAILY_QUOTA_BYTES ("50000000000")                                        Environment Variable          local
+env.ORG_STORAGE_QUOTA_BYTES ("500000000000")                                        Environment Variable          local
+env.MEDIA_SCANNER_URL ("")                                                          Environment Variable          local
+env.R2_BUCKET_NAME ("veld-archive-media")                                           Environment Variable          local
+env.R2_DR_BUCKET_NAME ("veld-archive-media-dr")                                     Environment Variable          local
+env.BACKUP_BUCKET_NAME ("veld-archive-backups-dr")                                  Environment Variable          local
+env.CHAOS_TESTING_ENABLED ("false")                                                 Environment Variable          local
+env.UPLOAD_MAX_SIZE_BYTES ("30000000000")                                           Environment Variable          local
+env.AUDIT_SIGNING_KEY_ID ("audit-ed25519-v1")                                       Environment Variable          local
+env.AUDIT_RETENTION_DAYS ("2555")                                                   Environment Variable          local
+env.AUDIT_ALLOWED_RESIDENCIES ("za,eu")                                             Environment Variable          local
+env.KYC_PROVIDER ("replace-with-your-kyc-provider")                                 Environment Variable          local
+env.OCR_ENABLED ("false")                                                           Environment Variable          local
+env.OCR_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                                 Environment Variable          local
+env.PHOTO_VISION_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                        Environment Variable          local
+env.PHOTO_EMBEDDING_MODEL ("@cf/baai/bge-base-en-v1.5")                             Environment Variable          local
+env.PHOTO_INDEX_NAMESPACE ("published-photos-v1")                                   Environment Variable          local
+env.PAYOUT_MIN_CENTS ("10000")                                                      Environment Variable          local
+env.SESSION_SECRET ("(hidden)")                                                     Environment Variable          local
+env.PAYMENT_WEBHOOK_SECRET ("(hidden)")                                             Environment Variable          local
+env.STREAM_WEBHOOK_SECRET ("(hidden)")                                              Environment Variable          local
+
+⎔ Local server updated and ready
+{"timestamp":"2026-08-13T14:44:42.253Z","level":"info","event":"request.completed","traceId":"d78250033ff58a3b10a1bcc66c7c5ded","spanId":"3c3fef9756fb77dd","method":"GET","path":"/api/auth/session","status":200,"durationMs":17}
+[wrangler:info] GET /api/auth/session 200 OK (26ms)
+{"timestamp":"2026-08-13T14:44:42.269Z","level":"info","event":"request.completed","traceId":"dcdf1f3b2bcbfb8657edc08ecc7e4148","spanId":"0c9b40f35a2ee0c1","method":"GET","path":"/api/assets","status":200,"durationMs":12}
+[wrangler:info] GET /api/assets 200 OK (40ms)
+{"timestamp":"2026-08-13T14:44:44.007Z","level":"info","event":"request.completed","traceId":"3fabe39b4feb9317e7c356863ce41e03","spanId":"0c15a8d4e0766f37","method":"GET","path":"/api/community/overview","status":200,"durationMs":21}
+[wrangler:info] GET /api/community/overview 200 OK (29ms)
+{"timestamp":"2026-08-13T14:44:44.913Z","level":"info","event":"request.completed","traceId":"0556cf6648061f52d6b0aa14054153a6","spanId":"869de765f11e4c1a","method":"GET","path":"/api/auth/session","status":200,"durationMs":8}
+[wrangler:info] GET /api/auth/session 200 OK (11ms)
+{"timestamp":"2026-08-13T14:44:44.929Z","level":"info","event":"request.completed","traceId":"89eef16ace639cc63808f235d387125c","spanId":"4be8454adf3516e9","method":"GET","path":"/api/assets","status":200,"durationMs":13}
+[wrangler:info] GET /api/assets 200 OK (26ms)
+{"timestamp":"2026-08-13T14:44:45.755Z","level":"info","event":"request.completed","traceId":"f9ac386efd20879361b14ce87adc9041","spanId":"efaef54df76962b2","method":"GET","path":"/api/community/overview","status":200,"durationMs":19}
+[wrangler:info] GET /api/community/overview 200 OK (24ms)
+[wrangler:warn] The Workers runtime crashed unexpectedly and is being restarted (crash #3). Any additional runtime output above may indicate the cause.
+[wrangler:info] Updated and ready on http://127.0.0.1:8787
+⎔ Reloading local server...
+⎔ Connection status updated
+Your Worker has access to the following bindings:
+Binding                                                                             Resource                      Mode
+env.PHOTO_ENRICHMENT_QUEUE (veld-archive-photo-enrichment)                          Queue                         local
+env.DB (veld-archive)                                                               D1 Database                   local
+env.PHOTO_INDEX (veld-archive-photo-index)                                          Vectorize Index               not supported
+env.MEDIA_BUCKET (veld-archive-media)                                               R2 Bucket                     local
+env.MEDIA_DR_BUCKET (veld-archive-media-dr)                                         R2 Bucket                     local
+env.BACKUP_BUCKET (veld-archive-backups-dr)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_ZA (veld-archive-audit-za)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_EU (veld-archive-audit-eu (eu))                                    R2 Bucket                     local
+env.KYC_BUCKET_ZA (veld-archive-kyc-za)                                             R2 Bucket                     local
+env.KYC_BUCKET_EU (veld-archive-kyc-eu (eu))                                        R2 Bucket                     local
+env.OBSERVABILITY (veld_archive_observability)                                      Analytics Engine Dataset      local
+env.ASSETS                                                                          Assets                        local
+env.APP_ENV ("development")                                                         Environment Variable          local
+env.ALLOWED_ORIGINS ("http://localhost:5173,http://127.0.0....")                    Environment Variable          local
+env.TURNSTILE_HOSTNAMES ("localhost,127.0.0.1")                                     Environment Variable          local
+env.DEFAULT_ORGANIZATION_ID ("org-demo")                                            Environment Variable          local
+env.RATE_LIMIT_WINDOW_SECONDS ("60")                                                Environment Variable          local
+env.RATE_LIMIT_DEFAULT_PER_WINDOW ("120")                                           Environment Variable          local
+env.UPLOAD_DAILY_QUOTA_BYTES ("50000000000")                                        Environment Variable          local
+env.ORG_STORAGE_QUOTA_BYTES ("500000000000")                                        Environment Variable          local
+env.MEDIA_SCANNER_URL ("")                                                          Environment Variable          local
+env.R2_BUCKET_NAME ("veld-archive-media")                                           Environment Variable          local
+env.R2_DR_BUCKET_NAME ("veld-archive-media-dr")                                     Environment Variable          local
+env.BACKUP_BUCKET_NAME ("veld-archive-backups-dr")                                  Environment Variable          local
+env.CHAOS_TESTING_ENABLED ("false")                                                 Environment Variable          local
+env.UPLOAD_MAX_SIZE_BYTES ("30000000000")                                           Environment Variable          local
+env.AUDIT_SIGNING_KEY_ID ("audit-ed25519-v1")                                       Environment Variable          local
+env.AUDIT_RETENTION_DAYS ("2555")                                                   Environment Variable          local
+env.AUDIT_ALLOWED_RESIDENCIES ("za,eu")                                             Environment Variable          local
+env.KYC_PROVIDER ("replace-with-your-kyc-provider")                                 Environment Variable          local
+env.OCR_ENABLED ("false")                                                           Environment Variable          local
+env.OCR_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                                 Environment Variable          local
+env.PHOTO_VISION_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                        Environment Variable          local
+env.PHOTO_EMBEDDING_MODEL ("@cf/baai/bge-base-en-v1.5")                             Environment Variable          local
+env.PHOTO_INDEX_NAMESPACE ("published-photos-v1")                                   Environment Variable          local
+env.PAYOUT_MIN_CENTS ("10000")                                                      Environment Variable          local
+env.SESSION_SECRET ("(hidden)")                                                     Environment Variable          local
+env.PAYMENT_WEBHOOK_SECRET ("(hidden)")                                             Environment Variable          local
+env.STREAM_WEBHOOK_SECRET ("(hidden)")                                              Environment Variable          local
+
+⎔ Local server updated and ready
+{"timestamp":"2026-08-13T14:45:40.221Z","level":"info","event":"request.completed","traceId":"3195602614a56956c6d036f22377e8a5","spanId":"fce3361e9f99b15d","method":"GET","path":"/api/auth/session","status":200,"durationMs":32}
+[wrangler:info] GET /api/auth/session 200 OK (2553ms)
+{"timestamp":"2026-08-13T14:45:40.236Z","level":"info","event":"request.completed","traceId":"de3d5f8b9832b570f4cb3d0b4ed84f23","spanId":"3a85338ff09c78d4","method":"GET","path":"/api/assets","status":200,"durationMs":10}
+[wrangler:info] GET /api/assets 200 OK (2567ms)
+{"timestamp":"2026-08-13T14:45:40.246Z","level":"info","event":"request.completed","traceId":"59929d3d39dd1751aaf2c1dbf53c3828","spanId":"643a8f6069146c50","method":"GET","path":"/api/auth/session","status":200,"durationMs":7}
+[wrangler:info] GET /api/auth/session 200 OK (2458ms)
+{"timestamp":"2026-08-13T14:45:40.256Z","level":"info","event":"request.completed","traceId":"7105d9b401249079ab6de0afaef0145a","spanId":"c59b71adc87afbd8","method":"GET","path":"/api/assets","status":200,"durationMs":8}
+[wrangler:info] GET /api/assets 200 OK (2468ms)
+{"timestamp":"2026-08-13T14:45:40.265Z","level":"info","event":"request.completed","traceId":"b8fb6009c7e2d1c1109db703684152e9","spanId":"864cda119e1b9d94","method":"GET","path":"/api/health","status":200,"durationMs":6}
+[wrangler:info] GET /api/health 200 OK (1627ms)
+{"timestamp":"2026-08-13T14:45:40.290Z","level":"info","event":"request.completed","traceId":"a1b293dca72233da078a95ababfc3b8a","spanId":"cbc459b0ed93a4bc","method":"POST","path":"/api/auth/exchange","status":401,"durationMs":6}
+[wrangler:info] POST /api/auth/exchange 401 Unauthorized (11ms)
+{"timestamp":"2026-08-13T14:45:40.321Z","level":"info","event":"request.completed","traceId":"a45b92b590827a5819a1c1479eaacc63","spanId":"98d44f8cc57bbe25","method":"GET","path":"/api/auth/session","status":200,"durationMs":5}
+[wrangler:info] GET /api/auth/session 200 OK (8ms)
+{"timestamp":"2026-08-13T14:45:40.337Z","level":"info","event":"request.completed","traceId":"a5bc4fd22b1829901a361194c67ce99b","spanId":"7089e516c2429cd6","method":"POST","path":"/api/assets","status":403,"durationMs":6}
+[wrangler:info] POST /api/assets 403 Forbidden (9ms)
+{"timestamp":"2026-08-13T14:45:40.352Z","level":"info","event":"request.completed","traceId":"df0aa323bdb921315c589e4713193e89","spanId":"83e0355c418c584a","method":"GET","path":"/api/notifications","status":401,"durationMs":5}
+[wrangler:info] GET /api/notifications 401 Unauthorized (7ms)
+{"timestamp":"2026-08-13T14:45:40.904Z","level":"info","event":"request.completed","traceId":"0907d866e6e77ef33b93a869f431847a","spanId":"822f5f1058c4eecb","method":"GET","path":"/api/community/overview","status":200,"durationMs":20}
+[wrangler:info] GET /api/community/overview 200 OK (22ms)
+{"timestamp":"2026-08-13T14:45:41.036Z","level":"info","event":"request.completed","traceId":"34670316087f4298253ce77059053349","spanId":"d1d3d388bad6a629","method":"GET","path":"/api/assets","status":200,"durationMs":9}
+[wrangler:info] GET /api/assets 200 OK (12ms)
+{"timestamp":"2026-08-13T14:45:41.717Z","level":"info","event":"request.completed","traceId":"076767a6fa942d091875cc44aef93adf","spanId":"908a16b01f7de2de","method":"GET","path":"/api/auth/session","status":200,"durationMs":8}
+[wrangler:info] GET /api/auth/session 200 OK (12ms)
+{"timestamp":"2026-08-13T14:45:41.733Z","level":"info","event":"request.completed","traceId":"6c39e385e870838318adbf1233d89b1b","spanId":"39b9809f07e04e14","method":"GET","path":"/api/assets","status":200,"durationMs":13}
+[wrangler:info] GET /api/assets 200 OK (28ms)
+{"timestamp":"2026-08-13T14:45:41.911Z","level":"info","event":"request.completed","traceId":"86d94013815181892154c2cf938c507b","spanId":"b51145c94a83d670","method":"GET","path":"/api/community/overview","status":200,"durationMs":22}
+[wrangler:info] GET /api/community/overview 200 OK (26ms)
+{"timestamp":"2026-08-13T14:45:42.520Z","level":"info","event":"request.completed","traceId":"6a815d225526550c73a6642319b7f3ab","spanId":"b025d0d14613af9d","method":"GET","path":"/api/community/overview","status":200,"durationMs":20}
+[wrangler:info] GET /api/community/overview 200 OK (23ms)
+{"timestamp":"2026-08-13T14:45:42.651Z","level":"info","event":"request.completed","traceId":"3fbbfa332dc39bb511d117643f847ebc","spanId":"e8cf341e17a2ec0b","method":"GET","path":"/api/assets","status":200,"durationMs":8}
+[wrangler:info] GET /api/assets 200 OK (11ms)
+{"timestamp":"2026-08-13T14:45:42.926Z","level":"info","event":"request.completed","traceId":"56fe573de2e274497acbcd799129b6c6","spanId":"3fefd9ba3fdadd87","method":"GET","path":"/api/auth/session","status":200,"durationMs":6}
+[wrangler:info] GET /api/auth/session 200 OK (8ms)
+{"timestamp":"2026-08-13T14:45:42.937Z","level":"info","event":"request.completed","traceId":"4d2cbd34de3d6ec33a65d53573eae0c3","spanId":"1f5b146070800b7d","method":"GET","path":"/api/assets","status":200,"durationMs":8}
+[wrangler:info] GET /api/assets 200 OK (18ms)
+{"timestamp":"2026-08-13T14:45:43.284Z","level":"info","event":"request.completed","traceId":"9dbc3b61e1f9e7092e768975315656bc","spanId":"4227bfa47649e46d","method":"GET","path":"/api/auth/session","status":200,"durationMs":5}
+[wrangler:info] GET /api/auth/session 200 OK (8ms)
+{"timestamp":"2026-08-13T14:45:43.298Z","level":"info","event":"request.completed","traceId":"43f61a37397b1f7937cba5a581b51f61","spanId":"14f825b570f99027","method":"GET","path":"/api/assets","status":200,"durationMs":11}
+[wrangler:info] GET /api/assets 200 OK (21ms)
+{"timestamp":"2026-08-13T14:45:43.769Z","level":"info","event":"request.completed","traceId":"0cec6166d0e8c6e863c3c5f97c416c64","spanId":"a0ab2f5e4f5fee12","method":"GET","path":"/api/community/overview","status":200,"durationMs":19}
+[wrangler:info] GET /api/community/overview 200 OK (21ms)
+{"timestamp":"2026-08-13T14:45:44.117Z","level":"info","event":"request.completed","traceId":"9f4e570dbd7cfe1e61666d8b97b4683c","spanId":"f3e484a8f4b62dec","method":"GET","path":"/api/community/overview","status":200,"durationMs":18}
+[wrangler:info] GET /api/community/overview 200 OK (21ms)
+{"timestamp":"2026-08-13T14:45:44.235Z","level":"info","event":"request.completed","traceId":"8e0ce642e4e7bb49ba93e30224001484","spanId":"e7b7791a26466552","method":"GET","path":"/api/assets","status":200,"durationMs":12}
+[wrangler:info] GET /api/assets 200 OK (15ms)
+⎔ Connection status updated
+Your Worker has access to the following bindings:
+Binding                                                                             Resource                      Mode
+env.PHOTO_ENRICHMENT_QUEUE (veld-archive-photo-enrichment)                          Queue                         local
+env.DB (veld-archive)                                                               D1 Database                   local
+env.PHOTO_INDEX (veld-archive-photo-index)                                          Vectorize Index               not supported
+env.MEDIA_BUCKET (veld-archive-media)                                               R2 Bucket                     local
+env.MEDIA_DR_BUCKET (veld-archive-media-dr)                                         R2 Bucket                     local
+env.BACKUP_BUCKET (veld-archive-backups-dr)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_ZA (veld-archive-audit-za)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_EU (veld-archive-audit-eu (eu))                                    R2 Bucket                     local
+env.KYC_BUCKET_ZA (veld-archive-kyc-za)                                             R2 Bucket                     local
+env.KYC_BUCKET_EU (veld-archive-kyc-eu (eu))                                        R2 Bucket                     local
+env.OBSERVABILITY (veld_archive_observability)                                      Analytics Engine Dataset      local
+env.ASSETS                                                                          Assets                        local
+env.APP_ENV ("development")                                                         Environment Variable          local
+env.ALLOWED_ORIGINS ("http://localhost:5173,http://127.0.0....")                    Environment Variable          local
+env.TURNSTILE_HOSTNAMES ("localhost,127.0.0.1")                                     Environment Variable          local
+env.DEFAULT_ORGANIZATION_ID ("org-demo")                                            Environment Variable          local
+env.RATE_LIMIT_WINDOW_SECONDS ("60")                                                Environment Variable          local
+env.RATE_LIMIT_DEFAULT_PER_WINDOW ("120")                                           Environment Variable          local
+env.UPLOAD_DAILY_QUOTA_BYTES ("50000000000")                                        Environment Variable          local
+env.ORG_STORAGE_QUOTA_BYTES ("500000000000")                                        Environment Variable          local
+env.MEDIA_SCANNER_URL ("")                                                          Environment Variable          local
+env.R2_BUCKET_NAME ("veld-archive-media")                                           Environment Variable          local
+env.R2_DR_BUCKET_NAME ("veld-archive-media-dr")                                     Environment Variable          local
+env.BACKUP_BUCKET_NAME ("veld-archive-backups-dr")                                  Environment Variable          local
+env.CHAOS_TESTING_ENABLED ("false")                                                 Environment Variable          local
+env.UPLOAD_MAX_SIZE_BYTES ("30000000000")                                           Environment Variable          local
+env.AUDIT_SIGNING_KEY_ID ("audit-ed25519-v1")                                       Environment Variable          local
+env.AUDIT_RETENTION_DAYS ("2555")                                                   Environment Variable          local
+env.AUDIT_ALLOWED_RESIDENCIES ("za,eu")                                             Environment Variable          local
+env.KYC_PROVIDER ("replace-with-your-kyc-provider")                                 Environment Variable          local
+env.OCR_ENABLED ("false")                                                           Environment Variable          local
+env.OCR_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                                 Environment Variable          local
+env.PHOTO_VISION_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                        Environment Variable          local
+env.PHOTO_EMBEDDING_MODEL ("@cf/baai/bge-base-en-v1.5")                             Environment Variable          local
+env.PHOTO_INDEX_NAMESPACE ("published-photos-v1")                                   Environment Variable          local
+env.PAYOUT_MIN_CENTS ("10000")                                                      Environment Variable          local
+env.SESSION_SECRET ("(hidden)")                                                     Environment Variable          local
+env.PAYMENT_WEBHOOK_SECRET ("(hidden)")                                             Environment Variable          local
+env.STREAM_WEBHOOK_SECRET ("(hidden)")                                              Environment Variable          local
+
+{"timestamp":"2026-08-13T14:46:12.038Z","level":"info","event":"request.completed","traceId":"97a730830f86a5837c7904cc0d2898ac","spanId":"e06624393d2d6829","method":"GET","path":"/api/me","status":200,"durationMs":8}
+[wrangler:info] GET /api/me 200 OK (11ms)
+{"timestamp":"2026-08-13T14:46:12.067Z","level":"info","event":"request.completed","traceId":"98894869beab75182eefa0280505cc73","spanId":"2a7085d7cb906d2d","method":"POST","path":"/api/auth/dev-login","status":200,"durationMs":17}
+[wrangler:info] POST /api/auth/dev-login 200 OK (20ms)
+{"timestamp":"2026-08-13T14:46:12.084Z","level":"info","event":"request.completed","traceId":"7fa24239ec8d3ba69378a2cbb214a27a","spanId":"8ab43af8e35e841f","method":"GET","path":"/api/me","status":200,"durationMs":10}
+[wrangler:info] GET /api/me 200 OK (13ms)
+{"timestamp":"2026-08-13T14:46:12.100Z","level":"info","event":"request.completed","traceId":"af0b791382fc510260dae0f22a86d0d5","spanId":"e421fca3f0f72efc","method":"GET","path":"/api/organization/members","status":403,"durationMs":10}
+[wrangler:info] GET /api/organization/members 403 Forbidden (11ms)
+{"timestamp":"2026-08-13T14:46:12.111Z","level":"info","event":"request.completed","traceId":"a140613cea101886d6c0d04c17431af2","spanId":"5a60b6547676ab8f","method":"GET","path":"/api/health","status":200,"durationMs":6}
+[wrangler:info] GET /api/health 200 OK (10ms)
+{"timestamp":"2026-08-13T14:46:12.122Z","level":"info","event":"request.completed","traceId":"6f9d415ad219251f44c51959cf8b6ca8","spanId":"f4b0051faff88d43","method":"POST","path":"/api/uploads","status":401,"durationMs":6}
+[wrangler:info] POST /api/uploads 401 Unauthorized (9ms)
+{"timestamp":"2026-08-13T14:46:12.132Z","level":"info","event":"request.completed","traceId":"9bcdc093fc039a9899111250ee446ddc","spanId":"e2dbb4df895d27a5","method":"PUT","path":"/api/onboarding","status":403,"durationMs":6}
+[wrangler:info] PUT /api/onboarding 403 Forbidden (11ms)
+{"timestamp":"2026-08-13T14:46:12.154Z","level":"info","event":"request.completed","traceId":"3decc349c118d4d0b926f035ccd658c6","spanId":"4bb9b4c937be6af6","method":"GET","path":"/api/rights/cases","status":200,"durationMs":17}
+[wrangler:info] GET /api/rights/cases 200 OK (18ms)
+{"timestamp":"2026-08-13T14:46:12.182Z","level":"info","event":"request.completed","traceId":"dfe67b35121d2e75c41ff2ab06a3f4d4","spanId":"d512a8327f8d2799","method":"POST","path":"/api/auth/logout","status":200,"durationMs":23}
+[wrangler:info] POST /api/auth/logout 200 OK (28ms)
+{"timestamp":"2026-08-13T14:46:12.193Z","level":"info","event":"request.completed","traceId":"5eada3d930891fbbb345fa71b01f7b03","spanId":"c12bfba741d4b852","method":"GET","path":"/api/me","status":200,"durationMs":6}
+[wrangler:info] GET /api/me 200 OK (9ms)
+{"timestamp":"2026-08-13T14:46:12.694Z","level":"info","event":"request.completed","traceId":"ca6018a4182e668743ae744e37244287","spanId":"52c1ffc1c32e1d61","method":"GET","path":"/api/health","status":200,"durationMs":8}
+[wrangler:info] GET /api/health 200 OK (10ms)
+{"timestamp":"2026-08-13T14:46:12.710Z","level":"info","event":"request.completed","traceId":"dabeeb3e578718f25887e5adcc97a0c4","spanId":"f80925c8ddd377c5","method":"POST","path":"/api/auth/exchange","status":401,"durationMs":6}
+[wrangler:info] POST /api/auth/exchange 401 Unauthorized (9ms)
+{"timestamp":"2026-08-13T14:46:12.732Z","level":"info","event":"request.completed","traceId":"44aebca0ebf77795f5562fd69da1df44","spanId":"967e7f3be67f4de8","method":"POST","path":"/api/auth/dev-login","status":200,"durationMs":17}
+[wrangler:info] POST /api/auth/dev-login 200 OK (19ms)
+{"timestamp":"2026-08-13T14:46:12.745Z","level":"info","event":"request.completed","traceId":"054f2f663f9f52afa8b2b4c8b8773097","spanId":"fa8363b295bfa17a","method":"POST","path":"/api/organization/invitations","status":403,"durationMs":6}
+[wrangler:info] POST /api/organization/invitations 403 Forbidden (10ms)
+{"timestamp":"2026-08-13T14:46:12.758Z","level":"info","event":"request.completed","traceId":"16117b00eef3a52e53bb51eb8a565c9e","spanId":"5657c091da45e637","method":"GET","path":"/api/assets","status":200,"durationMs":8}
+[wrangler:info] GET /api/assets 200 OK (10ms)
+{"timestamp":"2026-08-13T14:46:12.776Z","level":"info","event":"request.completed","traceId":"92d13bb9c35c1f21061b5d3874062a2a","spanId":"e3ea753b805cab5e","method":"POST","path":"/api/webhooks/payments","status":401,"durationMs":13}
+[wrangler:info] POST /api/webhooks/payments 401 Unauthorized (17ms)
+{"timestamp":"2026-08-13T14:46:12.803Z","level":"info","event":"request.completed","traceId":"8f869380b3abafe4da808799b8f4c5e8","spanId":"2e63e8268d3efb03","method":"POST","path":"/api/auth/logout","status":200,"durationMs":22}
+[wrangler:info] POST /api/auth/logout 200 OK (27ms)
+{"timestamp":"2026-08-13T14:46:13.288Z","level":"info","event":"request.completed","traceId":"5c17eda50c4ea93f105beee9335cb9f3","spanId":"dd58f72e099f3ad6","method":"GET","path":"/api/health","status":200,"durationMs":5}
+[wrangler:info] GET /api/health 200 OK (7ms)
+{"timestamp":"2026-08-13T14:46:13.305Z","level":"info","event":"request.completed","traceId":"70da0168e91ea76b673474494f2e5c51","spanId":"76c0486b379427b8","method":"GET","path":"/api/assets","status":200,"durationMs":7}
+[wrangler:info] GET /api/assets 200 OK (10ms)
+⎔ Reloading local server...
+[wrangler:info] ✨ Parsed 1 valid redirect rule.
+⎔ Connection status updated
+Your Worker has access to the following bindings:
+Binding                                                                             Resource                      Mode
+env.PHOTO_ENRICHMENT_QUEUE (veld-archive-photo-enrichment)                          Queue                         local
+env.DB (veld-archive)                                                               D1 Database                   local
+env.PHOTO_INDEX (veld-archive-photo-index)                                          Vectorize Index               not supported
+env.MEDIA_BUCKET (veld-archive-media)                                               R2 Bucket                     local
+env.MEDIA_DR_BUCKET (veld-archive-media-dr)                                         R2 Bucket                     local
+env.BACKUP_BUCKET (veld-archive-backups-dr)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_ZA (veld-archive-audit-za)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_EU (veld-archive-audit-eu (eu))                                    R2 Bucket                     local
+env.KYC_BUCKET_ZA (veld-archive-kyc-za)                                             R2 Bucket                     local
+env.KYC_BUCKET_EU (veld-archive-kyc-eu (eu))                                        R2 Bucket                     local
+env.OBSERVABILITY (veld_archive_observability)                                      Analytics Engine Dataset      local
+env.ASSETS                                                                          Assets                        local
+env.APP_ENV ("development")                                                         Environment Variable          local
+env.ALLOWED_ORIGINS ("http://localhost:5173,http://127.0.0....")                    Environment Variable          local
+env.TURNSTILE_HOSTNAMES ("localhost,127.0.0.1")                                     Environment Variable          local
+env.DEFAULT_ORGANIZATION_ID ("org-demo")                                            Environment Variable          local
+env.RATE_LIMIT_WINDOW_SECONDS ("60")                                                Environment Variable          local
+env.RATE_LIMIT_DEFAULT_PER_WINDOW ("120")                                           Environment Variable          local
+env.UPLOAD_DAILY_QUOTA_BYTES ("50000000000")                                        Environment Variable          local
+env.ORG_STORAGE_QUOTA_BYTES ("500000000000")                                        Environment Variable          local
+env.MEDIA_SCANNER_URL ("")                                                          Environment Variable          local
+env.R2_BUCKET_NAME ("veld-archive-media")                                           Environment Variable          local
+env.R2_DR_BUCKET_NAME ("veld-archive-media-dr")                                     Environment Variable          local
+env.BACKUP_BUCKET_NAME ("veld-archive-backups-dr")                                  Environment Variable          local
+env.CHAOS_TESTING_ENABLED ("false")                                                 Environment Variable          local
+env.UPLOAD_MAX_SIZE_BYTES ("30000000000")                                           Environment Variable          local
+env.AUDIT_SIGNING_KEY_ID ("audit-ed25519-v1")                                       Environment Variable          local
+env.AUDIT_RETENTION_DAYS ("2555")                                                   Environment Variable          local
+env.AUDIT_ALLOWED_RESIDENCIES ("za,eu")                                             Environment Variable          local
+env.KYC_PROVIDER ("replace-with-your-kyc-provider")                                 Environment Variable          local
+env.OCR_ENABLED ("false")                                                           Environment Variable          local
+env.OCR_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                                 Environment Variable          local
+env.PHOTO_VISION_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                        Environment Variable          local
+env.PHOTO_EMBEDDING_MODEL ("@cf/baai/bge-base-en-v1.5")                             Environment Variable          local
+env.PHOTO_INDEX_NAMESPACE ("published-photos-v1")                                   Environment Variable          local
+env.PAYOUT_MIN_CENTS ("10000")                                                      Environment Variable          local
+env.SESSION_SECRET ("(hidden)")                                                     Environment Variable          local
+env.PAYMENT_WEBHOOK_SECRET ("(hidden)")                                             Environment Variable          local
+env.STREAM_WEBHOOK_SECRET ("(hidden)")                                              Environment Variable          local
+
+⎔ Local server updated and ready
+[wrangler:info] GET / 302 Found (7ms)
+[wrangler:info] GET / 302 Found (2ms)
+[wrangler:info] GET / 302 Found (2ms)
+[wrangler:info] GET / 302 Found (3ms)
+[wrangler:info] GET / 302 Found (3ms)
+[wrangler:info] GET / 302 Found (3ms)
+⎔ Reloading local server...
+[wrangler:info] ✨ Parsed 1 valid redirect rule.
+⎔ Connection status updated
+Your Worker has access to the following bindings:
+Binding                                                                             Resource                      Mode
+env.PHOTO_ENRICHMENT_QUEUE (veld-archive-photo-enrichment)                          Queue                         local
+env.DB (veld-archive)                                                               D1 Database                   local
+env.PHOTO_INDEX (veld-archive-photo-index)                                          Vectorize Index               not supported
+env.MEDIA_BUCKET (veld-archive-media)                                               R2 Bucket                     local
+env.MEDIA_DR_BUCKET (veld-archive-media-dr)                                         R2 Bucket                     local
+env.BACKUP_BUCKET (veld-archive-backups-dr)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_ZA (veld-archive-audit-za)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_EU (veld-archive-audit-eu (eu))                                    R2 Bucket                     local
+env.KYC_BUCKET_ZA (veld-archive-kyc-za)                                             R2 Bucket                     local
+env.KYC_BUCKET_EU (veld-archive-kyc-eu (eu))                                        R2 Bucket                     local
+env.OBSERVABILITY (veld_archive_observability)                                      Analytics Engine Dataset      local
+env.ASSETS                                                                          Assets                        local
+env.APP_ENV ("development")                                                         Environment Variable          local
+env.ALLOWED_ORIGINS ("http://localhost:5173,http://127.0.0....")                    Environment Variable          local
+env.TURNSTILE_HOSTNAMES ("localhost,127.0.0.1")                                     Environment Variable          local
+env.DEFAULT_ORGANIZATION_ID ("org-demo")                                            Environment Variable          local
+env.RATE_LIMIT_WINDOW_SECONDS ("60")                                                Environment Variable          local
+env.RATE_LIMIT_DEFAULT_PER_WINDOW ("120")                                           Environment Variable          local
+env.UPLOAD_DAILY_QUOTA_BYTES ("50000000000")                                        Environment Variable          local
+env.ORG_STORAGE_QUOTA_BYTES ("500000000000")                                        Environment Variable          local
+env.MEDIA_SCANNER_URL ("")                                                          Environment Variable          local
+env.R2_BUCKET_NAME ("veld-archive-media")                                           Environment Variable          local
+env.R2_DR_BUCKET_NAME ("veld-archive-media-dr")                                     Environment Variable          local
+env.BACKUP_BUCKET_NAME ("veld-archive-backups-dr")                                  Environment Variable          local
+env.CHAOS_TESTING_ENABLED ("false")                                                 Environment Variable          local
+env.UPLOAD_MAX_SIZE_BYTES ("30000000000")                                           Environment Variable          local
+env.AUDIT_SIGNING_KEY_ID ("audit-ed25519-v1")                                       Environment Variable          local
+env.AUDIT_RETENTION_DAYS ("2555")                                                   Environment Variable          local
+env.AUDIT_ALLOWED_RESIDENCIES ("za,eu")                                             Environment Variable          local
+env.KYC_PROVIDER ("replace-with-your-kyc-provider")                                 Environment Variable          local
+env.OCR_ENABLED ("false")                                                           Environment Variable          local
+env.OCR_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                                 Environment Variable          local
+env.PHOTO_VISION_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                        Environment Variable          local
+env.PHOTO_EMBEDDING_MODEL ("@cf/baai/bge-base-en-v1.5")                             Environment Variable          local
+env.PHOTO_INDEX_NAMESPACE ("published-photos-v1")                                   Environment Variable          local
+env.PAYOUT_MIN_CENTS ("10000")                                                      Environment Variable          local
+env.SESSION_SECRET ("(hidden)")                                                     Environment Variable          local
+env.PAYMENT_WEBHOOK_SECRET ("(hidden)")                                             Environment Variable          local
+env.STREAM_WEBHOOK_SECRET ("(hidden)")                                              Environment Variable          local
+
+⎔ Local server updated and ready
+[wrangler:info] GET / 302 Found (6ms)
+Your Worker has access to the following bindings:
+Binding                                                                             Resource                      Mode
+env.PHOTO_ENRICHMENT_QUEUE (veld-archive-photo-enrichment)                          Queue                         local
+env.DB (veld-archive)                                                               D1 Database                   local
+env.PHOTO_INDEX (veld-archive-photo-index)                                          Vectorize Index               not supported
+env.MEDIA_BUCKET (veld-archive-media)                                               R2 Bucket                     local
+env.MEDIA_DR_BUCKET (veld-archive-media-dr)                                         R2 Bucket                     local
+env.BACKUP_BUCKET (veld-archive-backups-dr)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_ZA (veld-archive-audit-za)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_EU (veld-archive-audit-eu (eu))                                    R2 Bucket                     local
+env.KYC_BUCKET_ZA (veld-archive-kyc-za)                                             R2 Bucket                     local
+env.KYC_BUCKET_EU (veld-archive-kyc-eu (eu))                                        R2 Bucket                     local
+env.OBSERVABILITY (veld_archive_observability)                                      Analytics Engine Dataset      local
+env.ASSETS                                                                          Assets                        local
+env.APP_ENV ("development")                                                         Environment Variable          local
+env.DEMO_AUTH_ENABLED ("true")                                                      Environment Variable          local
+env.ALLOWED_ORIGINS ("http://localhost:5173,http://127.0.0....")                    Environment Variable          local
+env.TURNSTILE_HOSTNAMES ("localhost,127.0.0.1")                                     Environment Variable          local
+env.DEFAULT_ORGANIZATION_ID ("org-demo")                                            Environment Variable          local
+env.RATE_LIMIT_WINDOW_SECONDS ("60")                                                Environment Variable          local
+env.RATE_LIMIT_DEFAULT_PER_WINDOW ("120")                                           Environment Variable          local
+env.UPLOAD_DAILY_QUOTA_BYTES ("50000000000")                                        Environment Variable          local
+env.ORG_STORAGE_QUOTA_BYTES ("500000000000")                                        Environment Variable          local
+env.MEDIA_SCANNER_URL ("")                                                          Environment Variable          local
+env.R2_BUCKET_NAME ("veld-archive-media")                                           Environment Variable          local
+env.R2_DR_BUCKET_NAME ("veld-archive-media-dr")                                     Environment Variable          local
+env.BACKUP_BUCKET_NAME ("veld-archive-backups-dr")                                  Environment Variable          local
+env.CHAOS_TESTING_ENABLED ("false")                                                 Environment Variable          local
+env.UPLOAD_MAX_SIZE_BYTES ("30000000000")                                           Environment Variable          local
+env.AUDIT_SIGNING_KEY_ID ("audit-ed25519-v1")                                       Environment Variable          local
+env.AUDIT_RETENTION_DAYS ("2555")                                                   Environment Variable          local
+env.AUDIT_ALLOWED_RESIDENCIES ("za,eu")                                             Environment Variable          local
+env.KYC_PROVIDER ("replace-with-your-kyc-provider")                                 Environment Variable          local
+env.OCR_ENABLED ("false")                                                           Environment Variable          local
+env.OCR_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                                 Environment Variable          local
+env.PHOTO_VISION_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                        Environment Variable          local
+env.PHOTO_EMBEDDING_MODEL ("@cf/baai/bge-base-en-v1.5")                             Environment Variable          local
+env.PHOTO_INDEX_NAMESPACE ("published-photos-v1")                                   Environment Variable          local
+env.PAYOUT_MIN_CENTS ("10000")                                                      Environment Variable          local
+env.SESSION_SECRET ("(hidden)")                                                     Environment Variable          local
+env.PAYMENT_WEBHOOK_SECRET ("(hidden)")                                             Environment Variable          local
+env.STREAM_WEBHOOK_SECRET ("(hidden)")                                              Environment Variable          local
+
+❓ Your types might be out of date. Re-run `wrangler types` to ensure your types are correct.
+⎔ Reloading local server...
+[wrangler:info] ✨ Parsed 1 valid redirect rule.
+⎔ Connection status updated
+Your Worker has access to the following bindings:
+Binding                                                                             Resource                      Mode
+env.PHOTO_ENRICHMENT_QUEUE (veld-archive-photo-enrichment)                          Queue                         local
+env.DB (veld-archive)                                                               D1 Database                   local
+env.PHOTO_INDEX (veld-archive-photo-index)                                          Vectorize Index               not supported
+env.MEDIA_BUCKET (veld-archive-media)                                               R2 Bucket                     local
+env.MEDIA_DR_BUCKET (veld-archive-media-dr)                                         R2 Bucket                     local
+env.BACKUP_BUCKET (veld-archive-backups-dr)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_ZA (veld-archive-audit-za)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_EU (veld-archive-audit-eu (eu))                                    R2 Bucket                     local
+env.KYC_BUCKET_ZA (veld-archive-kyc-za)                                             R2 Bucket                     local
+env.KYC_BUCKET_EU (veld-archive-kyc-eu (eu))                                        R2 Bucket                     local
+env.OBSERVABILITY (veld_archive_observability)                                      Analytics Engine Dataset      local
+env.ASSETS                                                                          Assets                        local
+env.APP_ENV ("development")                                                         Environment Variable          local
+env.DEMO_AUTH_ENABLED ("true")                                                      Environment Variable          local
+env.ALLOWED_ORIGINS ("http://localhost:5173,http://127.0.0....")                    Environment Variable          local
+env.TURNSTILE_HOSTNAMES ("localhost,127.0.0.1")                                     Environment Variable          local
+env.DEFAULT_ORGANIZATION_ID ("org-demo")                                            Environment Variable          local
+env.RATE_LIMIT_WINDOW_SECONDS ("60")                                                Environment Variable          local
+env.RATE_LIMIT_DEFAULT_PER_WINDOW ("120")                                           Environment Variable          local
+env.UPLOAD_DAILY_QUOTA_BYTES ("50000000000")                                        Environment Variable          local
+env.ORG_STORAGE_QUOTA_BYTES ("500000000000")                                        Environment Variable          local
+env.MEDIA_SCANNER_URL ("")                                                          Environment Variable          local
+env.R2_BUCKET_NAME ("veld-archive-media")                                           Environment Variable          local
+env.R2_DR_BUCKET_NAME ("veld-archive-media-dr")                                     Environment Variable          local
+env.BACKUP_BUCKET_NAME ("veld-archive-backups-dr")                                  Environment Variable          local
+env.CHAOS_TESTING_ENABLED ("false")                                                 Environment Variable          local
+env.UPLOAD_MAX_SIZE_BYTES ("30000000000")                                           Environment Variable          local
+env.AUDIT_SIGNING_KEY_ID ("audit-ed25519-v1")                                       Environment Variable          local
+env.AUDIT_RETENTION_DAYS ("2555")                                                   Environment Variable          local
+env.AUDIT_ALLOWED_RESIDENCIES ("za,eu")                                             Environment Variable          local
+env.KYC_PROVIDER ("replace-with-your-kyc-provider")                                 Environment Variable          local
+env.OCR_ENABLED ("false")                                                           Environment Variable          local
+env.OCR_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                                 Environment Variable          local
+env.PHOTO_VISION_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                        Environment Variable          local
+env.PHOTO_EMBEDDING_MODEL ("@cf/baai/bge-base-en-v1.5")                             Environment Variable          local
+env.PHOTO_INDEX_NAMESPACE ("published-photos-v1")                                   Environment Variable          local
+env.PAYOUT_MIN_CENTS ("10000")                                                      Environment Variable          local
+env.SESSION_SECRET ("(hidden)")                                                     Environment Variable          local
+env.PAYMENT_WEBHOOK_SECRET ("(hidden)")                                             Environment Variable          local
+env.STREAM_WEBHOOK_SECRET ("(hidden)")                                              Environment Variable          local
+
+⎔ Local server updated and ready
+[wrangler:info] GET / 302 Found (6ms)
+⎔ Reloading local server...
+[wrangler:info] ✨ Parsed 1 valid redirect rule.
+⎔ Connection status updated
+Your Worker has access to the following bindings:
+Binding                                                                             Resource                      Mode
+env.PHOTO_ENRICHMENT_QUEUE (veld-archive-photo-enrichment)                          Queue                         local
+env.DB (veld-archive)                                                               D1 Database                   local
+env.PHOTO_INDEX (veld-archive-photo-index)                                          Vectorize Index               not supported
+env.MEDIA_BUCKET (veld-archive-media)                                               R2 Bucket                     local
+env.MEDIA_DR_BUCKET (veld-archive-media-dr)                                         R2 Bucket                     local
+env.BACKUP_BUCKET (veld-archive-backups-dr)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_ZA (veld-archive-audit-za)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_EU (veld-archive-audit-eu (eu))                                    R2 Bucket                     local
+env.KYC_BUCKET_ZA (veld-archive-kyc-za)                                             R2 Bucket                     local
+env.KYC_BUCKET_EU (veld-archive-kyc-eu (eu))                                        R2 Bucket                     local
+env.OBSERVABILITY (veld_archive_observability)                                      Analytics Engine Dataset      local
+env.ASSETS                                                                          Assets                        local
+env.APP_ENV ("development")                                                         Environment Variable          local
+env.DEMO_AUTH_ENABLED ("true")                                                      Environment Variable          local
+env.ALLOWED_ORIGINS ("http://localhost:5173,http://127.0.0....")                    Environment Variable          local
+env.TURNSTILE_HOSTNAMES ("localhost,127.0.0.1")                                     Environment Variable          local
+env.DEFAULT_ORGANIZATION_ID ("org-demo")                                            Environment Variable          local
+env.RATE_LIMIT_WINDOW_SECONDS ("60")                                                Environment Variable          local
+env.RATE_LIMIT_DEFAULT_PER_WINDOW ("120")                                           Environment Variable          local
+env.UPLOAD_DAILY_QUOTA_BYTES ("50000000000")                                        Environment Variable          local
+env.ORG_STORAGE_QUOTA_BYTES ("500000000000")                                        Environment Variable          local
+env.MEDIA_SCANNER_URL ("")                                                          Environment Variable          local
+env.R2_BUCKET_NAME ("veld-archive-media")                                           Environment Variable          local
+env.R2_DR_BUCKET_NAME ("veld-archive-media-dr")                                     Environment Variable          local
+env.BACKUP_BUCKET_NAME ("veld-archive-backups-dr")                                  Environment Variable          local
+env.CHAOS_TESTING_ENABLED ("false")                                                 Environment Variable          local
+env.UPLOAD_MAX_SIZE_BYTES ("30000000000")                                           Environment Variable          local
+env.AUDIT_SIGNING_KEY_ID ("audit-ed25519-v1")                                       Environment Variable          local
+env.AUDIT_RETENTION_DAYS ("2555")                                                   Environment Variable          local
+env.AUDIT_ALLOWED_RESIDENCIES ("za,eu")                                             Environment Variable          local
+env.KYC_PROVIDER ("replace-with-your-kyc-provider")                                 Environment Variable          local
+env.OCR_ENABLED ("false")                                                           Environment Variable          local
+env.OCR_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                                 Environment Variable          local
+env.PHOTO_VISION_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                        Environment Variable          local
+env.PHOTO_EMBEDDING_MODEL ("@cf/baai/bge-base-en-v1.5")                             Environment Variable          local
+env.PHOTO_INDEX_NAMESPACE ("published-photos-v1")                                   Environment Variable          local
+env.PAYOUT_MIN_CENTS ("10000")                                                      Environment Variable          local
+env.SESSION_SECRET ("(hidden)")                                                     Environment Variable          local
+env.PAYMENT_WEBHOOK_SECRET ("(hidden)")                                             Environment Variable          local
+env.STREAM_WEBHOOK_SECRET ("(hidden)")                                              Environment Variable          local
+
+⎔ Local server updated and ready
+[wrangler:info] GET / 302 Found (5ms)
+[wrangler:info] GET / 302 Found (2ms)
+[wrangler:info] GET / 302 Found (3ms)
+[wrangler:info] GET / 302 Found (2ms)
+Your Worker has access to the following bindings:
+Binding                                                                             Resource                      Mode
+env.PHOTO_ENRICHMENT_QUEUE (veld-archive-photo-enrichment)                          Queue                         local
+env.DB (veld-archive)                                                               D1 Database                   local
+env.PHOTO_INDEX (veld-archive-photo-index)                                          Vectorize Index               not supported
+env.MEDIA_BUCKET (veld-archive-media)                                               R2 Bucket                     local
+env.MEDIA_DR_BUCKET (veld-archive-media-dr)                                         R2 Bucket                     local
+env.BACKUP_BUCKET (veld-archive-backups-dr)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_ZA (veld-archive-audit-za)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_EU (veld-archive-audit-eu (eu))                                    R2 Bucket                     local
+env.KYC_BUCKET_ZA (veld-archive-kyc-za)                                             R2 Bucket                     local
+env.KYC_BUCKET_EU (veld-archive-kyc-eu (eu))                                        R2 Bucket                     local
+env.OBSERVABILITY (veld_archive_observability)                                      Analytics Engine Dataset      local
+env.ASSETS                                                                          Assets                        local
+env.APP_ENV ("production")                                                          Environment Variable          local
+env.DEMO_AUTH_ENABLED ("true")                                                      Environment Variable          local
+env.ALLOWED_ORIGINS ("http://localhost:5173,http://127.0.0....")                    Environment Variable          local
+env.TURNSTILE_HOSTNAMES ("localhost,127.0.0.1,veld-archive-api....")                Environment Variable          local
+env.DEFAULT_ORGANIZATION_ID ("org-demo")                                            Environment Variable          local
+env.RATE_LIMIT_WINDOW_SECONDS ("60")                                                Environment Variable          local
+env.RATE_LIMIT_DEFAULT_PER_WINDOW ("120")                                           Environment Variable          local
+env.UPLOAD_DAILY_QUOTA_BYTES ("50000000000")                                        Environment Variable          local
+env.ORG_STORAGE_QUOTA_BYTES ("500000000000")                                        Environment Variable          local
+env.MEDIA_SCANNER_URL ("")                                                          Environment Variable          local
+env.R2_BUCKET_NAME ("veld-archive-media")                                           Environment Variable          local
+env.R2_DR_BUCKET_NAME ("veld-archive-media-dr")                                     Environment Variable          local
+env.BACKUP_BUCKET_NAME ("veld-archive-backups-dr")                                  Environment Variable          local
+env.CHAOS_TESTING_ENABLED ("false")                                                 Environment Variable          local
+env.UPLOAD_MAX_SIZE_BYTES ("30000000000")                                           Environment Variable          local
+env.AUDIT_SIGNING_KEY_ID ("audit-ed25519-v1")                                       Environment Variable          local
+env.AUDIT_RETENTION_DAYS ("2555")                                                   Environment Variable          local
+env.AUDIT_ALLOWED_RESIDENCIES ("za,eu")                                             Environment Variable          local
+env.KYC_PROVIDER ("replace-with-your-kyc-provider")                                 Environment Variable          local
+env.OCR_ENABLED ("false")                                                           Environment Variable          local
+env.OCR_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                                 Environment Variable          local
+env.PHOTO_VISION_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                        Environment Variable          local
+env.PHOTO_EMBEDDING_MODEL ("@cf/baai/bge-base-en-v1.5")                             Environment Variable          local
+env.PHOTO_INDEX_NAMESPACE ("published-photos-v1")                                   Environment Variable          local
+env.PAYOUT_MIN_CENTS ("10000")                                                      Environment Variable          local
+env.SESSION_SECRET ("(hidden)")                                                     Environment Variable          local
+env.PAYMENT_WEBHOOK_SECRET ("(hidden)")                                             Environment Variable          local
+env.STREAM_WEBHOOK_SECRET ("(hidden)")                                              Environment Variable          local
+
+❓ Your types might be out of date. Re-run `wrangler types` to ensure your types are correct.
+⎔ Reloading local server...
+[wrangler:info] ✨ Parsed 1 valid redirect rule.
+⎔ Connection status updated
+Your Worker has access to the following bindings:
+Binding                                                                             Resource                      Mode
+env.PHOTO_ENRICHMENT_QUEUE (veld-archive-photo-enrichment)                          Queue                         local
+env.DB (veld-archive)                                                               D1 Database                   local
+env.PHOTO_INDEX (veld-archive-photo-index)                                          Vectorize Index               not supported
+env.MEDIA_BUCKET (veld-archive-media)                                               R2 Bucket                     local
+env.MEDIA_DR_BUCKET (veld-archive-media-dr)                                         R2 Bucket                     local
+env.BACKUP_BUCKET (veld-archive-backups-dr)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_ZA (veld-archive-audit-za)                                         R2 Bucket                     local
+env.AUDIT_BUCKET_EU (veld-archive-audit-eu (eu))                                    R2 Bucket                     local
+env.KYC_BUCKET_ZA (veld-archive-kyc-za)                                             R2 Bucket                     local
+env.KYC_BUCKET_EU (veld-archive-kyc-eu (eu))                                        R2 Bucket                     local
+env.OBSERVABILITY (veld_archive_observability)                                      Analytics Engine Dataset      local
+env.ASSETS                                                                          Assets                        local
+env.APP_ENV ("production")                                                          Environment Variable          local
+env.DEMO_AUTH_ENABLED ("true")                                                      Environment Variable          local
+env.ALLOWED_ORIGINS ("http://localhost:5173,http://127.0.0....")                    Environment Variable          local
+env.TURNSTILE_HOSTNAMES ("localhost,127.0.0.1,veld-archive-api....")                Environment Variable          local
+env.DEFAULT_ORGANIZATION_ID ("org-demo")                                            Environment Variable          local
+env.RATE_LIMIT_WINDOW_SECONDS ("60")                                                Environment Variable          local
+env.RATE_LIMIT_DEFAULT_PER_WINDOW ("120")                                           Environment Variable          local
+env.UPLOAD_DAILY_QUOTA_BYTES ("50000000000")                                        Environment Variable          local
+env.ORG_STORAGE_QUOTA_BYTES ("500000000000")                                        Environment Variable          local
+env.MEDIA_SCANNER_URL ("")                                                          Environment Variable          local
+env.R2_BUCKET_NAME ("veld-archive-media")                                           Environment Variable          local
+env.R2_DR_BUCKET_NAME ("veld-archive-media-dr")                                     Environment Variable          local
+env.BACKUP_BUCKET_NAME ("veld-archive-backups-dr")                                  Environment Variable          local
+env.CHAOS_TESTING_ENABLED ("false")                                                 Environment Variable          local
+env.UPLOAD_MAX_SIZE_BYTES ("30000000000")                                           Environment Variable          local
+env.AUDIT_SIGNING_KEY_ID ("audit-ed25519-v1")                                       Environment Variable          local
+env.AUDIT_RETENTION_DAYS ("2555")                                                   Environment Variable          local
+env.AUDIT_ALLOWED_RESIDENCIES ("za,eu")                                             Environment Variable          local
+env.KYC_PROVIDER ("replace-with-your-kyc-provider")                                 Environment Variable          local
+env.OCR_ENABLED ("false")                                                           Environment Variable          local
+env.OCR_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                                 Environment Variable          local
+env.PHOTO_VISION_MODEL ("@cf/moondream/moondream3.1-9B-A2B")                        Environment Variable          local
+env.PHOTO_EMBEDDING_MODEL ("@cf/baai/bge-base-en-v1.5")                             Environment Variable          local
+env.PHOTO_INDEX_NAMESPACE ("published-photos-v1")                                   Environment Variable          local
+env.PAYOUT_MIN_CENTS ("10000")                                                      Environment Variable          local
+env.SESSION_SECRET ("(hidden)")                                                     Environment Variable          local
+env.PAYMENT_WEBHOOK_SECRET ("(hidden)")                                             Environment Variable          local
+env.STREAM_WEBHOOK_SECRET ("(hidden)")                                              Environment Variable          local
+
+⎔ Local server updated and ready
+[wrangler:info] POST /api/auth/dev-login 302 Found (22ms)
+
+[32mIf you think this is a bug then please create an issue at https://github.com/cloudflare/workers-sdk/issues/new/choose[0m

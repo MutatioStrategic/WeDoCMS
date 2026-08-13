@@ -26,4 +26,10 @@ describe("verified identity exchange", () => {
     await expect(verifyExternalJwt({ AUTH_JWT_SECRET: secret } as never, token)).resolves.toMatchObject({ sub: "idp-user-1", org_id: "org-1" });
     await expect(verifyExternalJwt({ AUTH_JWT_SECRET: secret } as never, `${token}tampered`)).resolves.toBeNull();
   });
+
+  it("requires a configured JWT secret instead of accepting unsigned identity claims", async () => {
+    const header = encode({ alg: "none", typ: "JWT" });
+    const payload = encode({ sub: "untrusted-user", role: "admin" });
+    await expect(verifyExternalJwt({ APP_ENV: "production" } as never, `${header}.${payload}.`)).resolves.toBeNull();
+  });
 });

@@ -33,6 +33,7 @@ try {
   const scan = () => new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"]).analyze();
   const initial = await scan();
   const initialPassed = report("archive landing page", initial);
+  await expect(page.locator("button.asset-card").first()).toBeVisible();
   const firstAsset = page.locator("button.asset-card").first();
   await firstAsset.focus();
   await page.keyboard.press("Enter");
@@ -53,6 +54,14 @@ try {
   await mobilePage.goto(`http://127.0.0.1:${port}`, { waitUntil: "networkidle" });
   const overflow = await mobilePage.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
   if (overflow) { console.error("✗ mobile archive layout overflows horizontally"); process.exitCode = 1; } else console.log("✓ mobile archive layout fits viewport");
+  await expect(mobilePage.getByRole("button", { name: "Sign in" })).toBeVisible();
+  await mobilePage.getByRole("button", { name: "Menu" }).click();
+  await expect(mobilePage.getByRole("button", { name: "Community & collections" })).toBeVisible();
+  await mobilePage.getByRole("button", { name: "Community & collections" }).click();
+  await expect(mobilePage.getByRole("heading", { name: /Make the archive/ })).toBeVisible();
+  await mobilePage.getByRole("button", { name: "Open a resolution case" }).click();
+  await expect(mobilePage.getByRole("heading", { name: /Open a resolution/ })).toBeVisible();
+  await mobilePage.getByRole("button", { name: "Veld Archive home" }).click();
   const suggestion = mobilePage.locator("button.suggestion").first();
   await suggestion.click();
   await expect(mobilePage.locator("input[aria-label='Search media']")).toHaveValue(/.+/);

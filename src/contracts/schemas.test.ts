@@ -77,6 +77,7 @@ describe("API contract Zod schemas", () => {
       workflowStage: "approval",
       aiTags: [],
       curatorNotes: "",
+      previewUrl: "/api/assets/asset-1/preview",
     }).success).toBe(true);
     expect(assetSchema.safeParse({ authenticityConfidence: 1.01 }).success).toBe(false);
   });

@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { z } from "zod";
 import { archiveDomain } from "../shared";
@@ -34,6 +34,7 @@ import {
   retryQueuedPhotoJobs,
   searchPhotoIndex,
   type PhotoEnrichmentJob,
+  type PhotoJobOperation,
   type PhotoPipelineBindings,
 } from "./photo-indexing";
 import {
@@ -46,6 +47,8 @@ import {
   type RequestUser,
 } from "./auth";
 import { allowedOrigin, applySecurityHeaders, enforceRateLimit, scanMediaObject, type SecurityBindings } from "./security";
+import { createPresignedR2Url } from "./r2-presign";
+import { decidePayoutBatch } from "./payout-decision";
 import {
   assetCreateRequestSchema as contractAssetCreateRequestSchema,
   assetCreateResponseSchema,
@@ -74,6 +77,8 @@ type SecretBindings = {
   TURNSTILE_SECRET?: string;
   TURNSTILE_HOSTNAMES?: string;
   STREAM_WEBHOOK_SECRET?: string;
+  STREAM_CUSTOMER_CODE?: string;
+  STREAM_PUBLIC_PLAYBACK_ENABLED?: string;
   CHAOS_TEST_TOKEN?: string;
   CHAOS_TESTING_ENABLED?: string;
   APP_ENV?: string;
@@ -92,6 +97,7 @@ type SecretBindings = {
   PHOTO_VISION_MODEL?: string;
   PHOTO_EMBEDDING_MODEL?: string;
   PHOTO_INDEX_NAMESPACE?: string;
+  PHOTO_AI_SOURCE_ORIGIN?: string;
   FIRMA_VERIFY_URL?: string;
   FIRMA_API_TOKEN?: string;
   SESSION_SECRET?: string;
@@ -100,6 +106,7 @@ type SecretBindings = {
   AUTH_AUDIENCE?: string;
   AUTH_COOKIE_DOMAIN?: string;
   AUTH_ALLOW_ORG_PROVISIONING?: string;
+  DEMO_AUTH_ENABLED?: string;
   DEFAULT_ORGANIZATION_ID?: string;
   ALLOWED_ORIGINS?: string;
   RATE_LIMIT_WINDOW_SECONDS?: string;
@@ -112,6 +119,12 @@ type SecretBindings = {
   PAYMENT_PROVIDER?: string;
   PAYMENT_ENDPOINT?: string;
   PAYMENT_TOKEN?: string;
+  EMAIL_PROVIDER?: string;
+  EMAIL_ENDPOINT?: string;
+  EMAIL_TOKEN?: string;
+  EMAIL_FROM?: string;
+  EMAIL_FROM_NAME?: string;
+  EMAIL?: SendEmail;
 };
 type WorkersAiBinding = {
   run(model: string, input: Record<string, unknown>): Promise<unknown>;
@@ -146,6 +159,47 @@ async function runMaintenance(env: Bindings): Promise<void> {
     env.DB.prepare("DELETE FROM notifications WHERE created_at < datetime('now', '-365 day') AND read_at IS NOT NULL"),
     env.DB.prepare("UPDATE upload_sessions SET status = 'expired', failure_reason = 'upload_session_expired' WHERE status = 'created' AND created_at < datetime('now', '-1 day')"),
   ]);
+}
+
+/** Best-effort transactional email. Never throws into the caller's request path. */
+async function dispatchEmailBestEffort(env: Bindings, to: string, subject: string, text: string, idempotencyKey: string): Promise<void> {
+  const provider = new IntegrationContainer(env).email.get();
+  if (!provider) return;
+  try {
+    await provider.send({ to, subject, text, idempotencyKey });
+  } catch (error) {
+    logEvent("warn", "email.send_failed", traceContext(new Request("https://internal/email")), { error: error instanceof Error ? error.message : "unknown-error" });
+  }
+}
+
+/** Records an in-app notification and best-effort emails the recipient. */
+async function notify(env: Bindings, organizationId: string, userId: string, content: { type: string; title: string; body: string; resourceType?: string; resourceId?: string }): Promise<void> {
+  await env.DB.prepare("INSERT INTO notifications (id, organization_id, user_id, type, title, body, resource_type, resource_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+    .bind(crypto.randomUUID(), organizationId, userId, content.type, content.title, content.body, content.resourceType ?? null, content.resourceId ?? null).run();
+  const user = await env.DB.prepare("SELECT email FROM users WHERE id = ?").bind(userId).first<{ email: string }>();
+  if (user?.email) await dispatchEmailBestEffort(env, user.email, content.title, content.body, `notify:${userId}:${content.type}:${content.resourceId ?? content.title}:${today()}`);
+}
+
+/** Delivers a signed webhook to every subscription in the organization listening for this event. */
+async function dispatchWebhookEvent(env: Bindings, organizationId: string, eventType: string, payload: Record<string, unknown>): Promise<void> {
+  const subscriptions = await env.DB.prepare("SELECT id, target_url, secret, events FROM webhook_subscriptions WHERE organization_id = ? AND status = 'active'").bind(organizationId).all<{ id: string; target_url: string; secret: string; events: string }>();
+  for (const subscription of subscriptions.results) {
+    let events: string[];
+    try { events = JSON.parse(subscription.events); } catch { events = []; }
+    if (!events.includes(eventType) && !events.includes("*")) continue;
+    const deliveryId = crypto.randomUUID();
+    const body = JSON.stringify({ event: eventType, data: payload, deliveryId, timestamp: new Date().toISOString() });
+    const signature = hex(await hmac(utf8(subscription.secret), body));
+    await env.DB.prepare("INSERT INTO webhook_deliveries (id, subscription_id, event_type, payload_json, status, attempts) VALUES (?, ?, ?, ?, 'pending', 1)").bind(deliveryId, subscription.id, eventType, body).run();
+    try {
+      const response = await fetch(subscription.target_url, { method: "POST", headers: { "Content-Type": "application/json", "X-Veld-Signature": signature, "X-Veld-Delivery": deliveryId }, body });
+      await env.DB.prepare("UPDATE webhook_deliveries SET status = ?, response_status = ?, delivered_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END WHERE id = ?")
+        .bind(response.ok ? "delivered" : "failed", response.status, response.ok ? 1 : 0, deliveryId).run();
+    } catch (error) {
+      await env.DB.prepare("UPDATE webhook_deliveries SET status = 'failed' WHERE id = ?").bind(deliveryId).run();
+      logEvent("warn", "webhook.delivery_failed", traceContext(new Request("https://internal/webhook")), { subscriptionId: subscription.id, eventType, error: error instanceof Error ? error.message : "unknown-error" });
+    }
+  }
 }
 
 app.use("*", async (c, next) => {
@@ -185,7 +239,7 @@ app.use("/api/*", cors({
 }));
 
 app.use("/api/*", async (c, next) => {
-  const exempt = c.req.path === "/api/auth/dev-login" || c.req.path === "/api/auth/exchange" || c.req.path === "/api/auth/logout" || c.req.path === "/api/security/turnstile" || c.req.path.startsWith("/api/webhooks/") || c.req.path === "/api/analytics/events" || c.req.path === "/api/checkout/validate";
+  const exempt = c.req.path === "/api/auth/dev-login" || c.req.path === "/api/auth/demo-login" || c.req.path === "/api/auth/exchange" || c.req.path === "/api/auth/logout" || c.req.path === "/api/security/turnstile" || c.req.path.startsWith("/api/webhooks/") || c.req.path === "/api/analytics/events" || c.req.path === "/api/checkout/validate";
   if (!exempt && !["GET", "HEAD", "OPTIONS"].includes(c.req.method)) {
     const user = await getRequestUser(c.env, c.req.raw);
     if (user && !csrfValid(c.req.raw, user)) return c.json({ error: "CSRF validation failed" }, 403);
@@ -204,12 +258,22 @@ app.use("/api/*", async (c, next) => {
 
 const devLoginSchema = z.object({ role: z.enum(["buyer", "contributor", "admin"]) });
 const exchangeSchema = z.object({ organizationId: z.string().min(1).max(120).optional() });
+type AppContext = Context<{ Bindings: Bindings; Variables: Variables }>;
+type DemoRole = z.infer<typeof devLoginSchema>["role"];
 
 async function sessionResponse(c: { env: Bindings; req: { raw: Request }; json: (data: unknown, status?: number) => Response }, userId: string, organizationId: string): Promise<Response> {
   const session = await createSession(c.env, userId, organizationId);
   const user = await getRequestUser(c.env, new Request(c.req.raw.url, { headers: { Cookie: `va_session=${session.token}` } }));
   if (!user) return new Response(JSON.stringify({ error: "Could not create authenticated session" }), { status: 500, headers: { "Content-Type": "application/json" } });
   return responseWithSession(c.json({ authenticated: true, user, csrfToken: session.csrfToken, expiresAt: session.expiresAt }), session.token, c.env);
+}
+
+async function seedSessionForRole(c: AppContext, role: DemoRole): Promise<Response> {
+  const userId = role === "admin" ? "demo-admin" : role === "contributor" ? "demo-contributor" : "demo-buyer";
+  const user = await c.env.DB.prepare("SELECT id FROM users WHERE id = ? AND status = 'active'").bind(userId).first<{ id: string }>();
+  const membership = await c.env.DB.prepare("SELECT organization_id FROM organization_memberships WHERE user_id = ? AND status = 'active' ORDER BY created_at LIMIT 1").bind(userId).first<{ organization_id: string }>();
+  if (!user || !membership) return c.json({ error: "Demo seed identity is not available; apply migrations first" }, 503);
+  return sessionResponse(c, user.id, membership.organization_id);
 }
 
 app.get("/api/auth/session", async (c) => {
@@ -227,11 +291,13 @@ app.post("/api/auth/logout", async (c) => {
 app.post("/api/auth/dev-login", async (c) => {
   if (String(c.env.APP_ENV) === "production") return c.json({ error: "Development authentication is disabled" }, 404);
   const payload = devLoginSchema.parse(await c.req.json());
-  const userId = payload.role === "admin" ? "demo-admin" : payload.role === "contributor" ? "demo-contributor" : "demo-buyer";
-  const user = await c.env.DB.prepare("SELECT id FROM users WHERE id = ? AND status = 'active'").bind(userId).first<{ id: string }>();
-  const membership = await c.env.DB.prepare("SELECT organization_id FROM organization_memberships WHERE user_id = ? AND status = 'active' ORDER BY created_at LIMIT 1").bind(userId).first<{ organization_id: string }>();
-  if (!user || !membership) return c.json({ error: "Development seed identity is not available; apply migrations first" }, 503);
-  return sessionResponse(c, user.id, membership.organization_id);
+  return seedSessionForRole(c, payload.role);
+});
+
+app.post("/api/auth/demo-login", async (c) => {
+  if (String(c.env.APP_ENV) === "production" || String(c.env.DEMO_AUTH_ENABLED) !== "true") return c.json({ error: "Demo authentication is disabled" }, 404);
+  const payload = devLoginSchema.parse(await c.req.json());
+  return seedSessionForRole(c, payload.role);
 });
 
 app.post("/api/auth/exchange", async (c) => {
@@ -327,7 +393,14 @@ function base64UrlToken(): string {
 }
 
 
-const assetRowToDomain = (row: Record<string, unknown>): Asset => ({
+function streamEmbedUrl(row: Record<string, unknown>, env?: Pick<SecretBindings, "STREAM_CUSTOMER_CODE" | "STREAM_PUBLIC_PLAYBACK_ENABLED">): string | null {
+  const uid = typeof row.stream_uid === "string" ? row.stream_uid.trim() : "";
+  const customerCode = env?.STREAM_CUSTOMER_CODE?.trim();
+  if (!uid || !customerCode || env?.STREAM_PUBLIC_PLAYBACK_ENABLED !== "true") return null;
+  return `https://customer-${encodeURIComponent(customerCode)}.cloudflarestream.com/${encodeURIComponent(uid)}/iframe`;
+}
+
+const assetRowToDomain = (row: Record<string, unknown>, env?: Pick<SecretBindings, "STREAM_CUSTOMER_CODE" | "STREAM_PUBLIC_PLAYBACK_ENABLED">): Asset => ({
   id: String(row.id),
   kind: row.kind as Asset["kind"],
   status: row.status as Asset["status"],
@@ -374,9 +447,45 @@ const assetRowToDomain = (row: Record<string, unknown>): Asset => ({
   sourceUrl: (row.source_url as string | null) ?? null,
   sourceLicense: (row.source_license as string | null) ?? null,
   sourceAttribution: (row.source_attribution as string | null) ?? null,
+  previewUrl: row.preview_key ? `/api/assets/${encodeURIComponent(String(row.id))}/preview` : null,
+  streamUid: (row.stream_uid as string | null) ?? null,
+  streamEmbedUrl: streamEmbedUrl(row, env),
   monetizationModel: (row.monetization_model as MonetizationModel | undefined) ?? "membership",
   licensePriceCents: row.license_price_cents == null ? null : Number(row.license_price_cents),
 });
+
+function previewContentType(row: Record<string, unknown>): string {
+  const fileName = String(row.source_file_name ?? row.preview_key ?? "").toLowerCase();
+  if (row.kind === "video") return fileName.endsWith(".webm") ? "video/webm" : "video/mp4";
+  if (fileName.endsWith(".png")) return "image/png";
+  if (fileName.endsWith(".webp")) return "image/webp";
+  return "image/jpeg";
+}
+
+export function createMediaResponse(request: Request, object: R2ObjectBody, fallbackContentType: string): Response {
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  if (!headers.has("Content-Type")) headers.set("Content-Type", fallbackContentType);
+  headers.set("Accept-Ranges", "bytes");
+  headers.set("Cache-Control", "private, max-age=60");
+  headers.set("ETag", object.httpEtag);
+
+  let status = 200;
+  if (request.headers.has("Range") && object.range && "offset" in object.range) {
+    const offset = object.range.offset ?? 0;
+    const length = object.range.length ?? object.size - offset;
+    const partial = offset > 0 || length < object.size;
+    headers.set("Content-Length", String(length));
+    if (partial) {
+      headers.set("Content-Range", `bytes ${offset}-${offset + length - 1}/${object.size}`);
+      status = 206;
+    }
+  } else {
+    headers.set("Content-Length", String(object.size));
+  }
+
+  return new Response(request.method === "HEAD" ? null : object.body, { status, headers });
+}
 
 function addReleaseDocuments(asset: Asset, rows: Record<string, unknown>[]): Asset {
   return rows.length ? {
@@ -428,7 +537,7 @@ app.get("/api/governance/assets", async (c) => {
     ORDER BY CASE a.workflow_stage WHEN 'curator_correction' THEN 1 WHEN 'ai_tagging' THEN 2 WHEN 'ingestion' THEN 3 ELSE 4 END, a.updated_at DESC
     LIMIT 100
   `).bind(...(stage === "all" ? [user.organizationId] : [user.organizationId, stage])).all<Record<string, unknown>>();
-  return c.json({ results: (result.results as Record<string, unknown>[]).map(assetRowToDomain) });
+  return c.json({ results: (result.results as Record<string, unknown>[]).map((row) => assetRowToDomain(row, c.env)) });
 });
 
 const governanceActionSchema = contractGovernanceActionRequestSchema;
@@ -461,21 +570,21 @@ app.post("/api/governance/assets/:id/action", async (c) => {
   }
   if (!exists) return c.json({ error: "Asset not found" }, 404);
   if (exists.owner_id !== actor.id && !allowedRole(actor, ["editor", "admin"])) return c.json({ error: "Forbidden" }, 403);
+  if (payload.action === "run_ai_tagging") {
+    return c.json({
+      error: "AI enrichment runs once when a new image upload completes. Save a manual metadata correction for later changes.",
+      code: "ai_enrichment_upload_only",
+    }, 409);
+  }
   if (payload.action === "approve" && governancePayloadEditsMetadata(payload)) {
     return c.json({ error: "Save the metadata correction before approving this revision", code: "review_revision_required" }, 422);
   }
   if (payload.action === "approve" && !archiveDomain.canApproveMetadataRevision({ assetRevision: exists.asset_revision, reviewedRevision: exists.reviewed_revision, metadataReviewStatus: exists.metadata_review_status as Asset["metadataReviewStatus"] })) {
     return c.json({ error: "The current metadata revision must be reviewed before approval", code: "review_revision_required" }, 422);
   }
-  const stage = payload.action === "run_ai_tagging" ? "ai_tagging" : payload.action === "approve" ? "approval" : "curator_correction";
+  const stage = payload.action === "approve" ? "approval" : "curator_correction";
   const status = payload.action === "approve" ? "published" : payload.action === "reject" ? "rejected" : "needs_review";
-  if (payload.action === "run_ai_tagging") {
-    await c.env.DB.prepare(`UPDATE assets SET status = 'needs_review', workflow_stage = 'ai_tagging',
-      asset_revision = asset_revision + 1, enriched_revision = NULL, reviewed_revision = NULL, approved_revision = NULL,
-      human_verified = 0, metadata_review_status = 'needs_context', metadata_provenance = 'ai_suggested',
-      metadata_review_note = 'AI enrichment is queued for this media revision.', vector_index_status = 'pending',
-      updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?`).bind(assetId, actor.organizationId).run();
-  } else if (payload.action === "save_correction") {
+  if (payload.action === "save_correction") {
     await c.env.DB.prepare(`UPDATE assets SET status = 'needs_review', workflow_stage = 'curator_correction',
       title = COALESCE(?, title), caption = COALESCE(?, caption), subject_tags = COALESCE(?, subject_tags),
       cultural_tags = COALESCE(?, cultural_tags), ai_tags = COALESCE(?, ai_tags), curator_notes = COALESCE(?, curator_notes),
@@ -514,17 +623,34 @@ app.post("/api/governance/assets/:id/action", async (c) => {
   const revisionRow = await c.env.DB.prepare("SELECT asset_revision FROM assets WHERE id = ? AND organization_id = ?")
     .bind(assetId, actor.organizationId).first<{ asset_revision: number }>();
   await c.env.DB.prepare("INSERT INTO metadata_events (id, asset_id, actor_id, event_type, payload) VALUES (?, ?, ?, ?, ?)")
-    .bind(crypto.randomUUID(), assetId, actor.id, payload.action === "run_ai_tagging" ? "ai_tagged" : payload.action === "save_correction" ? "curator_corrected" : payload.action === "approve" ? "approved" : "rejected", JSON.stringify({ ...payload, assetRevision: revisionRow?.asset_revision })).run();
-  if (payload.action !== "run_ai_tagging") {
-    await c.env.DB.prepare(`UPDATE photo_ai_provenance SET reviewed_by = ?, review_outcome = ?, reviewed_at = CURRENT_TIMESTAMP
-      WHERE id = (SELECT id FROM photo_ai_provenance WHERE asset_id = ? ORDER BY created_at DESC LIMIT 1)`)
-      .bind(actor.id, payload.action === "save_correction" ? "reviewed" : payload.action, assetId).run();
-  }
+    .bind(crypto.randomUUID(), assetId, actor.id, payload.action === "save_correction" ? "curator_corrected" : payload.action === "approve" ? "approved" : "rejected", JSON.stringify({ ...payload, assetRevision: revisionRow?.asset_revision })).run();
+  const auditAction = payload.action === "save_correction"
+      ? "asset.metadata.reviewed"
+      : payload.action === "approve"
+        ? "asset.approved"
+        : "asset.rejected";
+  await appendAssetApprovalAudit(c, actor, {
+    assetId,
+    ownerId: exists.owner_id,
+    action: auditAction,
+    decision: payload.action,
+    status,
+    stage,
+    assetRevision: revisionRow?.asset_revision ?? null,
+    notes: payload.curatorNotes ?? null,
+  });
+  await c.env.DB.prepare(`UPDATE photo_ai_provenance SET reviewed_by = ?, review_outcome = ?, reviewed_at = CURRENT_TIMESTAMP
+    WHERE id = (SELECT id FROM photo_ai_provenance WHERE asset_id = ? ORDER BY created_at DESC LIMIT 1)`)
+    .bind(actor.id, payload.action === "save_correction" ? "reviewed" : payload.action, assetId).run();
   let indexing = "not_required";
-  if (payload.action === "run_ai_tagging") {
-    indexing = (await enqueuePhotoJobBestEffort(c.env, assetId, "enrich")) ? "enrichment_queued" : "enrichment_retry_pending";
-  } else if ((payload.action === "approve" || payload.action === "reject") && exists.kind === "image") {
+  if ((payload.action === "approve" || payload.action === "reject") && exists.kind === "image") {
     indexing = (await enqueuePhotoJobBestEffort(c.env, assetId, "sync_index")) ? "index_sync_queued" : "index_sync_retry_pending";
+  }
+  if (payload.action === "approve" && exists.owner_id !== actor.id) {
+    c.executionCtx.waitUntil(notify(c.env, actor.organizationId, exists.owner_id, { type: "asset_published", title: "Asset published", body: "Your submission was approved and is now published to the archive.", resourceType: "asset", resourceId: assetId }));
+    c.executionCtx.waitUntil(dispatchWebhookEvent(c.env, actor.organizationId, "asset.published", { assetId }));
+  } else if (payload.action === "reject" && exists.owner_id !== actor.id) {
+    c.executionCtx.waitUntil(notify(c.env, actor.organizationId, exists.owner_id, { type: "asset_rejected", title: "Asset rejected", body: "Your submission was rejected during governance review.", resourceType: "asset", resourceId: assetId }));
   }
   return c.json(validateContractResponse("POST /api/governance/assets/{id}/action 200", governanceActionResponseSchema, { ok: true, assetId, stage, status, indexing }));
 });
@@ -819,14 +945,36 @@ app.get("/api/my/assets", async (c) => {
   const user = await requestUser(c);
   if (!user) return c.json({ error: "Authentication required" }, 401);
   const result = await c.env.DB.prepare("SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.organization_id = ? AND a.owner_id = ? ORDER BY a.updated_at DESC LIMIT 100").bind(user.organizationId, user.id).all<Record<string, unknown>>();
-  return c.json({ results: (result.results as Record<string, unknown>[]).map(assetRowToDomain) });
+  return c.json({ results: (result.results as Record<string, unknown>[]).map((row) => assetRowToDomain(row, c.env)) });
+});
+
+const metadataEventSummaries: Record<string, string> = {
+  ai_tagged: "AI enrichment suggested new metadata for review.",
+  curator_corrected: "A curator or contributor saved a metadata correction.",
+  approved: "This revision was approved and published.",
+  rejected: "This revision was rejected.",
+};
+
+app.get("/api/assets/:id/versions", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const asset = await c.env.DB.prepare("SELECT id, owner_id FROM assets WHERE id = ? AND organization_id = ?").bind(c.req.param("id"), user.organizationId).first<{ id: string; owner_id: string }>();
+  if (!asset) return c.json({ error: "Asset not found" }, 404);
+  if (asset.owner_id !== user.id && !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Forbidden" }, 403);
+  const rows = await c.env.DB.prepare(`SELECT e.id, e.event_type, e.payload, e.created_at, u.display_name AS actor_name
+    FROM metadata_events e JOIN users u ON u.id = e.actor_id WHERE e.asset_id = ? ORDER BY e.created_at DESC LIMIT 100`).bind(c.req.param("id")).all<Record<string, unknown>>();
+  return c.json({ assetId: c.req.param("id"), results: rows.results.map((row) => {
+    let assetRevision: number | null = null;
+    try { assetRevision = Number((JSON.parse(String(row.payload ?? "{}")) as { assetRevision?: number }).assetRevision ?? null) || null; } catch { assetRevision = null; }
+    return { id: String(row.id), assetRevision, eventType: row.event_type, actorName: String(row.actor_name), createdAt: String(row.created_at), summary: metadataEventSummaries[String(row.event_type)] ?? String(row.event_type) };
+  }) });
 });
 
 app.get("/api/admin/review", async (c) => {
   const user = await requestUser(c);
   if (!user || !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Editor access required" }, 403);
   const result = await c.env.DB.prepare("SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.organization_id = ? AND a.status IN ('needs_review', 'processing') ORDER BY a.authenticity_confidence DESC, a.created_at ASC LIMIT 100").bind(user.organizationId).all<Record<string, unknown>>();
-  return c.json({ results: (result.results as Record<string, unknown>[]).map(assetRowToDomain) });
+  return c.json({ results: (result.results as Record<string, unknown>[]).map((row) => assetRowToDomain(row, c.env)) });
 });
 
 const editorialReviewSchema = z.object({ decision: z.enum(["approved", "rejected", "needs_changes", "withdrawn"]), notes: z.string().trim().max(2000).default("") });
@@ -835,9 +983,9 @@ app.post("/api/admin/assets/:id/review", async (c) => {
   const user = await requestUser(c);
   if (!user || !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Editor access required" }, 403);
   const payload = editorialReviewSchema.parse(await c.req.json());
-  const asset = await c.env.DB.prepare(`SELECT id, kind, asset_revision, reviewed_revision, metadata_review_status
+  const asset = await c.env.DB.prepare(`SELECT id, kind, owner_id, asset_revision, reviewed_revision, metadata_review_status
     FROM assets WHERE id = ? AND organization_id = ?`).bind(c.req.param("id"), user.organizationId)
-    .first<{ id: string; kind: "image" | "video"; asset_revision: number; reviewed_revision: number | null; metadata_review_status: string }>();
+    .first<{ id: string; kind: "image" | "video"; owner_id: string; asset_revision: number; reviewed_revision: number | null; metadata_review_status: string }>();
   if (!asset) return c.json({ error: "Asset not found" }, 404);
   if (payload.decision === "approved" && !archiveDomain.canApproveMetadataRevision({ assetRevision: asset.asset_revision, reviewedRevision: asset.reviewed_revision, metadataReviewStatus: asset.metadata_review_status as Asset["metadataReviewStatus"] })) {
     return c.json({ error: "Save a correction for the current metadata revision before approval", code: "review_revision_required" }, 422);
@@ -857,12 +1005,30 @@ app.post("/api/admin/assets/:id/review", async (c) => {
   }
   await c.env.DB.prepare("INSERT INTO metadata_events (id, asset_id, actor_id, event_type, payload) VALUES (?, ?, ?, ?, ?)")
     .bind(crypto.randomUUID(), asset.id, user.id, payload.decision === "approved" ? "approved" : payload.decision === "rejected" || payload.decision === "withdrawn" ? "rejected" : "curator_corrected", JSON.stringify({ notes: payload.notes, decision: payload.decision })).run();
+  await appendAssetApprovalAudit(c, user, {
+    assetId: asset.id,
+    ownerId: asset.owner_id,
+    action: payload.decision === "approved" ? "asset.approved" : payload.decision === "needs_changes" ? "asset.changes_requested" : "asset.rejected",
+    decision: payload.decision,
+    status,
+    stage: payload.decision === "approved" ? "approval" : "curator_correction",
+    assetRevision: asset.asset_revision,
+    notes: payload.notes,
+  });
   await c.env.DB.prepare(`UPDATE photo_ai_provenance SET reviewed_by = ?, review_outcome = ?, reviewed_at = CURRENT_TIMESTAMP
     WHERE id = (SELECT id FROM photo_ai_provenance WHERE asset_id = ? ORDER BY created_at DESC LIMIT 1)`)
     .bind(user.id, payload.decision, asset.id).run();
   const indexing = asset.kind === "image" && payload.decision !== "needs_changes"
     ? (await enqueuePhotoJobBestEffort(c.env, asset.id, "sync_index") ? "index_sync_queued" : "index_sync_retry_pending")
     : "not_required";
+  if (asset.owner_id !== user.id) {
+    if (payload.decision === "approved") {
+      c.executionCtx.waitUntil(notify(c.env, user.organizationId, asset.owner_id, { type: "asset_published", title: "Asset published", body: "Your submission was approved and is now published to the archive.", resourceType: "asset", resourceId: asset.id }));
+      c.executionCtx.waitUntil(dispatchWebhookEvent(c.env, user.organizationId, "asset.published", { assetId: asset.id }));
+    } else if (payload.decision === "rejected" || payload.decision === "needs_changes") {
+      c.executionCtx.waitUntil(notify(c.env, user.organizationId, asset.owner_id, { type: "asset_review", title: payload.decision === "rejected" ? "Asset rejected" : "Changes requested", body: payload.notes || "An editor reviewed your submission.", resourceType: "asset", resourceId: asset.id }));
+    }
+  }
   return c.json({ ok: true, status, indexing });
 });
 
@@ -994,13 +1160,30 @@ app.post("/api/payments/:licenceId/settled", async (c) => {
     const licence = await c.env.DB.prepare("SELECT id FROM licences WHERE id = ? AND organization_id = ?").bind(c.req.param("licenceId"), user.organizationId).first<{ id: string }>();
     if (!licence) return c.json({ error: "Licence not found" }, 404);
     const result = await postSaleSettlement(c.env, c.req.param("licenceId"), payload);
+    if (!result.idempotent) c.executionCtx.waitUntil(dispatchWebhookEvent(c.env, user.organizationId, "licence.paid", { licenceId: c.req.param("licenceId"), amountCents: payload.amountCents, currency: payload.currency }));
     return c.json(result, result.idempotent ? 200 : 201);
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "Unable to post settlement" }, 422);
   }
 });
 
+app.get("/api/my/licences", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const rows = await c.env.DB.prepare(`SELECT l.id, l.licence_type, l.territory, l.duration_days, l.price_cents, l.status, l.created_at,
+      a.id AS asset_id, a.title AS asset_title, a.preview_key
+    FROM licences l JOIN assets a ON a.id = l.asset_id
+    WHERE l.organization_id = ? AND l.buyer_id = ? ORDER BY l.created_at DESC LIMIT 100`).bind(user.organizationId, user.id).all<Record<string, unknown>>();
+  return c.json({ results: rows.results.map((row) => ({
+    id: String(row.id), assetId: String(row.asset_id), assetTitle: String(row.asset_title),
+    licenceType: row.licence_type, territory: String(row.territory), durationDays: Number(row.duration_days),
+    priceCents: Number(row.price_cents), status: row.status, createdAt: String(row.created_at),
+    previewUrl: row.preview_key ? `/api/assets/${encodeURIComponent(String(row.asset_id))}/preview` : null,
+  })) });
+});
+
 const paymentWebhookSchema = paymentWebhookRequestSchema;
+
 
 async function verifyPaymentWebhook(secret: string, signature: string, body: string): Promise<boolean> {
   const expected = hex(await hmac(utf8(secret), body));
@@ -1053,6 +1236,10 @@ app.post("/api/webhooks/payments", async (c) => {
       transactionId = await postPaymentReversal(c.env, payload.licenceId, { amountCents: payload.amountCents, currency: payload.currency, idempotencyKey: `${payload.provider}:${payload.eventId}`, type: payload.type });
     }
     await c.env.DB.prepare("UPDATE payment_webhook_events SET status = 'processed', processed_at = CURRENT_TIMESTAMP WHERE id = ?").bind(eventId).run();
+    if (payload.type === "payment_succeeded") {
+      const licenceOrg = await c.env.DB.prepare("SELECT organization_id FROM licences WHERE id = ?").bind(payload.licenceId).first<{ organization_id: string }>();
+      if (licenceOrg) c.executionCtx.waitUntil(dispatchWebhookEvent(c.env, licenceOrg.organization_id, "licence.paid", { licenceId: payload.licenceId, amountCents: payload.amountCents, currency: payload.currency }));
+    }
     return c.json({ accepted: true, eventId, transactionId, type: payload.type });
   } catch (error) {
     await c.env.DB.prepare("UPDATE payment_webhook_events SET status = 'failed', failure_reason = ? WHERE id = ?").bind(error instanceof Error ? error.message : "payment_event_failed", eventId).run();
@@ -1075,15 +1262,15 @@ app.get("/api/ops/reconciliation/payments", async (c) => {
 });
 
 const payoutBatchSchema = z.object({ periodStart: z.string().date(), periodEnd: z.string().date(), currency: z.string().length(3).default("ZAR") });
+const payoutBatchDecisionSchema = z.object({ decision: z.enum(["approve", "reject"]), notes: z.string().trim().max(1000).optional() });
 
 async function processPayoutBatch(env: Bindings, batchId: string): Promise<void> {
-  const batch = await env.DB.prepare("SELECT * FROM payout_batches WHERE id = ?").bind(batchId).first<Record<string, unknown>>();
+  const batch = await env.DB.prepare("SELECT * FROM payout_batches WHERE id = ? AND status = 'processing'").bind(batchId).first<Record<string, unknown>>();
   if (!batch) return;
   const items = await env.DB.prepare(`SELECT i.id, i.contributor_id, i.wallet_id, i.contract_id, i.amount_cents, i.currency,
     w.provider, w.provider_account_id, w.account_holder_name, w.account_last4, u.display_name, u.email
     FROM payout_batch_items i JOIN payout_wallets w ON w.id = i.wallet_id JOIN users u ON u.id = i.contributor_id WHERE i.batch_id = ? AND i.status = 'pending'`).bind(batchId).all<Record<string, unknown>>();
   const registry = new IntegrationContainer(env).payouts;
-  await env.DB.prepare("UPDATE payout_batches SET status = 'processing' WHERE id = ?").bind(batchId).run();
   for (const item of items.results as Record<string, unknown>[]) {
     const reference = `payout-${batchId}-${String(item.id)}`;
     try {
@@ -1103,8 +1290,10 @@ async function processPayoutBatch(env: Bindings, batchId: string): Promise<void>
         env.DB.prepare("INSERT INTO ledger_postings (id, transaction_id, account_code, debit_cents, credit_cents, metadata_json) VALUES (?, ?, 'cash_clearing', 0, ?, '{}')").bind(crypto.randomUUID(), transactionId, item.amount_cents),
         env.DB.prepare("UPDATE payout_batch_items SET status = ?, provider_reference = ?, ledger_transaction_id = ? WHERE id = ?").bind(payout.status === "paid" ? "paid" : "processing", payout.providerReference ?? null, transactionId, item.id),
       ]);
+      await notify(env, String(batch.organization_id), String(item.contributor_id), { type: "payout", title: "Payout processed", body: `A payout of ${(Number(item.amount_cents) / 100).toFixed(2)} ${String(item.currency)} was sent for period ${String(batch.period_start)} to ${String(batch.period_end)}.`, resourceType: "payout_batch", resourceId: batchId });
     } catch (error) {
       await env.DB.prepare("UPDATE payout_batch_items SET status = 'failed', failure_reason = ? WHERE id = ?").bind(error instanceof Error ? error.message : "Payout provider failure", item.id).run();
+      await notify(env, String(batch.organization_id), String(item.contributor_id), { type: "payout", title: "Payout could not be processed", body: "A scheduled payout failed. An admin has been notified to review your payout wallet.", resourceType: "payout_batch", resourceId: batchId });
     }
   }
   await env.DB.prepare("UPDATE payout_batches SET status = CASE WHEN EXISTS (SELECT 1 FROM payout_batch_items WHERE batch_id = ? AND status = 'failed') THEN 'failed' ELSE 'paid' END, processed_at = CURRENT_TIMESTAMP WHERE id = ?").bind(batchId, batchId).run();
@@ -1131,8 +1320,48 @@ app.post("/api/admin/payout-batches", async (c) => {
     await c.env.DB.prepare(`INSERT INTO payout_batch_items (id, batch_id, contributor_id, wallet_id, contract_id, amount_cents, currency)
       VALUES (?, ?, ?, ?, ?, ?, ?)`).bind(crypto.randomUUID(), batchId, row.contributor_id, row.wallet_id, row.contract_id, row.balance_cents, row.currency).run();
   }
-  c.executionCtx.waitUntil(processPayoutBatch(c.env, batchId));
-  return c.json({ batchId, itemCount: contributors.results.length, totalCents: total, status: "processing" }, 202);
+  return c.json({ batchId, itemCount: contributors.results.length, totalCents: total, status: "draft", next: "admin_approval_required" }, 201, { Location: `/api/admin/payout-batches/${batchId}` });
+});
+
+app.post("/api/admin/payout-batches/:id/decision", async (c) => {
+  const admin = await requestUser(c);
+  if (!admin || !allowedRole(admin, ["admin"])) return c.json({ error: "Admin access required" }, 403);
+  const payload = payoutBatchDecisionSchema.parse(await c.req.json());
+  const batchId = c.req.param("id");
+  const batch = await c.env.DB.prepare("SELECT id, organization_id, status, total_cents FROM payout_batches WHERE id = ? AND organization_id = ?")
+    .bind(batchId, admin.organizationId).first<{ id: string; organization_id: string; status: string; total_cents: number }>();
+  if (!batch) return c.json({ error: "Payout batch not found" }, 404);
+
+  const outcome = decidePayoutBatch(batch.status as Parameters<typeof decidePayoutBatch>[0], payload.decision, Number(batch.total_cents));
+  if ("error" in outcome) return c.json({ error: outcome.error }, outcome.statusCode);
+  const nextStatus = outcome.status;
+  const transition = await c.env.DB.prepare("UPDATE payout_batches SET status = ?, processed_at = CASE WHEN ? = 'cancelled' THEN CURRENT_TIMESTAMP ELSE processed_at END WHERE id = ? AND status = 'draft'").bind(nextStatus, nextStatus, batchId).run();
+  if (Number(transition.meta.changes ?? 0) !== 1) return c.json({ error: "Payout batch changed before this decision was applied" }, 409);
+  await c.env.DB.prepare("INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, metadata_json) VALUES (?, ?, ?, 'payout_batch', ?, ?)").bind(crypto.randomUUID(), admin.id, payload.decision === "approve" ? "payout_batch_approved" : "payout_batch_rejected", batchId, JSON.stringify({ notes: payload.notes ?? null, totalCents: Number(batch.total_cents) })).run();
+  if (payload.decision === "approve") c.executionCtx.waitUntil(processPayoutBatch(c.env, batchId));
+  return c.json({ batchId, status: nextStatus, decision: payload.decision, idempotent: outcome.idempotent }, payload.decision === "approve" ? 202 : 200);
+});
+
+app.get("/api/admin/payout-batches", async (c) => {
+  const admin = await requestUser(c);
+  if (!admin || !allowedRole(admin, ["admin"])) return c.json({ error: "Admin access required" }, 403);
+  const rows = await c.env.DB.prepare(`SELECT b.*, COUNT(i.id) AS item_count FROM payout_batches b LEFT JOIN payout_batch_items i ON i.batch_id = b.id
+    WHERE b.organization_id = ? GROUP BY b.id ORDER BY b.created_at DESC LIMIT 100`).bind(admin.organizationId).all<Record<string, unknown>>();
+  return c.json({ results: rows.results.map((row) => ({ id: String(row.id), periodStart: String(row.period_start), periodEnd: String(row.period_end), currency: String(row.currency), totalCents: Number(row.total_cents), status: String(row.status), itemCount: Number(row.item_count ?? 0), createdAt: String(row.created_at) })) });
+});
+
+app.get("/api/admin/payout-batches/:id", async (c) => {
+  const admin = await requestUser(c);
+  if (!admin || !allowedRole(admin, ["admin"])) return c.json({ error: "Admin access required" }, 403);
+  const batch = await c.env.DB.prepare("SELECT * FROM payout_batches WHERE id = ? AND organization_id = ?").bind(c.req.param("id"), admin.organizationId).first<Record<string, unknown>>();
+  if (!batch) return c.json({ error: "Payout batch not found" }, 404);
+  const items = await c.env.DB.prepare(`SELECT i.id, i.amount_cents, i.currency, i.status, i.failure_reason, u.display_name AS contributor_name
+    FROM payout_batch_items i JOIN users u ON u.id = i.contributor_id WHERE i.batch_id = ? ORDER BY i.created_at ASC`).bind(c.req.param("id")).all<Record<string, unknown>>();
+  return c.json({
+    id: String(batch.id), periodStart: String(batch.period_start), periodEnd: String(batch.period_end), currency: String(batch.currency),
+    totalCents: Number(batch.total_cents), status: String(batch.status), itemCount: items.results.length, createdAt: String(batch.created_at),
+    items: items.results.map((row) => ({ id: String(row.id), contributorName: String(row.contributor_name), amountCents: Number(row.amount_cents), currency: String(row.currency), status: String(row.status), failureReason: (row.failure_reason as string | null) ?? null })),
+  });
 });
 
 const utf8 = (value: string): Uint8Array<ArrayBuffer> => new TextEncoder().encode(value) as Uint8Array<ArrayBuffer>;
@@ -1161,40 +1390,6 @@ function timingSafeEqual(left: string, right: string): boolean {
     difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
   }
   return difference === 0;
-}
-
-function encodePath(path: string): string {
-  return path.split("/").map((part) => encodeURIComponent(part)).join("/");
-}
-
-async function createPresignedPutUrl(env: Bindings, objectKey: string): Promise<string | null> {
-  if (!env.R2_ACCOUNT_ID || !env.R2_ACCESS_KEY_ID || !env.R2_SECRET_ACCESS_KEY || !env.R2_BUCKET_NAME) return null;
-  const now = new Date();
-  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
-  const dateStamp = amzDate.slice(0, 8);
-  const region = "auto";
-  const service = "s3";
-  const host = `${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`;
-  const credential = `${env.R2_ACCESS_KEY_ID}/${dateStamp}/${region}/${service}/aws4_request`;
-  const query = new URLSearchParams({
-    "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
-    "X-Amz-Credential": credential,
-    "X-Amz-Date": amzDate,
-    "X-Amz-Expires": "900",
-    "X-Amz-SignedHeaders": "host",
-  });
-  const canonicalQuery = [...query.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`).join("&");
-  const canonicalUri = `/${encodeURIComponent(env.R2_BUCKET_NAME)}/${encodePath(objectKey)}`;
-  const canonicalRequest = ["PUT", canonicalUri, canonicalQuery, `host:${host}\n`, "host", "UNSIGNED-PAYLOAD"].join("\n");
-  const canonicalRequestHash = hex(await crypto.subtle.digest("SHA-256", utf8(canonicalRequest)));
-  const stringToSign = ["AWS4-HMAC-SHA256", amzDate, `${dateStamp}/${region}/${service}/aws4_request`, canonicalRequestHash].join("\n");
-  const dateKey = await hmac(utf8(`AWS4${env.R2_SECRET_ACCESS_KEY}`), dateStamp);
-  const regionKey = await hmac(dateKey, region);
-  const serviceKey = await hmac(regionKey, service);
-  const signingKey = await hmac(serviceKey, "aws4_request");
-  const signature = hex(await hmac(signingKey, stringToSign));
-  query.set("X-Amz-Signature", signature);
-  return `https://${host}${canonicalUri}?${query.toString()}`;
 }
 
 function chaosScenario(c: { env: Bindings; req: { header(name: string): string | undefined } }): string | null {
@@ -1235,6 +1430,301 @@ async function requestActor(c: { env: Bindings; req: { raw: Request; header(name
 function allowedRole(user: RequestUser | null, roles: string[]): boolean {
   return Boolean(user && roles.includes(user.role));
 }
+
+const approvalLedgerAuditActions = [
+  "seller.contract.signed",
+  "seller.tender.approved",
+  "seller.tender.rejected",
+  "seller.tender.corrections_requested",
+  "verification.case.updated",
+  "asset.ai_tagging.requested",
+  "asset.metadata.reviewed",
+  "asset.approved",
+  "asset.rejected",
+  "asset.changes_requested",
+] as const;
+
+type ApprovalLedgerCategory = "user_account" | "image";
+type ApprovalLedgerEntry = {
+  id: string;
+  category: ApprovalLedgerCategory;
+  source: "signed_audit" | "workflow_event";
+  occurredAt: string;
+  action: string;
+  decision: string;
+  actor: { id: string; name: string; role: string };
+  subject: { id: string; name: string; type: string };
+  resource: { type: string; id: string; title: string };
+  streamId: string | null;
+  sequence: number | null;
+  notes: string | null;
+  integrity: { status: "verified" | "failed" | "legacy"; hashValid: boolean | null; signatureValid: boolean | null; hash: string | null; r2Key: string | null };
+};
+
+function auditActorTypeForRole(role: string): "user" | "contributor" | "admin" {
+  if (role === "admin") return "admin";
+  if (role === "contributor") return "contributor";
+  return "user";
+}
+
+function storedAuditEventFromRow(row: Record<string, unknown>): StoredAuditEvent {
+  return {
+    schemaVersion: 1 as const,
+    eventId: String(row.event_id),
+    streamId: String(row.stream_id),
+    sequence: Number(row.sequence),
+    occurredAt: String(row.occurred_at),
+    actor: { id: String(row.actor_id), type: String(row.actor_type) as StoredAuditEvent["actor"]["type"] },
+    action: String(row.action),
+    resource: { type: String(row.resource_type), id: String(row.resource_id) },
+    data: JSON.parse(String(row.data_json ?? "{}")) as Record<string, unknown>,
+    residencyRegion: residencyRegionSchema.parse(String(row.residency_region)),
+    previousHash: String(row.previous_hash),
+    hash: String(row.event_hash),
+    signature: String(row.signature),
+    signatureAlgorithm: "Ed25519" as const,
+    keyId: String(row.key_id),
+    publicKeyJwk: JSON.parse(String(row.public_key_jwk)) as JsonWebKey,
+    r2Key: String(row.r2_key),
+  };
+}
+
+function ledgerCategoryForAction(action: string): ApprovalLedgerCategory {
+  return action.startsWith("asset.") ? "image" : "user_account";
+}
+
+function ledgerDecision(action: string, data: Record<string, unknown>): string {
+  if (typeof data.decision === "string") return data.decision;
+  if (typeof data.status === "string") return data.status;
+  if (action.endsWith(".signed")) return "signed";
+  if (action.endsWith(".approved")) return "approved";
+  if (action.endsWith(".rejected")) return "rejected";
+  if (action.endsWith(".corrections_requested")) return "corrections requested";
+  if (action.endsWith(".changes_requested")) return "changes requested";
+  if (action.endsWith(".reviewed")) return "reviewed";
+  if (action.endsWith(".requested")) return "requested";
+  return action.split(".").at(-1)?.replaceAll("_", " ") ?? action;
+}
+
+function ledgerTitleForAction(action: string): string {
+  const titles: Record<string, string> = {
+    "seller.contract.signed": "Seller signed contributor terms",
+    "seller.tender.approved": "User account approved",
+    "seller.tender.rejected": "User account rejected",
+    "seller.tender.corrections_requested": "User account corrections requested",
+    "verification.case.updated": "Verification case updated",
+    "asset.ai_tagging.requested": "Image AI enrichment requested",
+    "asset.metadata.reviewed": "Image metadata signed off",
+    "asset.approved": "Image approved",
+    "asset.rejected": "Image rejected",
+    "asset.changes_requested": "Image changes requested",
+  };
+  return titles[action] ?? action.replaceAll(".", " ");
+}
+
+async function appendAssetApprovalAudit(c: AppContext, actor: RequestUser, input: { assetId: string; ownerId: string; action: string; decision: string; status: string; stage: string; assetRevision?: number | null; notes?: string | null }): Promise<string | null> {
+  try {
+    const audit = await appendAuditEvent(c.env, {
+      streamId: `asset:${input.assetId}`,
+      actorId: actor.id,
+      actorType: auditActorTypeForRole(actor.role),
+      action: input.action,
+      resourceType: "asset",
+      resourceId: input.assetId,
+      data: redactAuditData({
+        decision: input.decision,
+        status: input.status,
+        stage: input.stage,
+        actorRole: actor.role,
+        ownerId: input.ownerId,
+        assetRevision: input.assetRevision ?? null,
+        notes: input.notes ?? null,
+      }),
+      residencyRegion: actor.residencyRegion,
+      actorResidencyRegion: actor.residencyRegion,
+    });
+    return audit.event.eventId;
+  } catch (error) {
+    logEvent("warn", "approval_ledger.audit_write_failed", c.get("trace"), {
+      assetId: input.assetId,
+      action: input.action,
+      error: error instanceof Error ? error.message : "unknown-error",
+    });
+    return null;
+  }
+}
+
+const approvalLedgerQuerySchema = z.object({
+  category: z.enum(["all", "user_account", "image"]).default("all"),
+  source: z.enum(["all", "signed_audit", "workflow_event"]).default("all"),
+  limit: z.coerce.number().int().min(1).max(500).default(200),
+});
+
+function auditLedgerEntry(row: Record<string, unknown>, event: StoredAuditEvent, verification: { hashValid: boolean; signatureValid: boolean }): ApprovalLedgerEntry {
+  const category = ledgerCategoryForAction(event.action);
+  const data = event.data;
+  const assetTitle = String(row.asset_title ?? "");
+  const tenderContributorName = String(row.tender_contributor_name ?? "");
+  const contractContributorName = String(row.contract_contributor_name ?? "");
+  const verificationContributorName = String(row.verification_contributor_name ?? "");
+  const subjectName = category === "image"
+    ? String(row.asset_owner_name ?? event.resource.id)
+    : tenderContributorName || contractContributorName || verificationContributorName || event.streamId.replace(/^contributor:/, "");
+  const subjectId = category === "image"
+    ? String(row.asset_owner_id ?? data.ownerId ?? event.resource.id)
+    : String(row.tender_contributor_id ?? row.contract_contributor_id ?? row.verification_contributor_id ?? event.streamId.replace(/^contributor:/, ""));
+  const title = category === "image"
+    ? assetTitle || String(data.title ?? event.resource.id)
+    : subjectName;
+  const notes = typeof data.notes === "string" && data.notes.trim() ? data.notes.trim() : null;
+  return {
+    id: event.eventId,
+    category,
+    source: "signed_audit",
+    occurredAt: event.occurredAt,
+    action: ledgerTitleForAction(event.action),
+    decision: ledgerDecision(event.action, data),
+    actor: { id: event.actor.id, name: String(row.actor_name ?? event.actor.id), role: String(row.actor_role ?? event.actor.type) },
+    subject: { id: subjectId, name: subjectName, type: category === "image" ? "seller" : "user account" },
+    resource: { type: event.resource.type, id: event.resource.id, title },
+    streamId: event.streamId,
+    sequence: event.sequence,
+    notes,
+    integrity: {
+      status: verification.hashValid && verification.signatureValid ? "verified" : "failed",
+      hashValid: verification.hashValid,
+      signatureValid: verification.signatureValid,
+      hash: event.hash,
+      r2Key: event.r2Key,
+    },
+  };
+}
+
+function workflowLedgerEntry(row: Record<string, unknown>): ApprovalLedgerEntry {
+  let payload: Record<string, unknown> = {};
+  try { payload = JSON.parse(String(row.payload ?? "{}")) as Record<string, unknown>; } catch { payload = {}; }
+  const eventType = String(row.event_type);
+  const decision = eventType === "approved" ? "approved" : eventType === "rejected" ? "rejected" : "reviewed";
+  const action = eventType === "approved" ? "Image approved" : eventType === "rejected" ? "Image rejected" : "Image metadata signed off";
+  return {
+    id: String(row.id),
+    category: "image",
+    source: "workflow_event",
+    occurredAt: String(row.created_at),
+    action,
+    decision,
+    actor: { id: String(row.actor_id), name: String(row.actor_name ?? row.actor_id), role: String(row.actor_role ?? "editor") },
+    subject: { id: String(row.owner_id), name: String(row.owner_name ?? row.owner_id), type: "seller" },
+    resource: { type: "asset", id: String(row.asset_id), title: String(row.asset_title ?? row.asset_id) },
+    streamId: null,
+    sequence: null,
+    notes: typeof payload.notes === "string" && payload.notes.trim() ? payload.notes.trim() : null,
+    integrity: { status: "legacy", hashValid: null, signatureValid: null, hash: null, r2Key: null },
+  };
+}
+
+app.get("/api/admin/approval-ledger", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["admin"])) return c.json({ error: "Admin access required" }, 403);
+  const filters = approvalLedgerQuerySchema.parse({
+    category: c.req.query("category") ?? "all",
+    source: c.req.query("source") ?? "all",
+    limit: c.req.query("limit") ?? 200,
+  });
+  const placeholders = approvalLedgerAuditActions.map(() => "?").join(", ");
+  const auditRows = filters.source === "workflow_event" ? { results: [] as Record<string, unknown>[] } : await c.env.DB.prepare(`
+    SELECT e.*,
+      actor.display_name AS actor_name, actor.role AS actor_role,
+      asset.title AS asset_title, asset.kind AS asset_kind, asset.owner_id AS asset_owner_id, asset_owner.display_name AS asset_owner_name,
+      tender.contributor_id AS tender_contributor_id, tender.status AS tender_status, tender_user.display_name AS tender_contributor_name,
+      contract.contributor_id AS contract_contributor_id, contract_user.display_name AS contract_contributor_name,
+      verification.contributor_id AS verification_contributor_id, verification.status AS verification_status, verification_user.display_name AS verification_contributor_name
+    FROM audit_log_events e
+      LEFT JOIN users actor ON actor.id = e.actor_id
+      LEFT JOIN assets asset ON e.resource_type = 'asset' AND asset.id = e.resource_id AND asset.organization_id = ? AND asset.kind = 'image'
+      LEFT JOIN users asset_owner ON asset_owner.id = asset.owner_id
+      LEFT JOIN onboarding_tenders tender ON e.resource_type = 'onboarding_tender' AND tender.id = e.resource_id AND tender.organization_id = ?
+      LEFT JOIN users tender_user ON tender_user.id = tender.contributor_id
+      LEFT JOIN seller_contracts contract ON e.resource_type = 'seller_contract' AND contract.id = e.resource_id AND contract.organization_id = ?
+      LEFT JOIN users contract_user ON contract_user.id = contract.contributor_id
+      LEFT JOIN contributor_verification_cases verification ON e.resource_type = 'verification_case' AND verification.id = e.resource_id
+      LEFT JOIN organization_memberships verification_membership ON verification_membership.user_id = verification.contributor_id AND verification_membership.organization_id = ? AND verification_membership.status = 'active'
+      LEFT JOIN users verification_user ON verification_user.id = verification.contributor_id
+    WHERE e.action IN (${placeholders})
+      AND e.residency_region = ?
+      AND (
+        asset.id IS NOT NULL OR tender.id IS NOT NULL OR contract.id IS NOT NULL OR verification_membership.id IS NOT NULL
+        OR e.stream_id IN (SELECT 'contributor:' || user_id FROM organization_memberships WHERE organization_id = ? AND status = 'active')
+      )
+    ORDER BY e.occurred_at DESC
+    LIMIT ?
+  `).bind(
+    user.organizationId,
+    user.organizationId,
+    user.organizationId,
+    user.organizationId,
+    ...approvalLedgerAuditActions,
+    user.residencyRegion,
+    user.organizationId,
+    filters.limit,
+  ).all<Record<string, unknown>>();
+
+  const entries: ApprovalLedgerEntry[] = [];
+  for (const row of auditRows.results as Record<string, unknown>[]) {
+    const event = storedAuditEventFromRow(row);
+    const verification = await verifyAuditEvent(c.env, event);
+    const entry = auditLedgerEntry(row, event, verification);
+    if (filters.category === "all" || entry.category === filters.category) entries.push(entry);
+  }
+
+  if (filters.source !== "signed_audit" && (filters.category === "all" || filters.category === "image")) {
+    try {
+      const metadataRows = await c.env.DB.prepare(`
+        SELECT e.id, e.asset_id, e.actor_id, e.event_type, e.payload, e.created_at,
+          a.title AS asset_title, a.owner_id, owner.display_name AS owner_name,
+          actor.display_name AS actor_name, actor.role AS actor_role
+        FROM metadata_events e
+          JOIN assets a ON a.id = e.asset_id AND a.organization_id = ? AND a.kind = 'image'
+          LEFT JOIN users owner ON owner.id = a.owner_id
+          LEFT JOIN users actor ON actor.id = e.actor_id
+        WHERE e.event_type IN ('approved', 'rejected', 'curator_corrected')
+          AND NOT EXISTS (
+            SELECT 1 FROM audit_log_events audit
+            WHERE audit.resource_type = 'asset'
+              AND audit.resource_id = e.asset_id
+              AND audit.actor_id = e.actor_id
+              AND audit.action = CASE e.event_type
+                WHEN 'approved' THEN 'asset.approved'
+                WHEN 'rejected' THEN 'asset.rejected'
+                ELSE 'asset.metadata.reviewed'
+              END
+          )
+        ORDER BY e.created_at DESC
+        LIMIT ?
+      `).bind(user.organizationId, filters.limit).all<Record<string, unknown>>();
+      entries.push(...(metadataRows.results as Record<string, unknown>[]).map(workflowLedgerEntry));
+    } catch (error) {
+      logEvent("warn", "approval_ledger.workflow_events_unavailable", c.get("trace"), { error: error instanceof Error ? error.message : "unknown-error" });
+    }
+  }
+
+  entries.sort((a, b) => b.occurredAt.localeCompare(a.occurredAt));
+  const limited = entries.slice(0, filters.limit);
+  return c.json({
+    organization: { id: user.organizationId, name: user.organizationName },
+    filters,
+    summary: {
+      total: limited.length,
+      userAccount: limited.filter((entry) => entry.category === "user_account").length,
+      image: limited.filter((entry) => entry.category === "image").length,
+      signedAudit: limited.filter((entry) => entry.source === "signed_audit").length,
+      legacyWorkflow: limited.filter((entry) => entry.source === "workflow_event").length,
+      verifiedIntegrity: limited.filter((entry) => entry.integrity.status === "verified").length,
+      failedIntegrity: limited.filter((entry) => entry.integrity.status === "failed").length,
+    },
+    results: limited,
+  });
+});
 
 const auditEventRequestSchema = z.object({
   eventId: z.string().regex(/^[A-Za-z0-9._:-]{8,160}$/).optional(),
@@ -1283,25 +1773,7 @@ app.get("/api/audit/events/:streamId", async (c) => {
     .bind(streamId, residencyRegion, limit).all<Record<string, unknown>>();
   const events: Array<StoredAuditEvent & { verification: { hashValid: boolean; signatureValid: boolean } }> = [];
   for (const row of result.results as Record<string, unknown>[]) {
-    const event = {
-      schemaVersion: 1 as const,
-      eventId: String(row.event_id),
-      streamId: String(row.stream_id),
-      sequence: Number(row.sequence),
-      occurredAt: String(row.occurred_at),
-      actor: { id: String(row.actor_id), type: String(row.actor_type) as StoredAuditEvent["actor"]["type"] },
-      action: String(row.action),
-      resource: { type: String(row.resource_type), id: String(row.resource_id) },
-      data: JSON.parse(String(row.data_json)) as Record<string, unknown>,
-      residencyRegion,
-      previousHash: String(row.previous_hash),
-      hash: String(row.event_hash),
-      signature: String(row.signature),
-      signatureAlgorithm: "Ed25519" as const,
-      keyId: String(row.key_id),
-      publicKeyJwk: JSON.parse(String(row.public_key_jwk)) as JsonWebKey,
-      r2Key: String(row.r2_key),
-    } satisfies StoredAuditEvent;
+    const event = storedAuditEventFromRow(row);
     events.push({ ...event, verification: await verifyAuditEvent(c.env, event) });
   }
   return c.json({ streamId, residencyRegion, events });
@@ -1526,6 +1998,52 @@ app.post("/api/webhooks/kyc", async (c) => {
   return c.json({ accepted: true, caseId: payload.caseId, status: payload.status, auditEventId: audit.event.eventId });
 });
 
+app.on(["GET", "HEAD"], "/api/assets/:id/preview", async (c) => {
+  const row = await c.env.DB.prepare(`
+    SELECT id, kind, status, source_file_name, preview_key
+    FROM assets
+    WHERE id = ?
+  `).bind(c.req.param("id")).first<Record<string, unknown>>();
+  if (!row || row.status !== "published" || typeof row.preview_key !== "string" || !row.preview_key) {
+    return c.json({ error: "Published media preview not found" }, 404);
+  }
+
+  const object = c.req.method === "HEAD"
+    ? await c.env.MEDIA_BUCKET.head(row.preview_key)
+    : await c.env.MEDIA_BUCKET.get(row.preview_key, c.req.header("Range") ? { range: c.req.raw.headers } : undefined);
+  if (!object) return c.json({ error: "Media preview is unavailable" }, 404);
+  return createMediaResponse(c.req.raw, object as R2ObjectBody, previewContentType(row));
+});
+
+// Cloudflare Image Resizing calls this source URL with Via: image-resizing.
+// The job UUID is an ephemeral capability; the DB check also requires the
+// enrichment job to still be running for the exact asset revision and ETag.
+app.on(["GET", "HEAD"], "/internal/photo-ai-source/:jobId", async (c) => {
+  const jobId = c.req.param("jobId");
+  if (!/image-resizing/i.test(c.req.header("via") ?? "") && c.req.header("x-photo-ai-job") !== jobId) return c.json({ error: "Not found" }, 404);
+  const row = await c.env.DB.prepare(`
+    SELECT a.kind, a.preview_key, a.original_key, a.source_file_name, a.asset_revision, a.source_etag,
+           j.operation, j.status, j.asset_revision AS job_revision, j.source_etag AS job_source_etag
+    FROM photo_ai_jobs j JOIN assets a ON a.id = j.asset_id
+    WHERE j.id = ?
+  `).bind(jobId).first<Record<string, unknown>>();
+  if (!row || row.operation !== "enrich" || row.status !== "running" || row.kind !== "image"
+    || Number(row.asset_revision) !== Number(row.job_revision)
+    || String(row.source_etag ?? "") !== String(row.job_source_etag ?? "")) {
+    return c.json({ error: "Not found" }, 404);
+  }
+  const sourceKey = String(row.preview_key || row.original_key || "");
+  if (!sourceKey) return c.json({ error: "Source image not found" }, 404);
+  const object = (c.req.method === "HEAD" ? await c.env.MEDIA_BUCKET.head(sourceKey) : await c.env.MEDIA_BUCKET.get(sourceKey)) as R2ObjectBody | null;
+  if (!object) return c.json({ error: "Source image not found" }, 404);
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set("Cache-Control", "private, no-store");
+  headers.set("ETag", object.httpEtag);
+  headers.set("Content-Length", String(object.size));
+  return new Response(c.req.method === "HEAD" ? null : object.body, { status: 200, headers });
+});
+
 app.get("/api/assets", async (c) => {
   const params = searchSchema.parse({
     q: c.req.query("q") ?? "",
@@ -1581,18 +2099,33 @@ app.get("/api/assets", async (c) => {
 
     rows = result.results as Record<string, unknown>[];
   }
+  const matchedAssets = archiveDomain.rankSearchAssets(rows.map((row) => assetRowToDomain(row, c.env)), params.q);
+  const countBy = <T extends string>(values: (T | null | undefined)[]): Map<string, number> => {
+    const counts = new Map<string, number>();
+    for (const value of values) if (value) counts.set(value, (counts.get(value) ?? 0) + 1);
+    return counts;
+  };
+  const topEntries = (counts: Map<string, number>, limit: number): [string, number][] =>
+    [...counts.entries()].sort((left, right) => right[1] - left[1]).slice(0, limit);
+  const provinceFacets = topEntries(countBy(matchedAssets.map((asset) => asset.province)), 5)
+    .map(([value, count]) => ({ label: value, value, count }));
+  const categoryFacets = topEntries(countBy(matchedAssets.map((asset) => asset.primaryCategory?.replaceAll("_", " "))), 5)
+    .map(([value, count]) => ({ label: value, value, count }));
+  const kindFacets = topEntries(countBy(matchedAssets.map((asset) => asset.kind)), 2)
+    .map(([value, count]) => ({ label: value === "video" ? "Film & video" : "Photography", value, count }));
   const response: SearchResponse = {
     query: params.q,
     mode: searchMode,
-    results: rows.map(assetRowToDomain),
+    results: matchedAssets,
     facets: [
-      { label: "South Africa", value: "South Africa", count: rows.length },
-      { label: "Human verified", value: "verified", count: rows.filter((row) => Boolean(row.human_verified)).length },
-      { label: "Western Cape", value: "Western Cape", count: rows.filter((row) => row.province === "Western Cape").length },
+      { label: "Human verified", value: "verified", count: matchedAssets.filter((asset) => asset.humanVerified).length },
+      ...kindFacets,
+      ...provinceFacets,
+      ...categoryFacets,
     ],
   };
 
-  recordMetric(c.env, "asset_search", c.get("trace"), rows.length, [params.kind, params.status]);
+  recordMetric(c.env, "asset_search", c.get("trace"), matchedAssets.length, [params.kind, params.status]);
   return c.json(validateContractResponse("GET /api/assets 200", searchResponseSchema, response));
 });
 
@@ -1636,10 +2169,19 @@ app.get("/api/admin/photo-jobs/:jobId/provenance", async (c) => {
 app.post("/api/admin/photo-jobs/:jobId/replay", async (c) => {
   const user = await requestUser(c);
   if (!user || !allowedRole(user, ["admin", "editor"])) return c.json({ error: "Editor access required" }, 403);
-  const job = await c.env.DB.prepare(`SELECT j.id FROM photo_ai_jobs j JOIN assets a ON a.id = j.asset_id
-    WHERE j.id = ? AND a.organization_id = ? AND j.status IN ('failed', 'dead_lettered', 'needs_review', 'skipped')`)
-    .bind(c.req.param("jobId"), user.organizationId).first<{ id: string }>();
+  const job = await c.env.DB.prepare(`SELECT j.id, j.operation, j.status FROM photo_ai_jobs j JOIN assets a ON a.id = j.asset_id
+    WHERE j.id = ? AND a.organization_id = ?`)
+    .bind(c.req.param("jobId"), user.organizationId).first<{ id: string; operation: PhotoJobOperation; status: string }>();
   if (!job) return c.json({ error: "Replayable photo job not found" }, 404);
+  if (job.operation === "enrich") {
+    return c.json({
+      error: "AI enrichment is upload-only and cannot be replayed after the upload revision was created.",
+      code: "ai_enrichment_upload_only",
+    }, 409);
+  }
+  if (!["failed", "dead_lettered", "needs_review", "skipped"].includes(job.status)) {
+    return c.json({ error: "Photo job is not replayable", code: "photo_job_not_replayable" }, 409);
+  }
   const replayedJobId = await replayPhotoJob(photoPipeline(c.env), job.id);
   if (!replayedJobId) return c.json({ error: "Photo queue is unavailable", code: "photo_queue_unavailable" }, 503);
   return c.json({ jobId: replayedJobId, status: "queued", replayed: true }, 202);
@@ -1679,6 +2221,27 @@ app.get("/api/analytics/contributor", async (c) => {
     opportunities: [{ title: "Cape Town / community", detail: "Demand is rising for everyday local stories, not landmarks alone.", tone: "warm" }, { title: "Garden Route road life", detail: "Travel briefs are looking for left-side traffic and right-hand-drive context.", tone: "cool" }, { title: "Braai culture", detail: "Add more seasonal, family, and neighbourhood variations.", tone: "warm" }],
   };
   return c.json(response);
+});
+
+app.get("/api/analytics/contributor/assets/:id", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["contributor", "admin"])) return c.json({ error: "Contributor analytics access required" }, 403);
+  const asset = await c.env.DB.prepare("SELECT id, title FROM assets WHERE id = ? AND organization_id = ? AND owner_id = ?").bind(c.req.param("id"), user.organizationId, user.id).first<{ id: string; title: string }>();
+  if (!asset) return c.json({ error: "Asset not found" }, 404);
+  const [views, licences] = await c.env.DB.batch([
+    c.env.DB.prepare(`SELECT metric_date AS label, SUM(count) AS value FROM analytics_daily WHERE metric_type = 'asset_view' AND asset_id = ? AND metric_date >= date('now', '-30 day') GROUP BY metric_date ORDER BY metric_date ASC`).bind(asset.id),
+    c.env.DB.prepare(`SELECT licence_type, status, price_cents, created_at FROM licences WHERE asset_id = ? ORDER BY created_at DESC LIMIT 20`).bind(asset.id),
+  ]);
+  const rows = (result: { results: unknown[] }): Record<string, unknown>[] => result.results as Record<string, unknown>[];
+  const licenceRows = rows(licences);
+  return c.json({
+    assetId: asset.id, assetTitle: asset.title,
+    viewTrend: rows(views).map((row) => ({ label: String(row.label), value: Number(row.value) })),
+    totalViews: rows(views).reduce((sum, row) => sum + Number(row.value), 0),
+    licences: licenceRows.map((row) => ({ licenceType: row.licence_type, status: row.status, priceCents: Number(row.price_cents), createdAt: String(row.created_at) })),
+    licensedCount: licenceRows.filter((row) => row.status === "paid").length,
+    revenueCents: licenceRows.filter((row) => row.status === "paid").reduce((sum, row) => sum + Number(row.price_cents), 0),
+  });
 });
 
 app.get("/api/analytics/buyer", async (c) => {
@@ -1721,6 +2284,53 @@ app.get("/api/community/overview", async (c) => {
   return c.json(overview);
 });
 
+const forumThreadSchema = z.object({ title: z.string().trim().min(4).max(200), body: z.string().trim().min(10).max(4000) });
+
+app.post("/api/community/forums/:forumId/threads", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const forum = await c.env.DB.prepare("SELECT id FROM community_forums WHERE id = ? AND status = 'open'").bind(c.req.param("forumId")).first<{ id: string }>();
+  if (!forum) return c.json({ error: "Forum not found or read-only" }, 404);
+  const payload = forumThreadSchema.parse(await c.req.json());
+  const id = crypto.randomUUID();
+  await c.env.DB.prepare("INSERT INTO forum_threads (id, forum_id, author_id, title, body) VALUES (?, ?, ?, ?, ?)").bind(id, forum.id, user.id, payload.title, payload.body).run();
+  return c.json({ id }, 201);
+});
+
+const forumPostSchema = z.object({ body: z.string().trim().min(1).max(2000) });
+
+app.post("/api/community/threads/:threadId/posts", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const thread = await c.env.DB.prepare("SELECT id, author_id, title FROM forum_threads WHERE id = ? AND status = 'open'").bind(c.req.param("threadId")).first<{ id: string; author_id: string; title: string }>();
+  if (!thread) return c.json({ error: "Thread not found or locked" }, 404);
+  const payload = forumPostSchema.parse(await c.req.json());
+  const id = crypto.randomUUID();
+  await c.env.DB.batch([
+    c.env.DB.prepare("INSERT INTO forum_posts (id, thread_id, author_id, body) VALUES (?, ?, ?, ?)").bind(id, thread.id, user.id, payload.body),
+    c.env.DB.prepare("UPDATE forum_threads SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(thread.id),
+  ]);
+  if (thread.author_id !== user.id) {
+    c.executionCtx.waitUntil(notify(c.env, user.organizationId, thread.author_id, { type: "forum_reply", title: "New reply", body: `Someone replied to "${thread.title}".`, resourceType: "forum_thread", resourceId: thread.id }));
+  }
+  return c.json({ id }, 201);
+});
+
+app.get("/api/community/threads/:threadId/posts", async (c) => {
+  const rows = await c.env.DB.prepare(`SELECT p.id, p.body, p.status, p.created_at, u.display_name AS author
+    FROM forum_posts p JOIN users u ON u.id = p.author_id WHERE p.thread_id = ? AND p.status = 'visible' ORDER BY p.created_at ASC LIMIT 200`).bind(c.req.param("threadId")).all<Record<string, unknown>>();
+  return c.json({ threadId: c.req.param("threadId"), results: rows.results.map((row) => ({ id: String(row.id), body: String(row.body), author: String(row.author), createdAt: String(row.created_at) })) });
+});
+
+app.post("/api/admin/community/posts/:postId/moderate", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Editor access required" }, 403);
+  const payload = z.object({ action: z.enum(["hide", "restore", "remove"]) }).parse(await c.req.json());
+  const status = payload.action === "hide" ? "hidden" : payload.action === "remove" ? "removed" : "visible";
+  await c.env.DB.prepare("UPDATE forum_posts SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(status, c.req.param("postId")).run();
+  return c.json({ ok: true, status });
+});
+
 const takedownSchema = z.object({
   assetId: z.string().min(1).max(120),
   reason: z.enum(["copyright", "consent", "cultural_harm", "privacy", "metadata", "other"]),
@@ -1744,6 +2354,8 @@ app.post("/api/rights/takedown", async (c) => {
   await c.env.DB.prepare("INSERT INTO rights_case_events (id, organization_id, case_id, actor_id, event_type, payload_json) VALUES (?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), user.organizationId, id, requesterId, "lodged", JSON.stringify({ reason: payload.reason })).run();
   await c.env.DB.prepare("INSERT INTO notifications (id, organization_id, user_id, type, title, body, resource_type, resource_id) SELECT lower(hex(randomblob(16))), ?, user_id, 'rights_case', 'New rights case', ?, 'takedown_request', ? FROM organization_memberships WHERE organization_id = ? AND role IN ('editor', 'admin') AND status = 'active'")
     .bind(user.organizationId, `A rights case was lodged for ${asset.title}.`, id, user.organizationId).run();
+  const moderators = await c.env.DB.prepare("SELECT u.email FROM organization_memberships om JOIN users u ON u.id = om.user_id WHERE om.organization_id = ? AND om.role IN ('editor', 'admin') AND om.status = 'active'").bind(user.organizationId).all<{ email: string }>();
+  c.executionCtx.waitUntil(Promise.all(moderators.results.map((moderator) => dispatchEmailBestEffort(c.env, moderator.email, "New rights case", `A rights case was lodged for ${asset.title}. Case ID: ${id}.`, `rights-case:${id}:${moderator.email}`))));
   const result: RightsCase = { id, assetId: asset.id, assetTitle: asset.title, reason: payload.reason as TakedownReason, summary: payload.summary, status, dueAt: "Within 5 working days", mediationRequested: payload.mediationRequested, createdAt: new Date().toISOString() };
   return c.json(result, 201);
 });
@@ -1771,7 +2383,140 @@ app.post("/api/rights/cases/:id/messages", async (c) => {
   const id = crypto.randomUUID();
   await c.env.DB.prepare("INSERT INTO mediation_messages (id, session_id, author_id, body, visibility) VALUES (?, ?, ?, ?, ?)").bind(id, session.id, authorId, payload.body, payload.visibility).run();
   await c.env.DB.prepare("INSERT INTO rights_case_events (id, organization_id, case_id, actor_id, event_type, payload_json) VALUES (?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), user.organizationId, caseId, user.id, "message_recorded", JSON.stringify({ visibility: payload.visibility })).run();
+  if (payload.visibility !== "facilitator_only") {
+    const otherParticipantId = user.id === session.requester_id ? session.owner_id : session.requester_id;
+    if (otherParticipantId && otherParticipantId !== user.id) {
+      c.executionCtx.waitUntil(notify(c.env, user.organizationId, otherParticipantId, { type: "mediation_message", title: "New mediation message", body: "A new message was posted in your rights case.", resourceType: "takedown_request", resourceId: caseId }));
+    }
+  }
   return c.json({ id, caseId, status: "message_recorded" }, 201);
+});
+
+app.get("/api/rights/cases/:id/messages", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const caseId = c.req.param("id");
+  const session = await c.env.DB.prepare("SELECT ms.id, t.requester_id, a.owner_id FROM mediation_sessions ms JOIN takedown_requests t ON t.id = ms.takedown_request_id JOIN assets a ON a.id = t.asset_id WHERE ms.takedown_request_id = ? AND t.organization_id = ?").bind(caseId, user.organizationId).first<{ id: string; requester_id: string; owner_id: string }>();
+  if (!session) return c.json({ error: "Mediation has not been requested for this case" }, 409);
+  const isModerator = ["editor", "admin"].includes(user.role);
+  const participant = user.id === session.requester_id || user.id === session.owner_id || isModerator;
+  if (!participant) return c.json({ error: "You are not a participant in this case" }, 403);
+  const visibilityClause = isModerator ? "1 = 1" : "m.visibility <> 'facilitator_only'";
+  const rows = await c.env.DB.prepare(`SELECT m.id, m.author_id, u.display_name AS author_name, m.body, m.visibility, m.created_at
+    FROM mediation_messages m JOIN users u ON u.id = m.author_id
+    WHERE m.session_id = ? AND ${visibilityClause} ORDER BY m.created_at ASC LIMIT 200`).bind(session.id).all<Record<string, unknown>>();
+  return c.json({ caseId, results: rows.results.map((row) => ({ id: String(row.id), authorId: String(row.author_id), authorName: String(row.author_name), body: String(row.body), visibility: row.visibility, createdAt: String(row.created_at) })) });
+});
+
+const savedSearchSchema = z.object({
+  label: z.string().trim().min(1).max(120),
+  query: z.string().trim().max(240).default(""),
+  kind: z.enum(["all", "image", "video"]).default("all"),
+  location: z.string().trim().max(80).optional(),
+  locationType: z.string().trim().max(40).optional(),
+  category: z.string().trim().max(40).optional(),
+  notifyOnNew: z.boolean().default(true),
+});
+
+app.get("/api/saved-searches", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const rows = await c.env.DB.prepare("SELECT * FROM saved_searches WHERE organization_id = ? AND user_id = ? ORDER BY created_at DESC LIMIT 50").bind(user.organizationId, user.id).all<Record<string, unknown>>();
+  return c.json({ results: rows.results.map((row) => ({ id: String(row.id), label: String(row.label), query: String(row.query), kind: row.kind, location: row.location, locationType: row.location_type, category: row.category, notifyOnNew: Boolean(row.notify_on_new), lastNotifiedAt: row.last_notified_at, createdAt: String(row.created_at) })) });
+});
+
+app.post("/api/saved-searches", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const payload = savedSearchSchema.parse(await c.req.json());
+  const id = crypto.randomUUID();
+  await c.env.DB.prepare("INSERT INTO saved_searches (id, organization_id, user_id, label, query, kind, location, location_type, category, notify_on_new) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .bind(id, user.organizationId, user.id, payload.label, payload.query, payload.kind, payload.location ?? null, payload.locationType ?? null, payload.category ?? null, payload.notifyOnNew ? 1 : 0).run();
+  return c.json({ id }, 201);
+});
+
+app.delete("/api/saved-searches/:id", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  await c.env.DB.prepare("DELETE FROM saved_searches WHERE id = ? AND organization_id = ? AND user_id = ?").bind(c.req.param("id"), user.organizationId, user.id).run();
+  return c.json({ ok: true });
+});
+
+app.get("/api/lightboxes", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const rows = await c.env.DB.prepare(`SELECT l.*, COUNT(la.asset_id) AS asset_count FROM buyer_lightboxes l
+    LEFT JOIN buyer_lightbox_assets la ON la.lightbox_id = l.id
+    WHERE l.organization_id = ? AND l.user_id = ? AND l.status = 'active' GROUP BY l.id ORDER BY l.updated_at DESC LIMIT 50`).bind(user.organizationId, user.id).all<Record<string, unknown>>();
+  return c.json({ results: rows.results.map((row) => ({ id: String(row.id), title: String(row.title), status: row.status, assetCount: Number(row.asset_count ?? 0), createdAt: String(row.created_at), updatedAt: String(row.updated_at) })) });
+});
+
+app.post("/api/lightboxes", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const payload = z.object({ title: z.string().trim().min(1).max(120) }).parse(await c.req.json());
+  const id = crypto.randomUUID();
+  await c.env.DB.prepare("INSERT INTO buyer_lightboxes (id, organization_id, user_id, title) VALUES (?, ?, ?, ?)").bind(id, user.organizationId, user.id, payload.title).run();
+  return c.json({ id }, 201);
+});
+
+app.get("/api/lightboxes/:id", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const lightbox = await c.env.DB.prepare("SELECT * FROM buyer_lightboxes WHERE id = ? AND organization_id = ? AND user_id = ?").bind(c.req.param("id"), user.organizationId, user.id).first<Record<string, unknown>>();
+  if (!lightbox) return c.json({ error: "Lightbox not found" }, 404);
+  const assets = await c.env.DB.prepare(`SELECT a.*, u.display_name AS contributor FROM buyer_lightbox_assets la
+    JOIN assets a ON a.id = la.asset_id JOIN users u ON u.id = a.owner_id WHERE la.lightbox_id = ? ORDER BY la.sort_order ASC`).bind(c.req.param("id")).all<Record<string, unknown>>();
+  return c.json({ id: String(lightbox.id), title: String(lightbox.title), status: lightbox.status, createdAt: String(lightbox.created_at), updatedAt: String(lightbox.updated_at), assets: assets.results.map((row) => assetRowToDomain(row, c.env)), assetCount: assets.results.length });
+});
+
+app.post("/api/lightboxes/:id/assets", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const payload = z.object({ assetId: z.string().min(1).max(120) }).parse(await c.req.json());
+  const lightbox = await c.env.DB.prepare("SELECT id FROM buyer_lightboxes WHERE id = ? AND organization_id = ? AND user_id = ?").bind(c.req.param("id"), user.organizationId, user.id).first<{ id: string }>();
+  if (!lightbox) return c.json({ error: "Lightbox not found" }, 404);
+  const asset = await c.env.DB.prepare("SELECT id FROM assets WHERE id = ? AND organization_id = ? AND status = 'published'").bind(payload.assetId, user.organizationId).first<{ id: string }>();
+  if (!asset) return c.json({ error: "Asset not found" }, 404);
+  await c.env.DB.prepare("INSERT INTO buyer_lightbox_assets (lightbox_id, asset_id) VALUES (?, ?) ON CONFLICT(lightbox_id, asset_id) DO NOTHING").bind(lightbox.id, asset.id).run();
+  await c.env.DB.prepare("UPDATE buyer_lightboxes SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(lightbox.id).run();
+  return c.json({ ok: true }, 201);
+});
+
+app.delete("/api/lightboxes/:id/assets/:assetId", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const lightbox = await c.env.DB.prepare("SELECT id FROM buyer_lightboxes WHERE id = ? AND organization_id = ? AND user_id = ?").bind(c.req.param("id"), user.organizationId, user.id).first<{ id: string }>();
+  if (!lightbox) return c.json({ error: "Lightbox not found" }, 404);
+  await c.env.DB.prepare("DELETE FROM buyer_lightbox_assets WHERE lightbox_id = ? AND asset_id = ?").bind(lightbox.id, c.req.param("assetId")).run();
+  return c.json({ ok: true });
+});
+
+const webhookSubscriptionSchema = z.object({ targetUrl: z.string().url().max(2048), events: z.array(z.string().trim().min(1).max(60)).min(1).max(20) });
+
+app.get("/api/webhooks/subscriptions", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["admin"])) return c.json({ error: "Admin access required" }, 403);
+  const rows = await c.env.DB.prepare("SELECT id, target_url, events, status, created_at FROM webhook_subscriptions WHERE organization_id = ? ORDER BY created_at DESC LIMIT 50").bind(user.organizationId).all<Record<string, unknown>>();
+  return c.json({ results: rows.results.map((row) => ({ id: String(row.id), targetUrl: String(row.target_url), events: JSON.parse(String(row.events ?? "[]")), status: row.status, createdAt: String(row.created_at) })) });
+});
+
+app.post("/api/webhooks/subscriptions", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["admin"])) return c.json({ error: "Admin access required" }, 403);
+  const payload = webhookSubscriptionSchema.parse(await c.req.json());
+  const id = crypto.randomUUID();
+  const secret = base64UrlToken();
+  await c.env.DB.prepare("INSERT INTO webhook_subscriptions (id, organization_id, created_by, target_url, secret, events) VALUES (?, ?, ?, ?, ?, ?)")
+    .bind(id, user.organizationId, user.id, payload.targetUrl, secret, JSON.stringify(payload.events)).run();
+  return c.json({ id, secret }, 201);
+});
+
+app.delete("/api/webhooks/subscriptions/:id", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["admin"])) return c.json({ error: "Admin access required" }, 403);
+  await c.env.DB.prepare("UPDATE webhook_subscriptions SET status = 'disabled' WHERE id = ? AND organization_id = ?").bind(c.req.param("id"), user.organizationId).run();
+  return c.json({ ok: true });
 });
 
 const uploadSchema = contractUploadRequestSchema;
@@ -1813,7 +2558,7 @@ app.post("/api/uploads", async (c) => {
     return c.json({ error: "Injected post-session failure", uploadId: id }, 503);
   }
 
-  const uploadUrl = chaos === "r2-signing-failure" ? null : await createPresignedPutUrl(c.env, objectKey);
+  const uploadUrl = chaos === "r2-signing-failure" ? null : await createPresignedR2Url(c.env, c.env.R2_BUCKET_NAME, objectKey, "PUT");
   if (chaos === "r2-signing-failure") {
     logChaos(c, trace, chaos, "presign");
     await c.env.DB.prepare("UPDATE upload_sessions SET status = 'failed', failure_reason = ? WHERE id = ?")
@@ -2055,6 +2800,28 @@ function isR2EventMessage(message: QueueMessage): message is R2EventMessage {
   return typeof candidate.action === "string" && typeof candidate.bucket === "string" && typeof candidate.object?.key === "string";
 }
 
+async function dispatchSavedSearchAlerts(env: Bindings): Promise<number> {
+  const searches = await env.DB.prepare("SELECT * FROM saved_searches WHERE notify_on_new = 1").all<Record<string, unknown>>();
+  let notified = 0;
+  for (const search of searches.results) {
+    const clauses = ["a.status = 'published'", "a.created_at > ?"];
+    const values: string[] = [String(search.last_seen_at)];
+    if (search.kind !== "all") { clauses.push("a.kind = ?"); values.push(String(search.kind)); }
+    if (search.location) { clauses.push("(a.country LIKE ? OR a.city LIKE ? OR a.province LIKE ? OR a.locality LIKE ? OR a.landmark LIKE ?)"); const location = `%${search.location}%`; values.push(location, location, location, location, location); }
+    if (search.location_type) { clauses.push("a.visual_location_type = ?"); values.push(String(search.location_type)); }
+    if (search.category) { clauses.push("a.primary_category = ?"); values.push(String(search.category)); }
+    if (search.query) { clauses.push("(a.title LIKE ? OR a.description LIKE ? OR a.subject_tags LIKE ?)"); const query = `%${search.query}%`; values.push(query, query, query); }
+    const matches = await env.DB.prepare(`SELECT COUNT(*) AS total FROM assets a WHERE ${clauses.join(" AND ")}`).bind(...values).first<{ total: number }>();
+    await env.DB.prepare("UPDATE saved_searches SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?").bind(search.id).run();
+    if (Number(matches?.total ?? 0) > 0) {
+      await notify(env, String(search.organization_id), String(search.user_id), { type: "saved_search_match", title: `New matches for "${String(search.label)}"`, body: `${matches?.total} new asset(s) match your saved search.`, resourceType: "saved_search", resourceId: String(search.id) });
+      await env.DB.prepare("UPDATE saved_searches SET last_notified_at = CURRENT_TIMESTAMP WHERE id = ?").bind(search.id).run();
+      notified += 1;
+    }
+  }
+  return notified;
+}
+
 const worker: ExportedHandler<Bindings, QueueMessage> = {
   fetch: app.fetch,
   async scheduled(_controller, env) {
@@ -2063,7 +2830,9 @@ const worker: ExportedHandler<Bindings, QueueMessage> = {
       await catchUpR2Replication(env, trace);
       const requeued = await retryQueuedPhotoJobs(photoPipeline(env));
       await runMaintenance(env);
+      const alerted = await dispatchSavedSearchAlerts(env);
       recordMetric(env, "photo_jobs_requeued", trace, requeued, ["cron"]);
+      recordMetric(env, "saved_search_alerts_sent", trace, alerted, ["cron"]);
     } catch (error) {
       logEvent("error", "r2.replication.failed", trace, {
         error: error instanceof Error ? error.message : "unknown-error",

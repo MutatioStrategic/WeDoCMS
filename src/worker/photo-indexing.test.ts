@@ -1,11 +1,22 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildPhotoSearchDocument,
   classifyVisionResult,
   mergeHybridSearchRows,
   parseVisionMetadata,
+  preparePhotoForVision,
   photoJobMatchesAsset,
+  enqueuePhotoJob,
+  replayPhotoJob,
+  type PhotoPipelineBindings,
 } from "./photo-indexing";
+
+function imageObject(size: number, bytes = new Uint8Array([1, 2, 3])): R2ObjectBody {
+  return {
+    size,
+    arrayBuffer: async () => bytes.buffer,
+  } as unknown as R2ObjectBody;
+}
 
 describe("photo AI indexing", () => {
   it("parses constrained vision JSON and removes unsafe identity guesses", () => {
@@ -45,6 +56,79 @@ describe("photo AI indexing", () => {
     expect(photoJobMatchesAsset({ assetRevision: 8, sourceEtag: "etag-new" }, asset)).toBe(true);
     expect(photoJobMatchesAsset({ assetRevision: 7, sourceEtag: "etag-new" }, asset)).toBe(false);
     expect(photoJobMatchesAsset({ assetRevision: 8, sourceEtag: "etag-old" }, asset)).toBe(false);
+  });
+
+  it("does not create a second enrichment job for the same upload revision", async () => {
+    const firstResults = [
+      { asset_revision: 3, source_etag: "etag-3" },
+      { id: "enrich-job-3" },
+    ];
+    const run = vi.fn();
+    const db = {
+      prepare: vi.fn(() => ({
+        bind: vi.fn(() => ({
+          first: vi.fn(async () => firstResults.shift()),
+          run,
+        })),
+      })),
+    };
+    const queue = { send: vi.fn() };
+    const jobId = await enqueuePhotoJob({ DB: db, PHOTO_ENRICHMENT_QUEUE: queue } as unknown as PhotoPipelineBindings, "asset-3", "enrich");
+    expect(jobId).toBe("enrich-job-3");
+    expect(queue.send).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("does not replay an upload-time enrichment job", async () => {
+    const db = {
+      prepare: vi.fn(() => ({
+        bind: vi.fn(() => ({
+          first: vi.fn(async () => ({ id: "enrich-job-1", asset_id: "asset-1", operation: "enrich", asset_revision: 1, source_etag: "etag-1" })),
+        })),
+      })),
+    };
+    const queue = { send: vi.fn() };
+    const replayed = await replayPhotoJob({ DB: db, PHOTO_ENRICHMENT_QUEUE: queue } as unknown as PhotoPipelineBindings, "enrich-job-1");
+    expect(replayed).toBeNull();
+    expect(queue.send).not.toHaveBeenCalled();
+  });
+
+  it("resizes oversized private R2 images before sending them to AI", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => new Response(new Uint8Array(256), { headers: { "content-type": "image/jpeg", "cf-resized": "width=1600" } }));
+    try {
+      const prepared = await preparePhotoForVision({
+        R2_ACCOUNT_ID: "account",
+        R2_ACCESS_KEY_ID: "access",
+        R2_SECRET_ACCESS_KEY: "secret",
+        R2_BUCKET_NAME: "media",
+      } as unknown as PhotoPipelineBindings, "originals/mountain.jpg", "job-1", imageObject(22_500_000), "image/jpeg");
+      expect(prepared.transformed).toBe(true);
+      expect(prepared.contentType).toBe("image/jpeg");
+      expect(prepared.bytes?.byteLength).toBe(256);
+      expect(prepared.aiInput).toBeNull();
+      expect(globalThis.fetch).toHaveBeenCalledWith(expect.stringContaining("X-Amz-Algorithm"), expect.objectContaining({ cf: expect.objectContaining({ image: expect.objectContaining({ width: 1600, fit: "scale-down" }) }) }));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("reports missing private R2 signing instead of silently dropping an oversized image", async () => {
+    await expect(preparePhotoForVision({} as PhotoPipelineBindings, "originals/mountain.jpg", "job-1", imageObject(22_500_000), "image/jpeg"))
+      .rejects.toThrow("private R2 GET signing and the AI source origin are not configured");
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => new Response(new Uint8Array(256), { headers: { "content-type": "image/jpeg" } }));
+    try {
+      const prepared = await preparePhotoForVision({
+        PHOTO_AI_SOURCE_ORIGIN: "https://archive.example",
+      } as PhotoPipelineBindings, "originals/mountain.jpg", "job-1", imageObject(22_500_000), "image/jpeg");
+      expect(prepared.aiInput).toBeNull();
+      expect(prepared.bytes?.byteLength).toBe(256);
+      expect(globalThis.fetch).toHaveBeenCalledWith("https://archive.example/internal/photo-ai-source/job-1", expect.objectContaining({ headers: { "x-photo-ai-job": "job-1" }, cf: expect.objectContaining({ image: expect.objectContaining({ width: 1600, fit: "scale-down" }) }) }));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("hybrid-ranks exact structured matches alongside semantic candidates", () => {

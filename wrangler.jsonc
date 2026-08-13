@@ -13,6 +13,9 @@
     "binding": "ASSETS",
     "not_found_handling": "single-page-application"
   },
+  "send_email": [
+    { "name": "EMAIL" }
+  ],
   "d1_databases": [
     {
       "binding": "DB",
@@ -59,6 +62,9 @@
       "dataset": "veld_archive_observability"
     }
   ],
+  "ai": {
+    "binding": "AI"
+  },
   "vectorize": [
     {
       "binding": "PHOTO_INDEX",
@@ -93,14 +99,17 @@
   },
   "vars": {
     "APP_ENV": "development",
-    "ALLOWED_ORIGINS": "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8787,http://127.0.0.1:8787",
-    "TURNSTILE_HOSTNAMES": "localhost,127.0.0.1",
+    "DEMO_AUTH_ENABLED": "true",
+    "ALLOWED_ORIGINS": "https://veld-archive-api.blewisorlando.workers.dev,https://veld-archive.pages.dev,https://093ef645.veld-archive.pages.dev",
+    "TURNSTILE_HOSTNAMES": "veld-archive-api.blewisorlando.workers.dev,veld-archive.pages.dev,093ef645.veld-archive.pages.dev",
     "DEFAULT_ORGANIZATION_ID": "org-demo",
     "RATE_LIMIT_WINDOW_SECONDS": "60",
     "RATE_LIMIT_DEFAULT_PER_WINDOW": "120",
     "UPLOAD_DAILY_QUOTA_BYTES": "50000000000",
     "ORG_STORAGE_QUOTA_BYTES": "500000000000",
     "MEDIA_SCANNER_URL": "",
+    "STREAM_CUSTOMER_CODE": "",
+    "STREAM_PUBLIC_PLAYBACK_ENABLED": "false",
     "R2_BUCKET_NAME": "veld-archive-media",
     "R2_DR_BUCKET_NAME": "veld-archive-media-dr",
     "BACKUP_BUCKET_NAME": "veld-archive-backups-dr",
@@ -115,6 +124,7 @@
     "PHOTO_VISION_MODEL": "@cf/moondream/moondream3.1-9B-A2B",
     "PHOTO_EMBEDDING_MODEL": "@cf/baai/bge-base-en-v1.5",
     "PHOTO_INDEX_NAMESPACE": "published-photos-v1",
+    "PHOTO_AI_SOURCE_ORIGIN": "https://veld-archive-api.blewisorlando.workers.dev",
     "PAYOUT_MIN_CENTS": "10000"
   }
 }

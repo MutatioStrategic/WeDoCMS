@@ -3,6 +3,7 @@ import { AemAssetsAdapter, BynderAdapter, DamProviderRegistry } from "./integrat
 import { IntegrationError } from "./integrations/http";
 import { IntegrationContainer } from "./integrations";
 import { MobileMoneyPayoutAdapter, PayoutProviderRegistry, StripeConnectPayoutAdapter } from "./integrations/payouts";
+import { CloudflareEmailAdapter } from "./integrations/email";
 
 const jsonResponse = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
@@ -68,5 +69,12 @@ describe("provider abstraction layer", () => {
   it("requires explicit provider registration", () => {
     expect(() => new PayoutProviderRegistry().get("sepa")).toThrow("No payout provider registered for sepa");
     expect(new IntegrationError("test", "oops", { status: 429, retryable: true }).retryable).toBe(true);
+  });
+
+  it("sends transactional notifications through the native Cloudflare binding", async () => {
+    const send = vi.fn().mockResolvedValue({ messageId: "cf-message-1" });
+    const adapter = new CloudflareEmailAdapter({ send } as unknown as SendEmail, { email: "notifications@example.com", name: "Veld Archive" });
+    await expect(adapter.send({ to: "buyer@example.com", subject: "Asset approved", text: "Your asset is approved.", idempotencyKey: "notify-1" })).resolves.toEqual({ id: "cf-message-1", provider: "cloudflare_email_service", accepted: true });
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ from: { email: "notifications@example.com", name: "Veld Archive" }, to: "buyer@example.com", subject: "Asset approved", text: "Your asset is approved." }));
   });
 });

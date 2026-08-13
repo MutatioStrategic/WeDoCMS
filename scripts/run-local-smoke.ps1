@@ -3,7 +3,7 @@ $smokePort = if ($env:SMOKE_PORT) { $env:SMOKE_PORT } else { "8788" }
 $logPath = Join-Path (Get-Location) "worker-smoke.log"
 $errPath = Join-Path (Get-Location) "worker-smoke.err.log"
 $smokeSecret = "ci-session-secret-that-is-long-enough-for-tests"
-$workerCommand = "npx.cmd wrangler dev --local --port $smokePort --var SESSION_SECRET:$smokeSecret --var PAYMENT_WEBHOOK_SECRET:ci-payment-webhook-secret-that-is-long-enough --var STREAM_WEBHOOK_SECRET:ci-stream-webhook-secret-that-is-long-enough"
+$workerCommand = "npx.cmd wrangler dev --local --port $smokePort --var APP_ENV:development --var DEMO_AUTH_ENABLED:true --var ALLOWED_ORIGINS:http://127.0.0.1:$smokePort,http://localhost:$smokePort --var TURNSTILE_HOSTNAMES:127.0.0.1,localhost --var SESSION_SECRET:$smokeSecret --var PAYMENT_WEBHOOK_SECRET:ci-payment-webhook-secret-that-is-long-enough --var STREAM_WEBHOOK_SECRET:ci-stream-webhook-secret-that-is-long-enough"
 $worker = Start-Process -FilePath "cmd.exe" -ArgumentList "/d", "/c", $workerCommand -WorkingDirectory (Get-Location) -WindowStyle Hidden -RedirectStandardOutput $logPath -RedirectStandardError $errPath -PassThru
 function Stop-Tree([int]$processId) {
   $children = Get-CimInstance Win32_Process -Filter "ParentProcessId = $processId"

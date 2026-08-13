@@ -82,6 +82,9 @@ export type Asset = {
   sourceUrl?: string | null;
   sourceLicense?: string | null;
   sourceAttribution?: string | null;
+  previewUrl?: string | null;
+  streamUid?: string | null;
+  streamEmbedUrl?: string | null;
   releases?: ContributorRelease[];
   monetizationModel?: MonetizationModel;
   licensePriceCents?: number | null;
@@ -99,7 +102,8 @@ export type ModerationQueueResponse = {
   counts: { needsReview: number; needsContext: number; total: number };
 };
 
-const STOP_WORDS = new Set(["the", "and", "for", "with", "from", "that", "this", "real", "verified", "after"]);
+const STOP_WORDS = new Set(["the", "and", "for", "with", "from", "that", "this", "real", "verified", "after", "before", "image", "photo", "photos", "media"]);
+const BROAD_VISUAL_TERMS = new Set(["landscape", "mountain", "mountains", "golden", "hour", "light", "scene", "story", "visual", "footage", "record", "records"]);
 
 function tokens(value: string): string[] {
   return value.toLowerCase().split(/[^a-z0-9]+/).filter((token) => token.length > 2 && !STOP_WORDS.has(token));
@@ -216,6 +220,65 @@ export function buildMatchExplanation(asset: Asset, query = ""): MatchExplanatio
 
 export function withMatchExplanation(asset: Asset, query = ""): Asset {
   return { ...asset, matchExplanation: buildMatchExplanation(asset, query) };
+}
+
+function assetSearchText(asset: Asset): Array<[string, number]> {
+  return [
+    [asset.title, 3.2],
+    [asset.landmark ?? "", 3],
+    [[asset.city, asset.locality, asset.province, asset.country].filter(Boolean).join(" "), 2.7],
+    [asset.subjectTags.join(" "), 2.6],
+    [asset.culturalTags.join(" "), 2.5],
+    [asset.aiTags.join(" "), 2.1],
+    [asset.caption, 1.9],
+    [asset.description, 1.7],
+    [[asset.visualLocationType?.replaceAll("_", " "), asset.primaryCategory?.replaceAll("_", " "), ...(asset.sceneAttributes ?? [])].filter(Boolean).join(" "), 1.6],
+  ];
+}
+
+export function searchRelevanceScore(asset: Asset, query = ""): { score: number; hits: number; phraseMatched: boolean; matchedTokens: string[] } {
+  const queryTokens = tokens(query);
+  if (!queryTokens.length) return { score: 1, hits: 0, phraseMatched: false, matchedTokens: [] };
+  const fields = assetSearchText(asset);
+  const fullText = fields.map(([value]) => value).join(" ").toLowerCase();
+  const phrase = query.trim().toLowerCase();
+  const phraseMatched = phrase.length > 3 && fullText.includes(phrase);
+  let weightedHits = 0;
+  let hits = 0;
+  const matchedTokens: string[] = [];
+  for (const token of queryTokens) {
+    let strongest = 0;
+    for (const [value, weight] of fields) if (value.toLowerCase().includes(token)) strongest = Math.max(strongest, weight);
+    if (strongest > 0) {
+      hits += 1;
+      matchedTokens.push(token);
+    }
+    weightedHits += strongest;
+  }
+  const score = Math.min(1, weightedHits / (queryTokens.length * 3.2) + (phraseMatched ? 0.18 : 0));
+  return { score, hits, phraseMatched, matchedTokens };
+}
+
+export function isRelevantSearchResult(asset: Asset, query = ""): boolean {
+  const queryTokens = tokens(query);
+  if (!queryTokens.length) return true;
+  const relevance = searchRelevanceScore(asset, query);
+  if (relevance.phraseMatched) return true;
+  const distinctiveTokens = queryTokens.filter((token) => !BROAD_VISUAL_TERMS.has(token));
+  if (distinctiveTokens.length > 0 && !distinctiveTokens.some((token) => relevance.matchedTokens.includes(token))) return false;
+  if (queryTokens.length === 1) return relevance.hits >= 1;
+  if (queryTokens.length <= 3) return relevance.hits >= 2 || relevance.score >= 0.52;
+  return relevance.hits >= 2 && relevance.score >= 0.24;
+}
+
+export function rankSearchAssets(assets: Asset[], query = ""): Asset[] {
+  return assets
+    .filter((asset) => isRelevantSearchResult(asset, query))
+    .sort((left, right) => {
+      const leftScore = searchRelevanceScore(left, query).score + (left.humanVerified ? 0.03 : 0);
+      const rightScore = searchRelevanceScore(right, query).score + (right.humanVerified ? 0.03 : 0);
+      return rightScore - leftScore;
+    });
 }
 
 export function confidenceLabel(value: number): "high" | "medium" | "low" {
@@ -338,6 +401,99 @@ export type RightsCase = {
   createdAt: string;
 };
 
+export type MediationMessage = {
+  id: string;
+  authorId: string;
+  authorName: string;
+  body: string;
+  visibility: "participants" | "facilitator_only" | "case_record";
+  createdAt: string;
+};
+
+export type NotificationItem = {
+  id: string;
+  type: string;
+  title: string;
+  body: string;
+  resourceType: string | null;
+  resourceId: string | null;
+  readAt: string | null;
+  createdAt: string;
+};
+
+export type SavedSearch = {
+  id: string;
+  label: string;
+  query: string;
+  kind: "all" | "image" | "video";
+  location: string | null;
+  locationType: string | null;
+  category: string | null;
+  notifyOnNew: boolean;
+  lastNotifiedAt: string | null;
+  createdAt: string;
+};
+
+export type BuyerLightbox = {
+  id: string;
+  title: string;
+  status: "active" | "archived";
+  assetCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type BuyerLightboxDetail = BuyerLightbox & { assets: Asset[] };
+
+export type WebhookSubscription = {
+  id: string;
+  targetUrl: string;
+  events: string[];
+  status: "active" | "disabled";
+  createdAt: string;
+};
+
+export type AssetVersionEvent = {
+  id: string;
+  assetRevision: number | null;
+  eventType: string;
+  actorName: string;
+  createdAt: string;
+  summary: string;
+};
+
+export type PayoutBatchSummary = {
+  id: string;
+  periodStart: string;
+  periodEnd: string;
+  currency: string;
+  totalCents: number;
+  status: string;
+  itemCount: number;
+  createdAt: string;
+};
+
+export type PayoutBatchItem = {
+  id: string;
+  contributorName: string;
+  amountCents: number;
+  currency: string;
+  status: string;
+  failureReason: string | null;
+};
+
+export type PhotoJobSummary = {
+  id: string;
+  assetId: string;
+  title: string;
+  operation: string;
+  status: string;
+  attempts: number;
+  errorClass: string | null;
+  lastError: string | null;
+  updatedAt: string;
+};
+
 const RELEASE_REQUIRED: Record<LicenceType, { model: boolean; property: boolean }> = {
   editorial: { model: false, property: false },
   commercial: { model: true, property: true },
@@ -409,6 +565,10 @@ export class ArchiveDomain {
 
   rankHybridSearchRows(semanticRows: Record<string, unknown>[], keywordRows: Record<string, unknown>[], query: string, semanticScores: Map<string, number>): Record<string, unknown>[] {
     return rankHybridSearchRows(semanticRows, keywordRows, query, semanticScores);
+  }
+
+  rankSearchAssets(assets: Asset[], query = ""): Asset[] {
+    return rankSearchAssets(assets, query);
   }
 
   canApproveMetadataRevision(asset: { assetRevision?: number; reviewedRevision?: number | null; metadataReviewStatus?: MetadataReviewStatus }): boolean {

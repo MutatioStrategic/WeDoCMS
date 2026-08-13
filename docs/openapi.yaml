@@ -146,10 +146,146 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/notifications/{id}/read:
+    post:
+      operationId: markNotificationRead
+      summary: Mark one notification as read
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, minLength: 1 }
+      responses:
+        '200':
+          description: Notification marked read
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties: { ok: { type: boolean, enum: [true] } }
+                additionalProperties: false
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/admin/payout-batches:
+    get:
+      operationId: listPayoutBatches
+      summary: List payout batches awaiting review or processing
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Payout batches
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/PayoutBatchSummary' } }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    post:
+      operationId: createPayoutBatch
+      summary: Create a payout batch draft for admin approval
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PayoutBatchRequest' }
+      responses:
+        '201':
+          description: Draft created; no provider payout has started
+          headers:
+            Location:
+              description: Relative URL of the draft payout batch
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PayoutBatchCreateResponse' }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/admin/payout-batches/{id}:
+    get:
+      operationId: getPayoutBatch
+      summary: Inspect payout contributors and batch status
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, minLength: 1 }
+      responses:
+        '200':
+          description: Payout batch detail
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PayoutBatchDetail' }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: Payout batch not found in this organisation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/admin/payout-batches/{id}/decision:
+    post:
+      operationId: decidePayoutBatch
+      summary: Approve or reject a payout batch before provider processing
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, minLength: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PayoutBatchDecisionRequest' }
+      responses:
+        '200':
+          description: Draft rejected or idempotent decision confirmed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PayoutBatchDecisionResponse' }
+        '202':
+          description: Draft approved and provider processing queued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PayoutBatchDecisionResponse' }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: Batch is no longer a draft
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
   /api/governance/assets/{id}/action:
     post:
       operationId: runGovernanceAction
-      summary: Run tagging, correct metadata, approve, or reject an asset
+      summary: Correct metadata, approve, or reject an asset; upload completion runs AI once
       security:
         - sessionCookie: []
       parameters:
@@ -175,6 +311,11 @@ paths:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
         '422':
           description: Governance rule failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: AI enrichment is upload-only and cannot be requested from governance
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
@@ -205,6 +346,33 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/admin/approval-ledger:
+    get:
+      operationId: listAdminApprovalLedger
+      summary: List tenant-scoped user-account and image approval sign-offs
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: category
+          in: query
+          schema: { type: string, enum: [all, user_account, image], default: all }
+        - name: source
+          in: query
+          schema: { type: string, enum: [all, signed_audit, workflow_event], default: all }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500, default: 200 }
+      responses:
+        '200':
+          description: Approval ledger rows with integrity state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalLedgerResponse' }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
   /api/admin/photo-jobs/{jobId}/provenance:
     get:
       operationId: getPhotoJobProvenance
@@ -231,7 +399,7 @@ paths:
   /api/admin/photo-jobs/{jobId}/replay:
     post:
       operationId: replayPhotoJob
-      summary: Replay a failed, dead-lettered, validation, or stale photo job
+      summary: Replay a failed index-sync job; upload-time AI enrichment is never replayed
       security:
         - sessionCookie: []
       parameters:
@@ -254,6 +422,11 @@ paths:
                 additionalProperties: false
         '404':
           description: Replayable job not found in this tenant
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: AI enrichment is upload-only or the job is not replayable
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
@@ -453,6 +626,58 @@ components:
                     - { type: integer }
               code: { type: string }
       additionalProperties: true
+    ApprovalLedgerResponse:
+      type: object
+      required: [organization, filters, summary, results]
+      properties:
+        organization:
+          type: object
+          required: [id, name]
+          properties:
+            id: { type: string }
+            name: { type: string }
+          additionalProperties: false
+        filters:
+          type: object
+          required: [category, source, limit]
+          properties:
+            category: { type: string, enum: [all, user_account, image] }
+            source: { type: string, enum: [all, signed_audit, workflow_event] }
+            limit: { type: integer, minimum: 1, maximum: 500 }
+          additionalProperties: false
+        summary:
+          type: object
+          required: [total, userAccount, image, signedAudit, legacyWorkflow, verifiedIntegrity, failedIntegrity]
+          properties:
+            total: { type: integer, minimum: 0 }
+            userAccount: { type: integer, minimum: 0 }
+            image: { type: integer, minimum: 0 }
+            signedAudit: { type: integer, minimum: 0 }
+            legacyWorkflow: { type: integer, minimum: 0 }
+            verifiedIntegrity: { type: integer, minimum: 0 }
+            failedIntegrity: { type: integer, minimum: 0 }
+          additionalProperties: false
+        results:
+          type: array
+          items:
+            type: object
+            required: [id, category, source, occurredAt, action, decision, actor, subject, resource, streamId, sequence, notes, integrity]
+            properties:
+              id: { type: string }
+              category: { type: string, enum: [user_account, image] }
+              source: { type: string, enum: [signed_audit, workflow_event] }
+              occurredAt: { type: string }
+              action: { type: string }
+              decision: { type: string }
+              actor: { type: object, additionalProperties: true }
+              subject: { type: object, additionalProperties: true }
+              resource: { type: object, additionalProperties: true }
+              streamId: { type: string, nullable: true }
+              sequence: { type: integer, nullable: true }
+              notes: { type: string, nullable: true }
+              integrity: { type: object, additionalProperties: true }
+            additionalProperties: false
+      additionalProperties: false
     HealthResponse:
       type: object
       required: [ok, service, environment]
@@ -626,6 +851,72 @@ components:
         stage: { type: string, enum: [ai_tagging, curator_correction, approval] }
         status: { type: string, enum: [needs_review, published, rejected] }
         indexing: { type: string }
+      additionalProperties: false
+    PayoutBatchRequest:
+      type: object
+      required: [periodStart, periodEnd]
+      properties:
+        periodStart: { type: string, format: date }
+        periodEnd: { type: string, format: date }
+        currency: { type: string, minLength: 3, maxLength: 3, default: ZAR }
+      additionalProperties: false
+    PayoutBatchSummary:
+      type: object
+      required: [id, periodStart, periodEnd, currency, totalCents, status, itemCount, createdAt]
+      properties:
+        id: { type: string }
+        periodStart: { type: string, format: date }
+        periodEnd: { type: string, format: date }
+        currency: { type: string }
+        totalCents: { type: integer, minimum: 0 }
+        status: { type: string, enum: [draft, processing, paid, failed, cancelled] }
+        itemCount: { type: integer, minimum: 0 }
+        createdAt: { type: string }
+      additionalProperties: false
+    PayoutBatchCreateResponse:
+      type: object
+      required: [batchId, itemCount, totalCents, status, next]
+      properties:
+        batchId: { type: string }
+        itemCount: { type: integer, minimum: 0 }
+        totalCents: { type: integer, minimum: 0 }
+        status: { type: string, enum: [draft] }
+        next: { type: string, enum: [admin_approval_required] }
+      additionalProperties: false
+    PayoutBatchItem:
+      type: object
+      required: [id, contributorName, amountCents, currency, status]
+      properties:
+        id: { type: string }
+        contributorName: { type: string }
+        amountCents: { type: integer, minimum: 1 }
+        currency: { type: string }
+        status: { type: string, enum: [pending, processing, paid, failed] }
+        failureReason: { type: string, nullable: true }
+      additionalProperties: false
+    PayoutBatchDetail:
+      allOf:
+        - $ref: '#/components/schemas/PayoutBatchSummary'
+        - type: object
+          required: [items]
+          properties:
+            items: { type: array, items: { $ref: '#/components/schemas/PayoutBatchItem' } }
+          additionalProperties: false
+    PayoutBatchDecisionRequest:
+      type: object
+      required: [decision]
+      properties:
+        decision: { type: string, enum: [approve, reject] }
+        notes: { type: string, maxLength: 1000 }
+      additionalProperties: false
+    PayoutBatchDecisionResponse:
+      type: object
+      required: [batchId, status, idempotent]
+      properties:
+        batchId: { type: string }
+        status: { type: string, enum: [processing, cancelled] }
+        decision: { type: string, enum: [approve, reject] }
+        idempotent: { type: boolean }
       additionalProperties: false
     UploadRequest:
       type: object

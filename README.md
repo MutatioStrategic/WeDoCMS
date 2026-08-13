@@ -24,13 +24,17 @@ Veld Archive is a Cloudflare-native foundation for a trusted South African photo
 - Optional verification-document OCR using Cloudflare Workers AI's `@cf/moondream/moondream3.1-9B-A2B`; OCR output is assistive, masks full identity/bank numbers, and always requires human/KYC-provider review.
 - Photo AI pipeline: scanned image upload → revision-pinned Workers AI description, visible-location type, category, attributes, and visible-text extraction → seller/editor correction → approval of that exact revision → D1 FTS5 + Vectorize indexing. The model never asserts country, province, city, locality, or landmark from pixels; those fields require seller metadata, EXIF, or editor evidence.
 - Hybrid buyer retrieval combines D1 FTS5 lexical/structured matches with semantic Vectorize matches and human-verification weighting. Buyer searches query approved stored metadata and vectors; they never OCR-scan the repository.
-- Revision/ETag-aware `photo_ai_jobs` records, retryable/permanent/validation/stale failure classes, scheduled recovery, D1 dead-letter state, revision-specific vector IDs, rejection/withdrawal deletion, provenance history, admin replay (`POST /api/admin/photo-jobs/:jobId/replay`), and re-indexing (`POST /api/admin/photo-index/rebuild`).
+- Revision/ETag-aware `photo_ai_jobs` records, retryable/permanent/validation/stale failure classes, scheduled recovery, D1 dead-letter state, revision-specific vector IDs, rejection/withdrawal deletion, provenance history, upload-time-only AI enrichment (later metadata edits are manual), admin replay for index jobs (`POST /api/admin/photo-jobs/:jobId/replay`), and re-indexing (`POST /api/admin/photo-index/rebuild`).
 
 The visual cards are intentionally placeholder previews. They do not claim to be real photographs and should be replaced by uploaded, licensed media before production launch.
 
 ## Local South African media fixtures
 
 Run `npm run seed:demo-media` to download six real South African image/video files from Wikimedia Commons and Pixabay, apply migrations `0011_demo_media_seed.sql` and `0012_demo_media_video_source_fix.sql`, place the files in local R2, and verify the D1 records. The seed is local-only and does not write to a remote Cloudflare account. Source pages, direct download URLs, licences, and creator attribution are persisted on each seeded asset. Two people-containing images intentionally remain in `needs_review` and `editorial_only` so the governance flow can be tested.
+
+Run `npm run seed:test-library` after that to add exactly 100 local-only synthetic photo records to D1 and the FTS search index. The records cover cat, mountain, coast, market, road, architecture, food, wildlife, sport, and craft prompts. They intentionally have no media preview because the metadata is synthetic and must not be presented with unrelated visual evidence; the records are explicitly marked as non-licensable test fixtures. The command verifies that `cat` returns matches and `xyz` returns zero results, which exercises both the prompt search and empty state.
+
+The remote equivalent is deliberately explicit: `npm run seed:test-library:remote`. It uploads the existing demo media fixtures to the configured Cloudflare R2 bucket and inserts the 100 test records into remote D1/FTS. Review the target account and database before using it; the records remain marked as local test fixtures and should not be used for licensing.
 
 ## Local development
 
@@ -44,6 +48,38 @@ The frontend runs on Vite. To run the Worker API locally after installing Wrangl
 ```powershell
 npm run worker:dev
 ```
+
+### Deployment topology and live smoke test
+
+The frontend and `/api/*` routes are served by the Worker configured in
+`wrangler.jsonc`. The Pages project is kept as a compatibility entry point and
+redirects to that Worker via `public/_redirects`; it must not be treated as a
+second application runtime. Deploying `dist` as a standalone Cloudflare Pages
+project without that redirect breaks the application because Pages' SPA
+fallback returns `index.html` for API requests.
+
+Deploy the Worker and its Assets binding with:
+
+```powershell
+npm run build
+npm run worker:deploy
+npm run test:live -- https://your-worker-host.example
+```
+
+Then publish the compatibility redirect:
+
+```powershell
+npm run pages:prepare-redirect
+npx wrangler pages deploy ./dist --project-name veld-archive
+```
+
+Do not keep `_redirects` in `public/` before a Worker deploy. Vite copies
+`public/` into `dist`, and Worker Assets will honor `_redirects`, causing the
+Worker origin to redirect back to itself.
+
+If a Pages hostname must remain public, route `/api/*` to this Worker (or
+move the API into Pages Functions) before pointing the frontend at it. A live
+check that returns `text/html` for `/api/health` is not a working deployment.
 
 Consumer and provider contract stubs are documented in [API contract testing](docs/api-contract-testing.md). Run `npm run test:contracts:openapi` and `npm run test:contracts:consumer` without a Worker; run `npm run test:contracts:provider` against a local or configured Worker.
 
@@ -62,6 +98,8 @@ wrangler d1 migrations apply veld-archive --remote
 The curator workspace is available through **Governance** in the top navigation. The API surface is `GET /api/governance/assets`, `POST /api/governance/assets/:id/action`, `POST /api/checkout/validate`, and `POST /api/checkout`.
 
 Community and rights-resolution endpoints are `GET /api/community/overview`, `POST /api/rights/takedown`, `GET /api/rights/cases`, and `POST /api/rights/cases/:id/messages`. Migration `0003_community_resolution.sql` creates the forums, showcases, featured collections, takedown cases, mediation sessions, and mediation messages.
+
+Transactional notifications are persisted in D1 and delivered through the native Cloudflare Email Service `EMAIL` binding when `EMAIL_FROM` is configured. See [transactional email setup](docs/email-service.md) for domain onboarding and secret configuration.
 
 The CI workflow runs typecheck, tests, production build, and a Playwright + axe-core WCAG 2.2 AA scan against the archive landing page and resolution workspace:
 
@@ -88,7 +126,7 @@ Apply subsequent migrations in order as well; `0004_explainability_safety.sql` a
 11. Configure the KYC provider to POST only signed, metadata-only decisions to `/api/webhooks/kyc`; never send raw identity documents through the audit endpoint. The webhook uses HMAC-SHA256 in `x-kyc-signature`.
 12. Create the photo Vectorize index with the same embedding preset used by the Worker: `wrangler vectorize create veld-archive-photo-index --preset @cf/baai/bge-base-en-v1.5`. The committed config already binds it as `PHOTO_INDEX`.
 13. Create the queues before deployment: `wrangler queues create veld-archive-photo-enrichment` and `wrangler queues create veld-archive-photo-enrichment-dlq`. The committed config binds the producer and consumer.
-14. The committed config includes the Workers AI binding. Run `npx wrangler types` after any binding change. `PHOTO_VISION_MODEL` controls visual metadata/OCR and `PHOTO_EMBEDDING_MODEL` must remain dimension-compatible with the Vectorize index; missing AI is treated as a retryable job failure, while the approved D1 FTS5 document remains available for keyword retrieval.
+14. The committed config includes the Workers AI binding. Run `npx wrangler types` after any binding change. `PHOTO_VISION_MODEL` controls visual metadata/OCR and `PHOTO_EMBEDDING_MODEL` must remain dimension-compatible with the Vectorize index; missing AI is treated as a retryable job failure, while the approved D1 FTS5 document remains available for keyword retrieval. `PHOTO_AI_SOURCE_ORIGIN` must point to this Worker origin with Cloudflare Image Transformations enabled: oversized private images are resized through the job-scoped internal source route before AI inference, while originals remain unchanged.
 15. Keep verification-document OCR disabled until intentionally enabled. Set `OCR_ENABLED=true` only for the intended environment. The admin-only endpoint is `POST /api/verification/documents/:documentId/ocr`; it verifies the registered SHA-256 before inference and never changes the KYC case decision.
 16. Apply `0006_photo_ai_search.sql` and `0013_photo_enrichment_orchestration.sql`, then run `npm run build` before `npm run worker:deploy`. During rollout, drain or replay pre-0013 photo messages because new queue envelopes include `assetRevision` and `sourceEtag`.
 
@@ -96,6 +134,7 @@ Apply subsequent migrations in order as well; `0004_explainability_safety.sql` a
 
 - `POST /api/audit/events` appends an event. Send `x-user-id`, `x-user-role`, and `x-residency-region`; event data is redacted for common identity fields before signing.
 - `GET /api/audit/events/:streamId?residencyRegion=za` returns events with hash/signature verification results.
+- `GET /api/admin/approval-ledger` gives admins a visual-ledger feed of user-account and image approval/sign-off events, combining signed audit records with clearly marked legacy workflow records.
 - `POST /api/audit/exports` creates a signed JSON legal export for an admin/service identity; `GET /api/audit/exports/:id` downloads it from the matching residency bucket.
 - `POST /api/verification/cases` starts a contributor verification case; documents are represented by hashes and provider references, not copied into the audit trail.
 

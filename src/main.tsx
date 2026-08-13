@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { archiveDomain, type Asset, type BuyerAnalytics, type CommunityOverview, type ContributorAnalytics, type LicenceType, type MonetizationModel, type SearchResponse, type TakedownReason, type WorkflowStage } from "./shared";
+import { archiveDomain, type Asset, type AssetVersionEvent, type BuyerAnalytics, type BuyerLightbox, type CommunityOverview, type ContributorAnalytics, type LicenceType, type MonetizationModel, type NotificationItem, type PayoutBatchItem, type PayoutBatchSummary, type PhotoJobSummary, type SavedSearch, type SearchResponse, type TakedownReason, type WebhookSubscription, type WorkflowStage } from "./shared";
+import { testPhotoLibrary } from "./test-library";
 import "./styles.css";
 import { CommunityWorkspace } from "./community";
 
@@ -21,46 +22,161 @@ function TurnstileChallenge({ onToken }: { onToken: (token: string) => void }) {
   return <div ref={ref} aria-label="Bot protection challenge" />;
 }
 
-type View = "explore" | "contributor" | "buyer" | "review" | "governance" | "community";
+type View = "explore" | "search" | "dashboard" | "contributor" | "buyer" | "review" | "governance" | "ledger" | "community";
 type SessionUser = { id: string; email: string; displayName: string; role: string; organizationId: string; organizationName: string };
+type ApprovalLedgerEntry = {
+  id: string;
+  category: "user_account" | "image";
+  source: "signed_audit" | "workflow_event";
+  occurredAt: string;
+  action: string;
+  decision: string;
+  actor: { id: string; name: string; role: string };
+  subject: { id: string; name: string; type: string };
+  resource: { type: string; id: string; title: string };
+  streamId: string | null;
+  sequence: number | null;
+  notes: string | null;
+  integrity: { status: "verified" | "failed" | "legacy"; hashValid: boolean | null; signatureValid: boolean | null; hash: string | null; r2Key: string | null };
+};
+
+function isJsonResponse(response: Response): boolean {
+  return response.headers.get("content-type")?.toLowerCase().includes("application/json") ?? false;
+}
+
+async function readJson<T>(response: Response, message: string): Promise<T> {
+  if (!response.ok || !isJsonResponse(response)) throw new Error(message);
+  return response.json() as Promise<T>;
+}
 
 const demoAssets: Asset[] = [
   { id: "asset-braai-cape-flats", kind: "image", status: "published", title: "Saturday braai, Cape Flats", description: "A human-verified South African braai in an everyday Cape Flats setting.", caption: "Friends gather around a wood-fire braai in the Cape Flats.", country: "South Africa", province: "Western Cape", city: "Cape Town", locality: "Mitchells Plain", landmark: null, subjectTags: ["people", "food", "community", "outdoor"], culturalTags: ["South African braai", "wood-fire braai", "Cape Flats"], rightsStatus: "verified", modelReleaseStatus: "verified", propertyReleaseStatus: "not_required", authenticityConfidence: .92, humanVerified: true, contributor: "Veld demo archive", workflowStage: "approval", aiTags: ["braai", "community"], curatorNotes: "Demo fallback record." },
   { id: "asset-demo-table-mountain", kind: "image", status: "published", title: "Table Mountain above Cape Town", description: "A documented panorama of Table Mountain in Cape Town, Western Cape.", caption: "Table Mountain, Cape Town, Western Cape, South Africa.", country: "South Africa", province: "Western Cape", city: "Cape Town", locality: "City Bowl", landmark: "Table Mountain", subjectTags: ["landscape", "mountain", "city", "coast"], culturalTags: ["South African landscape", "Cape Town"], rightsStatus: "verified", modelReleaseStatus: "not_required", propertyReleaseStatus: "not_required", authenticityConfidence: .99, humanVerified: true, contributor: "Veld demo archive", workflowStage: "approval", aiTags: ["South Africa", "Cape Town", "Table Mountain"], curatorNotes: "Demo fallback record." },
   { id: "asset-demo-garden-route", kind: "image", status: "published", title: "Garden Route landscape", description: "A documented photograph of the Garden Route National Park in South Africa.", caption: "Garden Route National Park landscape, South Africa.", country: "South Africa", province: "Eastern Cape", city: "Knysna", locality: "Garden Route", landmark: "Garden Route National Park", subjectTags: ["landscape", "forest", "coast", "travel"], culturalTags: ["South African landscape", "Garden Route"], rightsStatus: "verified", modelReleaseStatus: "not_required", propertyReleaseStatus: "not_required", authenticityConfidence: .98, humanVerified: true, contributor: "Veld demo archive", workflowStage: "approval", aiTags: ["South Africa", "Garden Route"], curatorNotes: "Demo fallback record." },
   { id: "asset-demo-road", kind: "video", status: "published", title: "Left-side drive through the Garden Route", description: "A right-hand-drive vehicle travels on the left side of a Garden Route road.", caption: "Road footage through the Garden Route, South Africa.", country: "South Africa", province: "Western Cape", city: "George", locality: "Garden Route", landmark: "Outeniqua Mountains", subjectTags: ["road", "travel", "driving", "video"], culturalTags: ["Garden Route", "right-hand drive", "South African road life"], rightsStatus: "verified", modelReleaseStatus: "not_required", propertyReleaseStatus: "not_required", authenticityConfidence: .94, humanVerified: true, contributor: "Veld demo archive", workflowStage: "approval", aiTags: ["Garden Route", "road footage"], curatorNotes: "Demo fallback record." },
+  ...testPhotoLibrary,
 ];
 
 function filterDemoAssets(query: string, kind: "all" | "image" | "video"): Asset[] {
-  const terms = query.toLowerCase().split(/[^a-z0-9]+/).filter((term) => term.length > 2);
-  return demoAssets.filter((asset) => {
-    if (kind !== "all" && asset.kind !== kind) return false;
-    const haystack = [asset.title, asset.description, asset.caption, asset.city, asset.locality, asset.landmark, ...asset.subjectTags, ...asset.culturalTags].filter(Boolean).join(" ").toLowerCase();
-    return terms.every((term) => haystack.includes(term));
-  });
+  const kindFiltered = kind === "all" ? demoAssets : demoAssets.filter((asset) => asset.kind === kind);
+  return archiveDomain.rankSearchAssets(kindFiltered, query);
+}
+
+const WORKSPACE_NAV_ITEMS: { view: "dashboard" | "contributor" | "buyer" | "review" | "governance" | "ledger"; label: string; icon: string; roles: string[] }[] = [
+  { view: "dashboard", label: "Dashboard", icon: "\u25a6", roles: ["contributor", "buyer", "editor", "admin"] },
+  { view: "contributor", label: "Contributor", icon: "\u25c6", roles: ["contributor", "admin"] },
+  { view: "buyer", label: "Buyer ROI", icon: "\u25c7", roles: ["buyer", "admin"] },
+  { view: "review", label: "Editorial review", icon: "\u25a4", roles: ["editor", "admin"] },
+  { view: "governance", label: "Governance", icon: "\u25a3", roles: ["editor", "admin"] },
+  { view: "ledger", label: "Admin ledger", icon: "\u25a5", roles: ["admin"] },
+];
+
+function NotificationBell({ api }: { api: (path: string, init?: RequestInit) => Promise<Response> }) {
+  const [items, setItems] = useState<NotificationItem[]>([]);
+  const [open, setOpen] = useState(false);
+  const [state, setState] = useState<"loading" | "ready" | "unavailable">("loading");
+
+  const load = useCallback(async () => {
+    try {
+      const response = await api("/api/notifications");
+      const data = await readJson<{ results: NotificationItem[] }>(response, "Notifications unavailable");
+      setItems(data.results);
+      setState("ready");
+    } catch {
+      setState("unavailable");
+    }
+  }, [api]);
+
+  useEffect(() => { void load(); const timer = setInterval(() => void load(), 60_000); return () => clearInterval(timer); }, [load]);
+
+  async function markRead(id: string) {
+    setItems((current) => current.map((item) => item.id === id ? { ...item, readAt: new Date().toISOString() } : item));
+    try { await api(`/api/notifications/${id}/read`, { method: "POST", body: "{}" }); } catch { /* best effort */ }
+  }
+
+  const unreadCount = items.filter((item) => !item.readAt).length;
+
+  return <div className="notification-bell">
+    <button type="button" className="ghost-button notification-bell-toggle" aria-expanded={open} aria-label={`Notifications${unreadCount ? `, ${unreadCount} unread` : ""}`} onClick={() => setOpen((value) => !value)}>
+      🔔{unreadCount > 0 && <span className="notification-badge">{unreadCount > 9 ? "9+" : unreadCount}</span>}
+    </button>
+    {open && <div className="notification-panel" role="dialog" aria-label="Notifications">
+      <div className="notification-panel-heading"><span className="section-kicker">NOTIFICATIONS</span><button type="button" className="text-button" onClick={() => setOpen(false)}>Close</button></div>
+      {state === "unavailable" && <div className="empty-state">Notifications are unavailable right now.</div>}
+      {state === "ready" && !items.length && <div className="empty-state">You are all caught up.</div>}
+      {state === "ready" && items.map((item) => <button type="button" key={item.id} className={`notification-row${item.readAt ? "" : " unread"}`} onClick={() => markRead(item.id)}>
+        <strong>{item.title}</strong><small>{item.body}</small><span>{new Date(item.createdAt).toLocaleString("en-ZA")}</span>
+      </button>)}
+    </div>}
+  </div>;
+}
+
+function WorkspaceShell({ view, sessionUser, navigate, authBusy, onSignOut, api, children }: { view: View; sessionUser: SessionUser; navigate: (view: View) => void; authBusy: boolean; onSignOut: () => void; api: (path: string, init?: RequestInit) => Promise<Response>; children: React.ReactNode }) {
+  const roleItems = WORKSPACE_NAV_ITEMS.filter((item) => item.roles.includes(sessionUser.role));
+  const navItems = roleItems.length ? roleItems : WORKSPACE_NAV_ITEMS;
+  const current = WORKSPACE_NAV_ITEMS.find((item) => item.view === view);
+  return <div className="workspace-shell">
+    <header className="workspace-topbar topbar">
+      <button className="wordmark wordmark-button" onClick={() => navigate("explore")} aria-label="Veld Archive home"><VeldWordmark /></button>
+      <div className="sync-status"><span className="pulse" /> Connected to live archive service</div>
+      <div className="top-actions"><button className="ghost-button" onClick={() => navigate("community")}>Community</button><NotificationBell api={api} /><span className="user-chip">{sessionUser.displayName}<span>{sessionUser.role}</span></span><button className="ghost-button" disabled={authBusy} onClick={onSignOut}>{authBusy ? "Signing out\u2026" : "Sign out"}</button></div>
+    </header>
+    <div className="workspace-main">
+      <aside className="workspace-sidebar">
+        <span className="sidebar-kicker">{sessionUser.organizationName}</span>
+        <h1>Workspace<br /><em>{current?.label ?? "Overview"}.</em></h1>
+        <p className="sidebar-copy">Move between the surfaces your role can act on.</p>
+        <nav className="side-nav" aria-label="Workspace navigation">{navItems.map((item) => <button key={item.view} type="button" className={`side-nav-item${view === item.view ? " active" : ""}`} aria-current={view === item.view ? "page" : undefined} onClick={() => navigate(item.view)}><span className="side-icon" aria-hidden="true">{item.icon}</span>{item.label}</button>)}</nav>
+        <div className="sidebar-footer"><span className="section-kicker">SESSION</span><div className="side-metric"><strong>{sessionUser.role}</strong><span>signed in role</span></div><p className="sidebar-role-note">{sessionUser.role === "contributor" ? "Complete onboarding below, then submit records for editorial review." : sessionUser.role === "buyer" ? "Search, licence, and track campaigns from this workspace." : "Review queues and governance actions for this organisation."}</p></div>
+      </aside>
+      <div className="governance-content">{children}</div>
+    </div>
+  </div>;
+}
+
+function VeldWordmark() {
+  return <>
+    <span className="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 42 42" focusable="false">
+        <circle className="brand-mark-field" cx="21" cy="21" r="20" />
+        <path className="brand-mark-horizon" d="M9.5 17.6h23" />
+        <path className="brand-mark-track brand-mark-track-left" d="M12.5 10.5 20.8 31.8" />
+        <path className="brand-mark-track brand-mark-track-right" d="M29.5 10.5 21.2 31.8" />
+        <path className="brand-mark-veld" d="M9 27.2c5.1-2.7 9.2-2.7 12.2 0 3.1 2.7 7.1 2.7 11.8 0v6.9H9z" />
+        <circle className="brand-mark-proof" cx="31.1" cy="12.2" r="2.1" />
+      </svg>
+    </span>
+    <span className="wordmark-text"><span>veld</span><span className="muted">archive</span></span>
+  </>;
 }
 
 function App() {
   const [view, setView] = useState<View>("explore");
   const [query, setQuery] = useState("");
   const [activeQuery, setActiveQuery] = useState("");
+  const [searchVersion, setSearchVersion] = useState(0);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [assetsLoading, setAssetsLoading] = useState(true);
   const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
   const [filter, setFilter] = useState<"all" | "image" | "video">("all");
+  const [facets, setFacets] = useState<SearchResponse["facets"]>([]);
+  const [activeFacet, setActiveFacet] = useState<string | null>(null);
   const [notice, setNotice] = useState("Live archive results are loaded from the verified content service.");
   const [reviewItems, setReviewItems] = useState<Asset[]>([]);
   const [analyticsConsent, setAnalyticsConsent] = useState(false);
   const [sessionUser, setSessionUser] = useState<SessionUser | null>(null);
   const [csrfToken, setCsrfToken] = useState("");
   const [devRole, setDevRole] = useState<"contributor" | "admin">("contributor");
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
 
   const api = useCallback((path: string, init: RequestInit = {}) => fetch(path, { ...init, credentials: "include", headers: { ...(init.body ? { "Content-Type": "application/json" } : {}), ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}), ...(init.headers ?? {}) } }), [csrfToken]);
+  const globalNotice = view !== "search" && notice && !notice.startsWith("Live archive results") ? notice : "";
 
   useEffect(() => {
     void fetch("/api/auth/session", { credentials: "include" }).then(async (response) => {
       if (!response.ok) return;
-      const data = await response.json() as { authenticated: boolean; user?: SessionUser; csrfToken?: string };
+      const data = await readJson<{ authenticated: boolean; user?: SessionUser; csrfToken?: string }>(response, "Session API unavailable");
       if (data.authenticated && data.user) { setSessionUser(data.user); setCsrfToken(data.csrfToken ?? ""); }
     }).catch(() => undefined);
   }, []);
@@ -69,22 +185,33 @@ function App() {
     const controller = new AbortController();
     setAssetsLoading(true);
     const params = new URLSearchParams({ q: activeQuery, kind: filter, status: "published" });
+    const startedAt = Date.now();
+    let finishTimer: ReturnType<typeof setTimeout> | undefined;
     fetch(`/api/assets?${params}`, { signal: controller.signal, credentials: "include" })
-      .then(async (response) => { if (!response.ok) throw new Error("API unavailable"); return response.json() as Promise<SearchResponse>; })
-      .then((data) => setAssets(data.results.map((asset) => archiveDomain.withMatchExplanation(asset, activeQuery))))
+      .then((response) => readJson<SearchResponse>(response, "API unavailable"))
+      .then((data) => {
+        const kindFiltered = filter === "all" ? data.results : data.results.filter((asset) => asset.kind === filter);
+        setAssets(archiveDomain.rankSearchAssets(kindFiltered, activeQuery).map((asset) => archiveDomain.withMatchExplanation(asset, activeQuery)));
+        setFacets(data.facets);
+      })
+      .then(() => setNotice((current) => current.startsWith("Demo archive mode") ? "Live archive results are loaded from the verified content service." : current))
       .catch(() => {
+        if (controller.signal.aborted) return;
         setAssets(filterDemoAssets(activeQuery, filter).map((asset) => archiveDomain.withMatchExplanation(asset, activeQuery)));
         setNotice("Demo archive mode is active while the live content service is unavailable.");
       })
-      .finally(() => { if (!controller.signal.aborted) setAssetsLoading(false); });
-    return () => controller.abort();
-  }, [activeQuery, filter]);
+      .finally(() => {
+        if (controller.signal.aborted) return;
+        const remaining = Math.max(0, 700 - (Date.now() - startedAt));
+        finishTimer = setTimeout(() => setAssetsLoading(false), remaining);
+      });
+    return () => { controller.abort(); if (finishTimer) clearTimeout(finishTimer); };
+  }, [activeQuery, filter, searchVersion]);
 
   async function loadReviewQueue() {
     try {
       const response = await api("/api/admin/review");
-      if (!response.ok) throw new Error("Review API unavailable");
-      const data = await response.json() as { results: Asset[] };
+      const data = await readJson<{ results: Asset[] }>(response, "Review API unavailable");
       setReviewItems(data.results);
     } catch {
       setReviewItems([]);
@@ -93,7 +220,8 @@ function App() {
   }
 
   function navigate(nextView: View) {
-    if (!sessionUser && ["contributor", "buyer", "review", "governance"].includes(nextView)) {
+    setMobileMenuOpen(false);
+    if (!sessionUser && ["dashboard", "contributor", "buyer", "review", "governance", "ledger"].includes(nextView)) {
       setNotice("Sign in is required for this workspace.");
       return;
     }
@@ -107,46 +235,219 @@ function App() {
     void fetch("/api/analytics/events", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...payload, consent: true }) }).catch(() => undefined);
   }
 
+  async function authenticate(role: "contributor" | "admin" | "buyer" = devRole): Promise<SessionUser | null> {
+    setAuthBusy(true);
+    try {
+      const endpoint = import.meta.env.DEV ? "/api/auth/dev-login" : "/api/auth/demo-login";
+      const response = await fetch(endpoint, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role }) });
+      if (!response.ok || !isJsonResponse(response)) {
+        if (!import.meta.env.DEV && response.status === 404) setNotice("Sign-in is not connected for this deployment. Enable demo auth or connect the organisation identity provider.");
+        throw new Error("Authentication unavailable");
+      }
+      const data = await response.json() as { user?: SessionUser; csrfToken?: string };
+      if (!data.user?.id || !data.csrfToken) throw new Error("Incomplete authentication response");
+      setSessionUser(data.user);
+      setCsrfToken(data.csrfToken);
+      setNotice(`Signed in to ${data.user.organizationName}.`);
+      return data.user;
+    } catch {
+      setNotice((current) => current.startsWith("Sign-in is not connected") ? current : "Sign-in is unavailable. Check the Worker API, demo auth setting, or organisation identity provider, then try again.");
+      return null;
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function signIn() {
+    const user = await authenticate();
+    if (user) setView("dashboard");
+  }
+
+  async function signUp() {
+    const user = await authenticate("contributor");
+    if (!user) return;
+    setView("contributor");
+    setNotice("Seller workspace opened. Start with your profile, then submit the seller tender and media record.");
+  }
+
+  async function signOut() {
+    setAuthBusy(true);
+    try {
+      const response = await api("/api/auth/logout", { method: "POST" });
+      if (!response.ok) throw new Error("Logout failed");
+      setSessionUser(null);
+      setCsrfToken("");
+      setView("explore");
+      setNotice("Signed out.");
+    } catch {
+      setNotice("We could not sign you out. Check the connection and try again.");
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
   function runSearch(event: React.FormEvent) {
     event.preventDefault();
     const value = query.trim();
+    setAssets([]);
+    setActiveFacet(null);
     setActiveQuery(value);
+    setSearchVersion((current) => current + 1);
     trackEvent({ type: "search", query: value });
-    setView("explore");
-    setNotice(query.trim() ? `Searching the archive for “${query.trim()}”` : "Showing the latest verified South African media");
+    setView("search");
+    setNotice("");
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   const verifiedCount = useMemo(() => assets.filter((asset) => asset.humanVerified).length, [assets]);
+  const isWorkspaceRoute = view === "dashboard" || view === "contributor" || view === "buyer" || view === "review" || view === "governance" || view === "ledger";
 
   return <div className="app-shell">
-    <header className="topbar">
-      <button className="wordmark wordmark-button" onClick={() => navigate("explore")} aria-label="Veld Archive home"><span className="mark">V</span><span>veld<span className="muted">archive</span></span></button>
-      <nav className="nav-links" aria-label="Primary navigation"><button onClick={() => navigate("explore")}>Explore</button><button onClick={() => navigate("community")}>Community & collections</button><button onClick={() => navigate("contributor")}>Contributor insights</button><button onClick={() => navigate("buyer")}>Buyer ROI</button><button onClick={() => navigate("review")}>Editorial review</button><button className="governance-link" onClick={() => navigate("governance")}>Governance <span>NEW</span></button></nav>
-      <div className="top-actions">{import.meta.env.DEV && <label className="role-switcher">Local role <select value={devRole} onChange={(event) => setDevRole(event.target.value as "contributor" | "admin")}><option value="contributor">Contributor</option><option value="admin">Admin</option></select></label>}<button className="ghost-button" onClick={async () => { if (!import.meta.env.DEV) { setNotice("Use your organisation identity provider to sign in."); return; } const response = await fetch("/api/auth/dev-login", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role: devRole }) }); if (!response.ok) { setNotice("Local authentication is unavailable; apply the identity migration first."); return; } const data = await response.json() as { user: SessionUser; csrfToken: string }; setSessionUser(data.user); setCsrfToken(data.csrfToken); setNotice(`Signed in to ${data.user.organizationName}.`); }}>Sign in</button>{sessionUser && <button className="ghost-button" onClick={() => { void api("/api/auth/logout", { method: "POST" }).then(() => { setSessionUser(null); setCsrfToken(""); setNotice("Signed out."); }); }}>Sign out</button>}</div>
-    </header>
-    {!analyticsConsent && <button className="privacy-consent" onClick={() => setAnalyticsConsent(true)}>Allow anonymous demand insights</button>}
-    {view !== "explore" && notice && <div className="global-notice" role="status" aria-live="polite">{notice}</div>}
+    {!(sessionUser && isWorkspaceRoute) && <header className="topbar">
+      <button className="wordmark wordmark-button" onClick={() => navigate("explore")} aria-label="Veld Archive home"><VeldWordmark /></button>
+      <nav id="primary-navigation" className={`nav-links${mobileMenuOpen ? " mobile-open" : ""}`} aria-label="Primary navigation"><button onClick={() => navigate("explore")}>Explore</button><button onClick={() => navigate("community")}>Community & collections</button><button onClick={() => navigate("contributor")}>Contributor insights</button><button onClick={() => navigate("buyer")}>Buyer ROI</button><button onClick={() => navigate("review")}>Editorial review</button><button className="governance-link" onClick={() => navigate("governance")}>Governance <span>NEW</span></button></nav>
+      <button type="button" className="mobile-menu-button" aria-controls="primary-navigation" aria-expanded={mobileMenuOpen} onClick={() => setMobileMenuOpen((open) => !open)}>{mobileMenuOpen ? "Close" : "Menu"}</button>
+      <div className="top-actions">{import.meta.env.DEV && <label className="role-switcher">Local role <select value={devRole} onChange={(event) => setDevRole(event.target.value as "contributor" | "admin")}><option value="contributor">Contributor</option><option value="admin">Admin</option></select></label>}{!sessionUser && <><button className="ghost-button" disabled={authBusy} onClick={() => void signIn()}>{authBusy ? "Signing in…" : "Sign in"}</button><button className="dark-button" disabled={authBusy} onClick={() => void signUp()}>{authBusy ? "Opening…" : "Sign up"}</button></>}{sessionUser && <button className="ghost-button" disabled={authBusy} onClick={() => void signOut()}>{authBusy ? "Signing out…" : "Sign out"}</button>}</div>
+    </header>}
+    {!(sessionUser && isWorkspaceRoute) && !analyticsConsent && <button className="privacy-consent" onClick={() => setAnalyticsConsent(true)}>Allow anonymous demand insights</button>}
+    {globalNotice && <div className="global-notice" role="status" aria-live="polite">{globalNotice}</div>}
 
     {view === "explore" && <ExploreView query={query} setQuery={setQuery} runSearch={runSearch} assets={assets} assetsLoading={assetsLoading} filter={filter} setFilter={setFilter} verifiedCount={verifiedCount} notice={notice} onOpen={setSelectedAsset} />}
-    {view === "contributor" && <><AnalyticsDashboard role="contributor" /><ContributorWorkspace api={api} onNotice={setNotice} /></>}
-    {view === "buyer" && <AnalyticsDashboard role="buyer" />}
-    {view === "review" && <ReviewWorkspace items={reviewItems} api={api} onNotice={setNotice} onReload={loadReviewQueue} />}
-    {view === "governance" && <GovernanceWorkspace api={api} onNotice={setNotice} />}
-    {view === "community" && <CommunityWorkspace api={api} onNotice={setNotice} />}
+    {view === "search" && <SearchResultsView query={query} setQuery={setQuery} activeQuery={activeQuery} runSearch={runSearch} assets={assets} assetsLoading={assetsLoading} filter={filter} setFilter={setFilter} notice={notice} onOpen={setSelectedAsset} facets={facets} activeFacet={activeFacet} setActiveFacet={setActiveFacet} sessionUser={sessionUser} api={api} onNotice={setNotice} />}
+    {view === "community" && <CommunityWorkspace api={api} onNotice={setNotice} sessionUser={sessionUser} />}
+    {sessionUser && isWorkspaceRoute && <WorkspaceShell view={view} sessionUser={sessionUser} navigate={navigate} authBusy={authBusy} onSignOut={signOut} api={api}>
+      {view === "dashboard" && <DashboardHome sessionUser={sessionUser} api={api} navigate={navigate} />}
+      {view === "contributor" && <><ContributorWorkspace api={api} onNotice={setNotice} /><AnalyticsDashboard role="contributor" /></>}
+      {view === "buyer" && <><BuyerWorkspace assets={assets} api={api} navigate={navigate} onNotice={setNotice} /><AnalyticsDashboard role="buyer" /></>}
+      {view === "review" && <ReviewWorkspace items={reviewItems} api={api} onNotice={setNotice} onReload={loadReviewQueue} />}
+      {view === "governance" && <GovernanceWorkspace api={api} onNotice={setNotice} sessionUser={sessionUser} />}
+      {view === "ledger" && <AdminLedgerWorkspace api={api} onNotice={setNotice} />}
+    </WorkspaceShell>}
 
-    <footer><button className="wordmark wordmark-button" onClick={() => navigate("explore")}><span className="mark">V</span><span>veld<span className="muted">archive</span></span></button><span>© 2026 Veld Archive · South Africa</span><span>Context before category.</span></footer>
-    {selectedAsset && <AssetModal asset={selectedAsset} onClose={() => setSelectedAsset(null)} onNotice={setNotice} />}
+    {!(sessionUser && isWorkspaceRoute) && <footer><button className="wordmark wordmark-button" onClick={() => navigate("explore")}><VeldWordmark /></button><span>© 2026 Veld Archive · South Africa</span><span>Context before category.</span></footer>}
+    {selectedAsset && <AssetModal asset={selectedAsset} onClose={() => setSelectedAsset(null)} onNotice={setNotice} sessionUser={sessionUser} api={api} />}
   </div>;
 }
 
 function ExploreView({ query, setQuery, runSearch, assets, assetsLoading, filter, setFilter, verifiedCount, notice, onOpen }: { query: string; setQuery: (value: string) => void; runSearch: (event: React.FormEvent) => void; assets: Asset[]; assetsLoading: boolean; filter: "all" | "image" | "video"; setFilter: (value: "all" | "image" | "video") => void; verifiedCount: number; notice: string; onOpen: (asset: Asset) => void }) {
   const suggestions = ["A real wood-fire braai in the Cape Flats", "A verified Table Mountain landscape at golden hour", "Right-hand-drive road footage in the Garden Route"];
   return <main id="top">
-    <section className="hero"><div className="eyebrow"><span className="pulse" /> The trusted South African visual archive</div><h1>Find the image<br /><em>behind the story.</em></h1><p className="hero-copy">Authentic photography and film for brands that care where a story comes from.</p><form className="search-box" onSubmit={runSearch}><span className="search-icon">⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Describe the story you need to tell…" aria-label="Search media" /><button type="submit">Search archive <span>↗</span></button></form><div className="suggestion-row">{suggestions.map((suggestion) => <button type="button" key={suggestion} className="suggestion" onClick={() => { setQuery(suggestion); }}>{suggestion} <span>→</span></button>)}</div></section>
+    <section className="hero"><div className="eyebrow"><span className="pulse" /> The trusted South African visual archive</div><h1>Find the image<br /><em>behind the story.</em></h1><p className="hero-copy">Authentic photography and film for brands that care where a story comes from.</p><ArchiveSearchForm query={query} setQuery={setQuery} runSearch={runSearch} /><div className="suggestion-row">{suggestions.map((suggestion) => <button type="button" key={suggestion} className="suggestion" onClick={() => { setQuery(suggestion); }}>{suggestion} <span>→</span></button>)}</div></section>
     <section className="trust-strip"><div><strong>01</strong><span>Context-first metadata</span></div><div><strong>02</strong><span>Rights you can trust</span></div><div><strong>03</strong><span>Creators paid fairly</span></div><div className="trust-note">Built for the places we know.</div></section>
     <section className="explore-section"><div className="section-heading"><div><span className="section-kicker">CURATED FROM THE GROUND UP</span><h2>The latest from <em>here.</em></h2></div><div className="result-note" role="status" aria-live="polite">{notice}</div></div><div className="toolbar"><div className="filter-tabs" role="tablist" aria-label="Media type">{(["all", "image", "video"] as const).map((value) => <button key={value} type="button" role="tab" aria-selected={filter === value} className={filter === value ? "active" : ""} onClick={() => setFilter(value)}>{value === "all" ? "All media" : value === "image" ? "Photography" : "Film & video"}</button>)}</div><div className="verified-stat"><span className="verified-dot" />{verifiedCount} human-verified results</div></div><div className="explainability-note"><strong>Search evidence is visible.</strong><span>Open a result to inspect the fields used, match confidence, and verification status.</span><span className="ai-badge">AI + HUMAN REVIEW</span></div><div className="asset-grid" aria-busy={assetsLoading}>{assetsLoading ? <div className="empty-state" role="status">Loading verified archive results…</div> : assets.length ? assets.map((asset, index) => <AssetCard key={asset.id} asset={asset} index={index} onOpen={onOpen} />) : <div className="empty-state">No assets matched this brief yet. Try a location, landmark, or cultural context.</div>}</div></section>
     <ModerationQueue assets={assets} onReview={onOpen} />
     <section className="manifesto"><div className="manifesto-label">WHY VELD</div><div><h2>South Africa is not a<br /><em>stock category.</em></h2><p>Every place has a texture. Every community has a point of view. Veld gives the people who make the work more control over how it is found, licensed, and remembered.</p></div></section>
+  </main>;
+}
+
+function ArchiveSearchForm({ query, setQuery, runSearch }: { query: string; setQuery: (value: string) => void; runSearch: (event: React.FormEvent) => void }) {
+  return <form className="search-box" onSubmit={runSearch}><span className="search-icon" aria-hidden="true">⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Describe the story you need to tell…" aria-label="Search media" /><button type="submit">Search archive <span>↗</span></button></form>;
+}
+
+const searchSteps = [
+  "Reading the story brief",
+  "Searching verified archive records",
+  "Checking place, rights, and context",
+  "Ranking the closest visual matches",
+];
+
+function SearchResultsView({ query, setQuery, activeQuery, runSearch, assets, assetsLoading, filter, setFilter, notice, onOpen, facets, activeFacet, setActiveFacet, sessionUser, api, onNotice }: { query: string; setQuery: (value: string) => void; activeQuery: string; runSearch: (event: React.FormEvent) => void; assets: Asset[]; assetsLoading: boolean; filter: "all" | "image" | "video"; setFilter: (value: "all" | "image" | "video") => void; notice: string; onOpen: (asset: Asset) => void; facets: SearchResponse["facets"]; activeFacet: string | null; setActiveFacet: (value: string | null) => void; sessionUser: SessionUser | null; api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
+  const [step, setStep] = useState(0);
+  const [savingSearch, setSavingSearch] = useState(false);
+  useEffect(() => {
+    if (!assetsLoading) {
+      setStep(searchSteps.length);
+      return undefined;
+    }
+    setStep(0);
+    const timer = setInterval(() => setStep((current) => Math.min(searchSteps.length - 1, current + 1)), 360);
+    return () => clearInterval(timer);
+  }, [activeQuery, assetsLoading]);
+
+  const traceCandidates = archiveDomain.rankSearchAssets(filter === "all" ? demoAssets : demoAssets.filter((asset) => asset.kind === filter), activeQuery);
+  const sourceAssets = (assets.length ? assets : traceCandidates).slice(0, 4);
+  const isComplete = !assetsLoading;
+  const displayedAssets = activeFacet
+    ? assets.filter((asset) => asset.province === activeFacet || asset.kind === activeFacet || asset.primaryCategory?.replaceAll("_", " ") === activeFacet || (activeFacet === "verified" && asset.humanVerified))
+    : assets;
+  const resultMessage = isComplete
+    ? notice.startsWith("Demo archive mode")
+      ? `${assets.length} matching record${assets.length === 1 ? "" : "s"} found in the demo archive.`
+      : `${assets.length} verified result${assets.length === 1 ? "" : "s"} found.`
+    : `Searching the archive for “${activeQuery || "the latest verified media"}”`;
+  const progress = isComplete ? 100 : Math.round(((step + 1) / searchSteps.length) * 86);
+
+  async function saveSearch() {
+    if (!sessionUser) { onNotice("Sign in as a buyer to save this search and get alerted on new matches."); return; }
+    setSavingSearch(true);
+    try {
+      const response = await api("/api/saved-searches", { method: "POST", body: JSON.stringify({ label: activeQuery || "All media", query: activeQuery, kind: filter, notifyOnNew: true }) });
+      if (!response.ok) throw new Error();
+      onNotice("Search saved. You will be notified when new matches are published.");
+    } catch {
+      onNotice("Could not save this search right now.");
+    } finally {
+      setSavingSearch(false);
+    }
+  }
+
+  return <main className="search-results-page" id="search-results">
+    <section className="search-results-intro">
+      <div className="search-results-eyebrow"><span className="pulse" /> Archive search / live trace</div>
+      <h1>Finding the visual story<br /><em>behind your brief.</em></h1>
+      <ArchiveSearchForm query={query} setQuery={setQuery} runSearch={runSearch} />
+      <div className="search-status" role="status" aria-live="polite" aria-busy={assetsLoading}><span className={`search-status-dot${isComplete ? " complete" : ""}`} /> <span>{resultMessage}</span>{isComplete && <button type="button" className="text-button" disabled={savingSearch} onClick={() => void saveSearch()}>{savingSearch ? "Saving…" : "Save this search"}</button>}</div>
+    </section>
+
+    <section className="search-workbench" aria-label="Search process">
+      <aside className="search-progress-panel">
+        <div className="search-progress-heading"><span className="section-kicker">SEARCH PROCESS</span><strong>{isComplete ? "Complete" : `${progress}%`}</strong></div>
+        <div className="search-progress-track" aria-hidden="true"><span style={{ width: `${progress}%` }} /></div>
+        <ol className="search-step-list">{searchSteps.map((label, index) => <li key={label} className={index < step || isComplete ? "done" : index === step ? "current" : ""}><span>{index < step || isComplete ? "✓" : String(index + 1).padStart(2, "0")}</span><strong>{label}</strong>{index === step && !isComplete && <small>Working through indexed records</small>}</li>)}</ol>
+        <p className="search-provenance"><strong>What is being checked?</strong> Published records, human verification, location context, rights status, and the language of your brief.</p>
+      </aside>
+      <section className="search-trace-panel" aria-labelledby="trace-heading">
+        <div className="search-trace-heading"><div><span className="section-kicker">CANDIDATE MEDIA</span><h2 id="trace-heading">{isComplete ? "Candidate records checked" : "Images being checked"} <em>{isComplete ? "first." : "now."}</em></h2></div><span className="trace-count">{sourceAssets.length} candidate{sourceAssets.length === 1 ? "" : "s"} in view</span></div>
+        <div className="search-trace-grid">{sourceAssets.map((asset, index) => <SearchTraceCard key={asset.id} asset={asset} index={index} onOpen={onOpen} loading={!isComplete} />)}</div>
+      </section>
+    </section>
+
+    <section className="search-matches" aria-labelledby="matches-heading">
+      <div className="section-heading"><div><span className="section-kicker">RANKED MATCHES</span><h2 id="matches-heading">The closest <em>stories.</em></h2></div><span className="result-note">Matches use stored metadata and verification signals. Open a result for the evidence behind its ranking.</span></div>
+      <div className="toolbar"><div className="filter-tabs" role="tablist" aria-label="Media type">{(["all", "image", "video"] as const).map((value) => <button key={value} type="button" role="tab" aria-selected={filter === value} className={filter === value ? "active" : ""} onClick={() => setFilter(value)}>{value === "all" ? "All media" : value === "image" ? "Photography" : "Film & video"}</button>)}</div><span className="verified-stat"><span className="verified-dot" />{assets.filter((asset) => asset.humanVerified).length} human-verified results</span></div>
+      {isComplete && facets.length > 0 && <div className="facet-chip-row" role="group" aria-label="Refine by facet">
+        <button type="button" className={`facet-chip${activeFacet === null ? " active" : ""}`} onClick={() => setActiveFacet(null)}>All ({assets.length})</button>
+        {facets.map((facet) => <button type="button" key={`${facet.label}-${facet.value}`} className={`facet-chip${activeFacet === facet.value ? " active" : ""}`} onClick={() => setActiveFacet(activeFacet === facet.value ? null : facet.value)}>{facet.label} ({facet.count})</button>)}
+      </div>}
+      <div className="asset-grid" aria-busy={assetsLoading}>{assetsLoading ? <div className="empty-state" role="status">Ranking the checked candidates...</div> : displayedAssets.length ? displayedAssets.map((asset, index) => <AssetCard key={asset.id} asset={asset} index={index} onOpen={onOpen} />) : <div className="empty-state">No records matched this brief closely enough. Try a location, landmark, or cultural context.</div>}</div>
+    </section>
+  </main>;
+}
+
+function SearchTraceCard({ asset, index, onOpen, loading }: { asset: Asset; index: number; onOpen: (asset: Asset) => void; loading: boolean }) {
+  return <button type="button" className={`search-trace-card${loading ? " is-loading" : ""}`} onClick={() => onOpen(asset)} aria-label={`Inspect ${asset.title} while searching`}><div className={`search-trace-visual visual-${(index % 3) + 1} ${asset.kind}`}>{asset.previewUrl && <MediaAsset asset={asset} />}<span className="search-trace-scan" aria-hidden="true" /><span className="search-trace-kind">{asset.kind === "video" ? "FILM" : "PHOTO"}</span><span className="search-trace-place">{asset.landmark ?? asset.locality ?? asset.city}</span></div><div className="search-trace-copy"><strong>{asset.title}</strong><small>{loading ? "Checking metadata…" : "Match candidate"}</small></div></button>;
+}
+
+function SearchResultsViewFallback({ query, setQuery, activeQuery, runSearch, assets, assetsLoading, filter, setFilter, notice, onOpen }: { query: string; setQuery: (value: string) => void; activeQuery: string; runSearch: (event: React.FormEvent) => void; assets: Asset[]; assetsLoading: boolean; filter: "all" | "image" | "video"; setFilter: (value: "all" | "image" | "video") => void; notice: string; onOpen: (asset: Asset) => void }) {
+  return <main className="search-results-fallback">
+    <section className="search-results-intro">
+      <span className="section-kicker">ARCHIVE SEARCH</span>
+      <h1>Results for <em>{activeQuery || "the latest verified media"}</em></h1>
+      <form className="search-box" onSubmit={runSearch}>
+        <span className="search-icon" aria-hidden="true">⌕</span>
+        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Describe the story you need to tell…" aria-label="Search media" />
+        <button type="submit">Search archive <span aria-hidden="true">↗</span></button>
+      </form>
+      <p className="result-note" role="status" aria-live="polite">{notice || "Open a result to inspect evidence, rights, provenance, and match signals."}</p>
+    </section>
+    <section className="explore-section search-results-section">
+      <div className="toolbar">
+        <div className="filter-tabs" role="tablist" aria-label="Media type">{(["all", "image", "video"] as const).map((value) => <button key={value} type="button" role="tab" aria-selected={filter === value} className={filter === value ? "active" : ""} onClick={() => setFilter(value)}>{value === "all" ? "All media" : value === "image" ? "Photography" : "Film & video"}</button>)}</div>
+        <span className="result-note">{assets.length} result{assets.length === 1 ? "" : "s"}</span>
+      </div>
+      <div className="explainability-note"><strong>Search evidence is visible.</strong><span>Open a result to inspect the fields used, match confidence, and verification status.</span><span className="ai-badge">AI + HUMAN REVIEW</span></div>
+      <div className="asset-grid" aria-busy={assetsLoading}>{assetsLoading ? <div className="empty-state" role="status">Loading verified archive results…</div> : assets.length ? assets.map((asset, index) => <AssetCard key={asset.id} asset={asset} index={index} onOpen={onOpen} />) : <div className="empty-state">No assets matched this brief yet. Try a location, landmark, or cultural context.</div>}</div>
+    </section>
   </main>;
 }
 
@@ -170,6 +471,10 @@ function GovernanceWorkspaceLegacy({ api, onNotice }: { api: (path: string, init
   }, [api, stage]);
 
   async function act(asset: Asset, action: "run_ai_tagging" | "approve" | "reject") {
+    if (action === "run_ai_tagging") {
+      onNotice("AI enrichment runs once at upload. Save a manual metadata correction for later changes.");
+      return;
+    }
     try {
       const response = await api(`/api/governance/assets/${asset.id}/action`, { method: "POST", body: JSON.stringify({ action }) });
       if (!response.ok) throw new Error();
@@ -206,7 +511,7 @@ function AnalyticsDashboard({ role }: { role: "contributor" | "buyer" }) {
   useEffect(() => {
     const controller = new AbortController();
     fetch(`/api/analytics/${role}`, { signal: controller.signal, credentials: "include" })
-      .then(async (response) => { if (!response.ok) throw new Error("Analytics unavailable"); return response.json() as Promise<ContributorAnalytics | BuyerAnalytics>; })
+      .then((response) => readJson<ContributorAnalytics | BuyerAnalytics>(response, "Analytics unavailable"))
       .then(setData).catch(() => setData(null));
     return () => controller.abort();
   }, [role]);
@@ -220,7 +525,503 @@ function AnalyticsDashboard({ role }: { role: "contributor" | "buyer" }) {
 
 function MetricCard({ label, value, detail, tone = "rust" }: { label: string; value: string; detail: string; tone?: "rust" | "green" }) { return <article className={`metric-card ${tone}`}><span className="section-kicker">{label}</span><strong>{value}</strong><small>{detail}</small></article>; }
 
-function GovernanceWorkspace({ api, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
+type DashboardAction = { step: string; title: string; detail: string; view: View; anchor?: string };
+
+function dashboardActions(role: string): DashboardAction[] {
+  if (role === "contributor") return [
+    { step: "01", title: "Complete your profile", detail: "Identity, base location, and portfolio so editors can verify you.", view: "contributor", anchor: "onboarding-profile" },
+    { step: "02", title: "Sign terms & set payout", detail: "Firma signature reference plus a payout rail for the seller tender.", view: "contributor", anchor: "onboarding-seller" },
+    { step: "03", title: "Submit your first record", detail: "Media, place evidence, rights status, and a pricing model.", view: "contributor", anchor: "onboarding-asset" },
+  ];
+  if (role === "buyer") return [
+    { step: "01", title: "Search the verified archive", detail: "Brief-led search with visible match evidence and rights status.", view: "search" },
+    { step: "02", title: "Track licensed campaign ROI", detail: "Spend, impressions, and attributed conversions per licensed asset.", view: "buyer" },
+    { step: "03", title: "Raise a rights question", detail: "Open a resolution case for usage, provenance, or takedown concerns.", view: "community" },
+  ];
+  return [
+    { step: "01", title: "Clear the editorial review queue", detail: "Seller tenders and asset decisions waiting on an editor.", view: "review" },
+    { step: "02", title: "Work the governance pipeline", detail: "Ingestion, AI tagging, curator correction, and approval stages.", view: "governance" },
+    { step: "03", title: "Inspect the admin ledger", detail: "Every user-account and image approval sign-off with proof state.", view: "ledger" },
+    { step: "04", title: "Check community resolution cases", detail: "Rights and provenance cases that may need moderator input.", view: "community" },
+  ];
+}
+
+function DashboardHome({ sessionUser, api, navigate }: { sessionUser: SessionUser; api: (path: string, init?: RequestInit) => Promise<Response>; navigate: (view: View) => void }) {
+  const [metrics, setMetrics] = useState<{ label: string; value: string; detail: string; tone?: "rust" | "green" }[]>([]);
+  const [metricsState, setMetricsState] = useState<"loading" | "ready" | "unavailable">("loading");
+  const isContributor = sessionUser.role === "contributor";
+  const isBuyer = sessionUser.role === "buyer";
+
+  useEffect(() => {
+    let active = true;
+    setMetricsState("loading");
+    const load = async () => {
+      if (isContributor) {
+        const response = await api("/api/analytics/contributor");
+        const data = await readJson<ContributorAnalytics>(response, "Analytics unavailable");
+        return [
+          { label: "Archive searches", value: data.summary.searches.toLocaleString(), detail: "for your context and tags" },
+          { label: "Asset views", value: data.summary.views.toLocaleString(), detail: "on your published work" },
+          { label: "Demand change", value: `+${data.summary.demandChange}%`, detail: "compared with prior period", tone: "green" as const },
+          { label: "Saved to briefs", value: data.summary.saves.toLocaleString(), detail: "lightbox saves" },
+        ];
+      }
+      if (isBuyer) {
+        const response = await api("/api/analytics/buyer");
+        const data = await readJson<BuyerAnalytics>(response, "Analytics unavailable");
+        return [
+          { label: "Campaign spend", value: formatZar(data.summary.spendCents), detail: "licensed asset spend" },
+          { label: "Licensed assets", value: data.summary.licensedAssets.toString(), detail: "with campaign attribution" },
+          { label: "Attributed ROI", value: `+${data.summary.roi}%`, detail: "conversion value proxy", tone: "green" as const },
+          { label: "Conversions", value: data.summary.conversions.toLocaleString(), detail: `${data.summary.impressions.toLocaleString()} impressions` },
+        ];
+      }
+      const [reviewResponse, governanceResponse] = await Promise.all([api("/api/admin/review"), api("/api/governance/assets?stage=all")]);
+      const review = await readJson<{ results: Asset[] }>(reviewResponse, "Review queue unavailable");
+      const governance = await readJson<{ results: Asset[] }>(governanceResponse, "Governance queue unavailable");
+      const attention = governance.results.filter((item) => item.workflowStage !== "approval").length;
+      return [
+        { label: "Pending editorial review", value: review.results.length.toString(), detail: "assets awaiting a decision", tone: review.results.length ? "rust" as const : "green" as const },
+        { label: "Governance attention", value: attention.toString(), detail: "records before the approval stage", tone: attention ? "rust" as const : "green" as const },
+        { label: "Pipeline records", value: governance.results.length.toString(), detail: "across all workflow stages" },
+      ];
+    };
+    load().then((rows) => { if (active) { setMetrics(rows); setMetricsState("ready"); } }).catch(() => { if (active) { setMetrics([]); setMetricsState("unavailable"); } });
+    return () => { active = false; };
+  }, [api, isContributor, isBuyer]);
+
+  const actions = dashboardActions(sessionUser.role);
+  const firstName = sessionUser.displayName.split(" ")[0] ?? sessionUser.displayName;
+  const today = new Intl.DateTimeFormat("en-ZA", { weekday: "long", day: "numeric", month: "long", year: "numeric" }).format(new Date());
+  const subtitle = isContributor
+    ? "Your seller onboarding, demand signals, and publication pipeline in one place."
+    : isBuyer
+      ? "Licensed campaigns, attributed performance, and the next brief to search."
+      : "Editorial review, metadata governance, and community resolution at a glance.";
+
+  function runAction(action: DashboardAction) {
+    navigate(action.view);
+    if (action.anchor) window.setTimeout(() => document.getElementById(action.anchor as string)?.scrollIntoView({ behavior: "smooth", block: "start" }), 140);
+  }
+
+  return <main className="dashboard-page">
+    <div className="dashboard-heading">
+      <div><span className="section-kicker">DASHBOARD · {sessionUser.organizationName}</span><h1>Welcome back, <em>{firstName}.</em></h1><p>{subtitle}</p></div>
+      <div className="dashboard-date"><strong>{today}</strong><span>{sessionUser.role} workspace</span></div>
+    </div>
+    {metricsState === "unavailable"
+      ? <div className="empty-state" role="status">Live workspace metrics are unavailable. The service may be offline — the actions below still route to each workspace, and no placeholder figures are shown.</div>
+      : <div className="metric-grid dashboard-metrics" aria-busy={metricsState === "loading"}>{metricsState === "loading" ? <div className="empty-state" role="status">Loading workspace metrics…</div> : metrics.map((metric) => <MetricCard key={metric.label} label={metric.label} value={metric.value} detail={metric.detail} tone={metric.tone} />)}</div>}
+    <section className="dashboard-actions" aria-label="Next actions">
+      <div className="card-heading"><div><span className="section-kicker">NEXT ACTIONS</span><h2>What to do <em>next.</em></h2></div><span className="status-pill cool">{sessionUser.role}</span></div>
+      <div className="action-grid">{actions.map((action) => <button key={action.title} type="button" className="action-card" onClick={() => runAction(action)}><span className="action-step">{action.step}</span><strong>{action.title}</strong><small>{action.detail}</small><span className="action-go">Open →</span></button>)}</div>
+    </section>
+  </main>;
+}
+
+function AdminLedgerWorkspace({ api, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
+  const [category, setCategory] = useState<"all" | "user_account" | "image">("all");
+  const [entries, setEntries] = useState<ApprovalLedgerEntry[]>([]);
+  const [summary, setSummary] = useState({ total: 0, userAccount: 0, image: 0, signedAudit: 0, legacyWorkflow: 0, verifiedIntegrity: 0, failedIntegrity: 0 });
+  const [state, setState] = useState<"loading" | "ready" | "unavailable">("loading");
+
+  useEffect(() => {
+    let active = true;
+    setState("loading");
+    api(`/api/admin/approval-ledger?category=${category}&limit=250`)
+      .then((response) => readJson<{ summary: typeof summary; results: ApprovalLedgerEntry[] }>(response, "Approval ledger unavailable"))
+      .then((data) => {
+        if (!active) return;
+        setSummary(data.summary);
+        setEntries(data.results);
+        setState("ready");
+      })
+      .catch(() => {
+        if (!active) return;
+        setEntries([]);
+        setState("unavailable");
+        onNotice("The admin approval ledger is unavailable. No local approval records were shown.");
+      });
+    return () => { active = false; };
+  }, [api, category, onNotice]);
+
+  const filters = [
+    { value: "all" as const, label: "All events", count: summary.total },
+    { value: "user_account" as const, label: "User accounts", count: summary.userAccount },
+    { value: "image" as const, label: "Images", count: summary.image },
+  ];
+
+  return <main className="ledger-page">
+    <div className="ledger-heading">
+      <div><span className="section-kicker">TOP ADMIN / APPROVAL LEDGER</span><h1>Every sign-off in <em>one record.</em></h1><p>User-account approvals, seller signatures, verification updates, and image decisions are listed with actor, subject, resource, and proof state.</p></div>
+      <div className="ledger-proof"><strong>{summary.verifiedIntegrity}</strong><span>verified signed audit events</span></div>
+    </div>
+
+    <div className="ledger-stats" aria-busy={state === "loading"}>
+      <MetricCard label="User account events" value={summary.userAccount.toString()} detail="seller signatures, KYC, tender decisions" tone={summary.userAccount ? "rust" : "green"} />
+      <MetricCard label="Image events" value={summary.image.toString()} detail="metadata sign-offs and approvals" tone={summary.image ? "rust" : "green"} />
+      <MetricCard label="Signed audit" value={summary.signedAudit.toString()} detail="hash-chain and Ed25519 proof" tone={summary.failedIntegrity ? "rust" : "green"} />
+      <MetricCard label="Legacy workflow" value={summary.legacyWorkflow.toString()} detail="visible but not signed" />
+    </div>
+
+    <div className="ledger-toolbar">
+      <div className="filter-tabs" role="tablist" aria-label="Approval ledger category">{filters.map((item) => <button key={item.value} type="button" role="tab" aria-selected={category === item.value} className={category === item.value ? "active" : ""} onClick={() => setCategory(item.value)}>{item.label} <span>{item.count}</span></button>)}</div>
+      <span className={`ledger-integrity ${summary.failedIntegrity ? "failed" : "verified"}`}>{summary.failedIntegrity ? `${summary.failedIntegrity} integrity issue${summary.failedIntegrity === 1 ? "" : "s"}` : "Signed records verified"}</span>
+    </div>
+
+    <section className="ledger-list" aria-live="polite">
+      {state === "loading" && <div className="empty-state" role="status">Loading approval ledger...</div>}
+      {state === "unavailable" && <div className="empty-state">Approval records could not be loaded. Check the Worker API, D1 migrations, and admin session.</div>}
+      {state === "ready" && !entries.length && <div className="empty-state">No approval or sign-off events matched this filter.</div>}
+      {state === "ready" && entries.map((entry) => <LedgerRow key={`${entry.source}:${entry.id}`} entry={entry} />)}
+    </section>
+  </main>;
+}
+
+function LedgerRow({ entry }: { entry: ApprovalLedgerEntry }) {
+  const date = new Intl.DateTimeFormat("en-ZA", { dateStyle: "medium", timeStyle: "short" }).format(new Date(entry.occurredAt));
+  const proof = entry.integrity.status === "verified" ? "Signed proof verified" : entry.integrity.status === "failed" ? "Integrity check failed" : "Legacy workflow record";
+  return <article className={`ledger-row ${entry.category} ${entry.integrity.status}`}>
+    <div className="ledger-row-mark" aria-hidden="true">{entry.category === "image" ? "IMG" : "USR"}</div>
+    <div className="ledger-row-main">
+      <div className="ledger-row-top"><span className="section-kicker">{date}</span><span className={`ledger-proof-pill ${entry.integrity.status}`}>{proof}</span></div>
+      <h2>{entry.action}</h2>
+      <p><strong>{entry.actor.name}</strong> ({entry.actor.role}) recorded <strong>{entry.decision.replaceAll("_", " ")}</strong> for {entry.subject.type} <strong>{entry.subject.name}</strong>.</p>
+      <div className="ledger-meta"><span>{entry.resource.type}: {entry.resource.title}</span>{entry.sequence && <span>Stream {entry.streamId} / #{entry.sequence}</span>}{entry.integrity.hash && <span>Hash {entry.integrity.hash.slice(0, 12)}...</span>}</div>
+      {entry.notes && <p className="ledger-notes">{entry.notes}</p>}
+    </div>
+  </article>;
+}
+
+type OnboardingStepKey = "profile" | "seller" | "asset";
+
+const ONBOARDING_STEPS: { key: OnboardingStepKey; step: string; title: string; detail: string; anchor: string }[] = [
+  { key: "profile", step: "01", title: "Contributor profile", detail: "Identity, base location, and portfolio for verification.", anchor: "onboarding-profile" },
+  { key: "seller", step: "02", title: "Terms & payout", detail: "Sign the contributor terms and link a payout rail.", anchor: "onboarding-seller" },
+  { key: "asset", step: "03", title: "First record", detail: "Submit media with place, rights, and pricing context.", anchor: "onboarding-asset" },
+];
+
+function StepIcon({ stepKey }: { stepKey: OnboardingStepKey }) {
+  if (stepKey === "profile") return <svg viewBox="0 0 32 32" focusable="false"><rect x="4" y="6" width="24" height="20" rx="2" /><circle cx="12" cy="14" r="3" /><path d="M7.5 23c1-3 4.5-3 4.5-3s3.5 0 4.5 3" /><path d="M19 12h6M19 16h6M19 20h4" /></svg>;
+  if (stepKey === "seller") return <svg viewBox="0 0 32 32" focusable="false"><path d="M6 24 20 10l2 2L8 26H6z" /><path d="M18 12l2-2 2 2-2 2z" /><path d="M5 28h22" /></svg>;
+  return <svg viewBox="0 0 32 32" focusable="false"><rect x="4" y="7" width="24" height="18" rx="2" /><circle cx="11" cy="13" r="2.4" /><path d="M4 22l7-6 5 4 5-5 7 6" /><path d="M16 3v4" /></svg>;
+}
+
+function OnboardingStepper({ completed }: { completed: Partial<Record<OnboardingStepKey, boolean>> }) {
+  const firstOpen = ONBOARDING_STEPS.find((step) => !completed[step.key])?.key;
+  const doneCount = ONBOARDING_STEPS.filter((step) => completed[step.key]).length;
+  return <section className="onboarding-stepper" aria-label="Contributor onboarding progress">
+    <div className="card-heading"><div><span className="section-kicker">SELLER ONBOARDING</span><h2>Three steps to <em>selling.</em></h2></div><span className="status-pill cool">{doneCount} of {ONBOARDING_STEPS.length} complete</span></div>
+    <ol className="step-track">{ONBOARDING_STEPS.map((step) => {
+      const state = completed[step.key] ? "done" : step.key === firstOpen ? "current" : "todo";
+      const stateLabel = state === "done" ? "Complete" : state === "current" ? "Up next" : "Pending";
+      return <li key={step.key}><button type="button" className={`step-item ${state}`} aria-label={`Step ${step.step}: ${step.title} — ${stateLabel}`} onClick={() => document.getElementById(step.anchor)?.scrollIntoView({ behavior: "smooth", block: "start" })}><span className="step-visual" aria-hidden="true"><StepIcon stepKey={step.key} /></span><span className="step-copy"><small>{step.step} · {stateLabel}</small><strong>{step.title}</strong><span>{step.detail}</span></span><span className="step-state" aria-hidden="true">{state === "done" ? "✓" : "→"}</span></button></li>;
+    })}</ol>
+  </section>;
+}
+
+function BuyerActionsPanel({ navigate, onNotice }: { navigate: (view: View) => void; onNotice: (notice: string) => void }) {
+  return <section className="buyer-actions" aria-label="Buyer licence workflow">
+    <div className="card-heading"><div><span className="section-kicker">LICENCE WORKFLOW</span><h2>From brief to <em>licensed asset.</em></h2></div><span className="status-pill cool">Rights checked before checkout</span></div>
+    <div className="action-grid">
+      <button type="button" className="action-card" onClick={() => navigate("search")}><span className="action-step">01</span><strong>Find and inspect assets</strong><small>Open any result to review provenance, releases, and match evidence before you commit.</small><span className="action-go">Search archive →</span></button>
+      <button type="button" className="action-card" onClick={() => { navigate("search"); onNotice("Select an asset and choose Request access: licence rules are evaluated against its releases before any payment is created."); }}><span className="action-step">02</span><strong>Validate the licence</strong><small>Release and rights rules are evaluated server-side before any payment is created.</small><span className="action-go">How validation works →</span></button>
+      <button type="button" className="action-card" onClick={() => navigate("community")}><span className="action-step">03</span><strong>Raise a rights question</strong><small>Open a resolution case for usage, provenance, or takedown concerns.</small><span className="action-go">Open resolution desk →</span></button>
+    </div>
+  </section>;
+}
+
+function BuyerActionsPanelNext({ navigate, onNotice }: { navigate: (view: View) => void; onNotice: (notice: string) => void }) {
+  return <section className="buyer-actions" aria-label="Buyer licence workflow">
+    <div className="card-heading"><div><span className="section-kicker">LICENCE WORKFLOW</span><h2>From brief to <em>licensed asset.</em></h2></div><span className="status-pill cool">Rights checked before checkout</span></div>
+    <div className="action-grid">
+      <button type="button" className="action-card" onClick={() => navigate("search")}><span className="action-step">01</span><strong>Find and inspect assets</strong><small>Open any result to review provenance, releases, and match evidence before you commit.</small><span className="action-go">Search archive -&gt;</span></button>
+      <button type="button" className="action-card" onClick={() => { navigate("buyer"); onNotice("Choose an asset below to run the server-side licence checks before creating a request."); window.setTimeout(() => document.getElementById("buyer-licence-validation")?.scrollIntoView({ behavior: "smooth", block: "start" }), 140); }}><span className="action-step">02</span><strong>Validate the licence</strong><small>Release and rights rules are evaluated server-side before any payment is created.</small><span className="action-go">Open validation panel -&gt;</span></button>
+      <button type="button" className="action-card" onClick={() => navigate("community")}><span className="action-step">03</span><strong>Raise a rights question</strong><small>Open a resolution case for usage, provenance, or takedown concerns.</small><span className="action-go">Open resolution desk -&gt;</span></button>
+    </div>
+  </section>;
+}
+
+type LicenceHistoryItem = { id: string; assetId: string; assetTitle: string; licenceType: string; territory: string; durationDays: number; priceCents: number; status: string; createdAt: string; previewUrl: string | null };
+
+type CheckoutValidationResponse = ReturnType<typeof archiveDomain.evaluateLicenceRequest> & {
+  assetId: string;
+  priceCents: number | null;
+  currency: string;
+  monetizationModel: MonetizationModel;
+};
+
+function BuyerLicenceValidationPanel({ assets, api, navigate, onNotice, onRefresh }: { assets: Asset[]; api: (path: string, init?: RequestInit) => Promise<Response>; navigate: (view: View) => void; onNotice: (notice: string) => void; onRefresh: () => Promise<void> }) {
+  const availableAssets = useMemo(() => assets.filter((asset) => asset.status === "published" && asset.workflowStage === "approval"), [assets]);
+  const [selectedAssetId, setSelectedAssetId] = useState(availableAssets[0]?.id ?? "");
+  const [licenceType, setLicenceType] = useState<LicenceType>("commercial");
+  const [territory, setTerritory] = useState("Worldwide");
+  const [durationDays, setDurationDays] = useState("365");
+  const [validation, setValidation] = useState<CheckoutValidationResponse | null>(null);
+  const [state, setState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [errorMessage, setErrorMessage] = useState("");
+  const [creating, setCreating] = useState(false);
+
+  useEffect(() => {
+    if (!availableAssets.some((asset) => asset.id === selectedAssetId)) setSelectedAssetId(availableAssets[0]?.id ?? "");
+  }, [availableAssets, selectedAssetId]);
+
+  useEffect(() => {
+    setValidation(null);
+    setState("idle");
+    setErrorMessage("");
+  }, [selectedAssetId, licenceType, territory, durationDays]);
+
+  const selectedAsset = availableAssets.find((asset) => asset.id === selectedAssetId) ?? null;
+  const duration = Number(durationDays);
+
+  async function validate(event: React.FormEvent) {
+    event.preventDefault();
+    if (!selectedAssetId || !territory.trim() || !Number.isInteger(duration) || duration < 1 || duration > 3650) return;
+    setState("loading");
+    setErrorMessage("");
+    try {
+      const response = await api("/api/checkout/validate", { method: "POST", body: JSON.stringify({ assetId: selectedAssetId, licenceType, territory: territory.trim(), durationDays: duration }) });
+      const data = await readJson<CheckoutValidationResponse>(response, "Licence validation unavailable");
+      setValidation(data);
+      setState("ready");
+    } catch {
+      setValidation(null);
+      setState("error");
+      setErrorMessage("The server could not validate this request. Check the Worker connection and try again; no licence or payment was created.");
+    }
+  }
+
+  async function createLicenceRequest() {
+    if (!validation?.allowed || !selectedAssetId || !Number.isInteger(duration)) return;
+    if (validation.monetizationModel === "custom_quote") {
+      onNotice("This asset requires a custom quote. Open the resolution desk to start a rights and pricing conversation.");
+      navigate("community");
+      return;
+    }
+    setCreating(true);
+    try {
+      const response = await api("/api/checkout", { method: "POST", body: JSON.stringify({ assetId: selectedAssetId, licenceType, territory: territory.trim(), durationDays: duration }) });
+      const data = await readJson<{ licenceId: string; priceCents: number; currency: string }>(response, "Licence request unavailable");
+      onNotice(`Licence request created for ${formatZar(data.priceCents)}. Payment is not charged until a payment session is configured.`);
+      await onRefresh();
+    } catch {
+      setErrorMessage("The licence request could not be created. Your validation is still available to retry.");
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  return <section className="licence-validation-panel" id="buyer-licence-validation" aria-labelledby="licence-validation-title">
+    <div className="card-heading"><div><span className="section-kicker">SERVER-SIDE LICENCE CHECK</span><h2 id="licence-validation-title">Validate before you <em>commit.</em></h2></div><span className="status-pill cool">No payment yet</span></div>
+    <p className="licence-validation-intro">Select a published asset and intended use. The Worker checks approval, rights scope, and the release evidence required for that licence type before creating anything.</p>
+    {!availableAssets.length
+      ? <div className="empty-state">No published assets are available to validate yet. Search the archive for approved records, then return here.<br /><button type="button" className="outline-button" onClick={() => navigate("search")}>Search approved assets</button></div>
+      : <>
+        <form className="licence-validation-form" onSubmit={validate}>
+          <label>Asset to validate<select value={selectedAssetId} onChange={(event) => setSelectedAssetId(event.target.value)}>{availableAssets.map((asset) => <option key={asset.id} value={asset.id}>{asset.title} - {asset.city ?? asset.country ?? "Location pending"}</option>)}</select></label>
+          <label>Licence type<select value={licenceType} onChange={(event) => setLicenceType(event.target.value as LicenceType)}>{(["editorial", "commercial", "advertising", "social", "broadcast", "exclusive"] as LicenceType[]).map((value) => <option key={value} value={value}>{value[0].toUpperCase() + value.slice(1)}</option>)}</select></label>
+          <label>Territory<input required maxLength={80} value={territory} onChange={(event) => setTerritory(event.target.value)} /></label>
+          <label>Duration<select value={durationDays} onChange={(event) => setDurationDays(event.target.value)}><option value="30">30 days</option><option value="90">90 days</option><option value="365">1 year</option><option value="730">2 years</option><option value="1095">3 years</option></select></label>
+          <button type="submit" className="dark-button" disabled={state === "loading" || !territory.trim()}>{state === "loading" ? "Checking rights..." : "Run licence check"} <span>-&gt;</span></button>
+        </form>
+        {selectedAsset && <div className="licence-selection-evidence" role="note"><div><strong>{selectedAsset.title}</strong><span>{selectedAsset.city ?? selectedAsset.country ?? "Location evidence pending"} - {selectedAsset.kind === "video" ? "Film & video" : "Photography"}</span></div><div><span>Rights</span><strong>{rightsLabel(selectedAsset.rightsStatus)}</strong></div><div><span>Releases</span><strong>{releaseLabel(selectedAsset.modelReleaseStatus)} / {releaseLabel(selectedAsset.propertyReleaseStatus)}</strong></div></div>}
+        {state === "error" && <div className="validation-error" role="alert">{errorMessage}</div>}
+        {state === "ready" && validation && <div className={`validation-result ${validation.allowed ? "allowed" : "blocked"}`} role="status" aria-live="polite">
+          <div className="validation-result-heading"><div><span className="section-kicker">VALIDATION RESULT</span><h3>{validation.allowed ? "Ready for a licence request." : "This request is blocked."}</h3></div><strong>{validation.allowed ? (validation.priceCents === null ? "Custom quote" : formatZar(validation.priceCents)) : `${validation.blockingReasons.length} issue${validation.blockingReasons.length === 1 ? "" : "s"}`}</strong></div>
+          <p>{validation.allowed ? "The selected use passed the current approval, rights, and release checks. Creating a request does not charge payment." : "Resolve the failed checks or choose a narrower use before creating a request."}</p>
+          <div className="validation-checks">{validation.checks.map((check) => <div key={check.label}><span className={check.passed ? "check-pass" : "check-fail"}>{check.passed ? "OK" : "!"}</span><span><strong>{check.label}</strong><small>{check.detail}</small></span></div>)}</div>
+          {validation.allowed && <button type="button" className="approve-button" disabled={creating} onClick={() => void createLicenceRequest()}>{creating ? "Creating request..." : validation.monetizationModel === "custom_quote" ? "Open custom-quote desk" : "Create licence request"} -&gt;</button>}
+        </div>}
+      </>}
+  </section>;
+}
+
+function BuyerWorkspace({ assets, api, navigate, onNotice }: { assets: Asset[]; api: (path: string, init?: RequestInit) => Promise<Response>; navigate: (view: View) => void; onNotice: (notice: string) => void }) {
+  const [licences, setLicences] = useState<LicenceHistoryItem[]>([]);
+  const [lightboxes, setLightboxes] = useState<BuyerLightbox[]>([]);
+  const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
+  const [newLightboxTitle, setNewLightboxTitle] = useState("");
+  const [state, setState] = useState<"loading" | "ready" | "unavailable">("loading");
+
+  const load = useCallback(async () => {
+    try {
+      const [licenceResponse, lightboxResponse, savedSearchResponse] = await Promise.all([api("/api/my/licences"), api("/api/lightboxes"), api("/api/saved-searches")]);
+      const licenceData = await readJson<{ results: LicenceHistoryItem[] }>(licenceResponse, "Licence history unavailable");
+      const lightboxData = await readJson<{ results: BuyerLightbox[] }>(lightboxResponse, "Lightboxes unavailable");
+      const savedSearchData = await readJson<{ results: SavedSearch[] }>(savedSearchResponse, "Saved searches unavailable");
+      setLicences(licenceData.results);
+      setLightboxes(lightboxData.results);
+      setSavedSearches(savedSearchData.results);
+      setState("ready");
+    } catch {
+      setState("unavailable");
+    }
+  }, [api]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  async function createLightbox(event: React.FormEvent) {
+    event.preventDefault();
+    if (!newLightboxTitle.trim()) return;
+    try {
+      const response = await api("/api/lightboxes", { method: "POST", body: JSON.stringify({ title: newLightboxTitle.trim() }) });
+      if (!response.ok) throw new Error();
+      setNewLightboxTitle("");
+      onNotice("Lightbox created.");
+      await load();
+    } catch { onNotice("Could not create the lightbox."); }
+  }
+
+  async function removeSavedSearch(id: string) {
+    try { await api(`/api/saved-searches/${id}`, { method: "DELETE" }); setSavedSearches((current) => current.filter((item) => item.id !== id)); }
+    catch { onNotice("Could not remove the saved search."); }
+  }
+
+  return <>
+    <BuyerActionsPanelNext navigate={navigate} onNotice={onNotice} />
+    <BuyerLicenceValidationPanel assets={assets} api={api} navigate={navigate} onNotice={onNotice} onRefresh={load} />
+    <section className="buyer-collections" aria-label="Licences, lightboxes, and saved searches">
+      <div className="card-heading"><div><span className="section-kicker">LICENCE HISTORY</span><h2>What you have <em>licensed.</em></h2></div></div>
+      {state === "unavailable" && <div className="empty-state">Licence history is unavailable right now.</div>}
+      {state !== "unavailable" && (licences.length ? <div className="campaign-list">{licences.map((licence) => <div className="campaign-row" key={licence.id}><div><strong>{licence.assetTitle}</strong><small>{licence.licenceType} · {licence.territory}</small></div><b>{licence.status}</b><span>{formatZar(licence.priceCents)}</span></div>)}</div> : <div className="empty-state">No licences yet. Search the archive to license your first asset.</div>)}
+
+      <div className="card-heading"><div><span className="section-kicker">LIGHTBOXES</span><h2>Shortlist assets for a <em>brief.</em></h2></div></div>
+      <form className="inline-form" onSubmit={createLightbox}><input value={newLightboxTitle} onChange={(event) => setNewLightboxTitle(event.target.value)} placeholder="New lightbox title" aria-label="New lightbox title" /><button type="submit" className="outline-button">Create</button></form>
+      {state !== "unavailable" && (lightboxes.length ? <div className="rank-list">{lightboxes.map((lightbox) => <div className="rank-row" key={lightbox.id}><strong>{lightbox.title}</strong><span>{lightbox.assetCount} asset{lightbox.assetCount === 1 ? "" : "s"}</span></div>)}</div> : <div className="empty-state">No lightboxes yet. Save assets from search results to start one.</div>)}
+
+      <div className="card-heading"><div><span className="section-kicker">SAVED SEARCHES</span><h2>Get alerted on <em>new matches.</em></h2></div></div>
+      {state !== "unavailable" && (savedSearches.length ? <div className="rank-list">{savedSearches.map((search) => <div className="rank-row" key={search.id}><strong>{search.label}</strong><span>{search.notifyOnNew ? "Alerts on" : "Alerts off"}</span><button type="button" className="text-button" onClick={() => void removeSavedSearch(search.id)}>Remove</button></div>)}</div> : <div className="empty-state">Save a search from the search results page to get notified about new matches.</div>)}
+    </section>
+  </>;
+}
+
+function PayoutBatchAdmin({ api, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
+  const [batches, setBatches] = useState<PayoutBatchSummary[]>([]);
+  const [selected, setSelected] = useState<(PayoutBatchSummary & { items: PayoutBatchItem[] }) | null>(null);
+  const [periodStart, setPeriodStart] = useState("");
+  const [periodEnd, setPeriodEnd] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [decision, setDecision] = useState<"approve" | "reject" | null>(null);
+
+  const load = useCallback(async () => {
+    try { const response = await api("/api/admin/payout-batches"); const data = await readJson<{ results: PayoutBatchSummary[] }>(response, "Payout batches unavailable"); setBatches(data.results); }
+    catch { onNotice("Payout batches are unavailable right now."); }
+  }, [api, onNotice]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  async function createBatch(event: React.FormEvent) {
+    event.preventDefault();
+    if (!periodStart || !periodEnd) return;
+    setCreating(true);
+    try {
+      const response = await api("/api/admin/payout-batches", { method: "POST", body: JSON.stringify({ periodStart, periodEnd, currency: "ZAR" }) });
+      if (!response.ok) throw new Error();
+      onNotice("Payout batch created as a draft. Review the contributors and approve it before any payout provider is called.");
+      await load();
+    } catch { onNotice("Could not create the payout batch."); } finally { setCreating(false); }
+  }
+
+  async function viewBatch(id: string) {
+    try { const response = await api(`/api/admin/payout-batches/${id}`); const data = await readJson<PayoutBatchSummary & { items: PayoutBatchItem[] }>(response, "Batch detail unavailable"); setSelected(data); }
+    catch { onNotice("Could not load payout batch detail."); }
+  }
+
+  async function decideBatch(nextDecision: "approve" | "reject") {
+    if (!selected) return;
+    setDecision(nextDecision);
+    try {
+      const response = await api(`/api/admin/payout-batches/${selected.id}/decision`, { method: "POST", body: JSON.stringify({ decision: nextDecision }) });
+      if (!response.ok) throw new Error();
+      onNotice(nextDecision === "approve" ? "Payout batch approved and processing has started." : "Payout batch rejected. No payout was sent.");
+      await load();
+      await viewBatch(selected.id);
+    } catch { onNotice(nextDecision === "approve" ? "Could not approve this payout batch. No payout was sent." : "Could not reject this payout batch."); }
+    finally { setDecision(null); }
+  }
+
+  return <section className="admin-panel" aria-label="Payout batches">
+    <div className="card-heading"><div><span className="section-kicker">PAYOUT BATCHES</span><h2>Review contributor <em>payouts.</em></h2></div></div>
+    <form className="inline-form" onSubmit={createBatch}><label>Period start<input type="date" required value={periodStart} onChange={(event) => setPeriodStart(event.target.value)} /></label><label>Period end<input type="date" required value={periodEnd} onChange={(event) => setPeriodEnd(event.target.value)} /></label><button type="submit" className="dark-button" disabled={creating}>{creating ? "Creating…" : "Create batch"}</button></form>
+    {batches.length ? <div className="campaign-list">{batches.map((batch) => <button type="button" className="campaign-row" key={batch.id} onClick={() => void viewBatch(batch.id)}><div><strong>{batch.periodStart} → {batch.periodEnd}</strong><small>{batch.itemCount} contributor(s)</small></div><b>{batch.status === "draft" ? "awaiting approval" : batch.status}</b><span>{formatZar(batch.totalCents)}</span></button>)}</div> : <div className="empty-state">No payout batches yet.</div>}
+    {selected && <div className="payout-batch-detail"><div className="card-heading"><div><span className="section-kicker">BATCH REVIEW</span><h3>{selected.periodStart} → {selected.periodEnd}</h3></div><strong>{selected.status === "draft" ? "Awaiting approval" : selected.status}</strong></div><p className="field-help">This review shows the contributors, verified payout rails, and total before money moves. Approval starts provider processing; rejection cancels the draft.</p><ul>{selected.items.map((item) => <li key={item.id}><strong>{item.contributorName}</strong><span>{formatZar(item.amountCents)}</span><b>{item.status}</b>{item.failureReason && <small>{item.failureReason}</small>}</li>)}</ul>{selected.status === "draft" && <div className="review-actions"><button type="button" className="dark-button" disabled={decision !== null || !selected.items.length} onClick={() => void decideBatch("approve")}>{decision === "approve" ? "Approving…" : "Approve & process"}</button><button type="button" className="ghost-button danger-button" disabled={decision !== null} onClick={() => void decideBatch("reject")}>{decision === "reject" ? "Rejecting…" : "Reject batch"}</button></div>}<button type="button" className="text-button" onClick={() => setSelected(null)}>Close</button></div>}
+  </section>;
+}
+
+const WEBHOOK_EVENT_OPTIONS = ["asset.published", "licence.paid", "*"];
+
+function WebhookSubscriptionsAdmin({ api, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
+  const [subscriptions, setSubscriptions] = useState<WebhookSubscription[]>([]);
+  const [targetUrl, setTargetUrl] = useState("");
+  const [events, setEvents] = useState<string[]>(["asset.published"]);
+  const [creating, setCreating] = useState(false);
+
+  const load = useCallback(async () => {
+    try { const response = await api("/api/webhooks/subscriptions"); const data = await readJson<{ results: WebhookSubscription[] }>(response, "Webhooks unavailable"); setSubscriptions(data.results); }
+    catch { onNotice("Webhook subscriptions are unavailable right now."); }
+  }, [api, onNotice]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  async function create(event: React.FormEvent) {
+    event.preventDefault();
+    if (!targetUrl || !events.length) return;
+    setCreating(true);
+    try {
+      const response = await api("/api/webhooks/subscriptions", { method: "POST", body: JSON.stringify({ targetUrl, events }) });
+      if (!response.ok) throw new Error();
+      const data = await response.json() as { secret: string };
+      onNotice(`Webhook created. Signing secret (shown once): ${data.secret}`);
+      setTargetUrl("");
+      await load();
+    } catch { onNotice("Could not create the webhook subscription."); } finally { setCreating(false); }
+  }
+
+  async function remove(id: string) {
+    try { await api(`/api/webhooks/subscriptions/${id}`, { method: "DELETE" }); setSubscriptions((current) => current.filter((item) => item.id !== id)); }
+    catch { onNotice("Could not disable the webhook."); }
+  }
+
+  return <section className="admin-panel" aria-label="Webhook subscriptions">
+    <div className="card-heading"><div><span className="section-kicker">DEVELOPER WEBHOOKS</span><h2>Integrate with <em>external systems.</em></h2></div></div>
+    <form className="inline-form" onSubmit={create}><label>Target URL<input type="url" required value={targetUrl} onChange={(event) => setTargetUrl(event.target.value)} placeholder="https://example.com/hooks/veld" /></label><div className="checkbox-row-group">{WEBHOOK_EVENT_OPTIONS.map((option) => <label key={option} className="checkbox-row"><input type="checkbox" checked={events.includes(option)} onChange={(event) => setEvents((current) => event.target.checked ? [...current, option] : current.filter((value) => value !== option))} /> {option}</label>)}</div><button type="submit" className="dark-button" disabled={creating}>{creating ? "Creating…" : "Create webhook"}</button></form>
+    {subscriptions.length ? <div className="rank-list">{subscriptions.map((subscription) => <div className="rank-row" key={subscription.id}><strong>{subscription.targetUrl}</strong><span>{subscription.events.join(", ")}</span><button type="button" className="text-button" onClick={() => void remove(subscription.id)}>Disable</button></div>)}</div> : <div className="empty-state">No webhook subscriptions configured.</div>}
+  </section>;
+}
+
+function PhotoIndexHealth({ api, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
+  const [jobs, setJobs] = useState<Record<string, unknown>[]>([]);
+  const [status, setStatus] = useState<"all" | "failed" | "dead_lettered" | "needs_review">("all");
+
+  const load = useCallback(async () => {
+    try { const response = await api(`/api/admin/photo-jobs?status=${status}`); const data = await readJson<{ results: Record<string, unknown>[] }>(response, "Photo jobs unavailable"); setJobs(data.results); }
+    catch { onNotice("Photo index jobs are unavailable right now."); }
+  }, [api, onNotice, status]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  async function replay(jobId: string) {
+    try { const response = await api(`/api/admin/photo-jobs/${jobId}/replay`, { method: "POST", body: "{}" }); if (!response.ok) throw new Error(); onNotice("Job replayed."); await load(); }
+    catch { onNotice("Could not replay this job."); }
+  }
+
+  return <section className="admin-panel" aria-label="Photo index health">
+    <div className="card-heading"><div><span className="section-kicker">PHOTO INDEX HEALTH</span><h2>Enrichment & indexing <em>jobs.</em></h2></div></div>
+    <div className="filter-tabs">{(["all", "needs_review", "failed", "dead_lettered"] as const).map((value) => <button key={value} className={status === value ? "active" : ""} onClick={() => setStatus(value)}>{value.replaceAll("_", " ")}</button>)}</div>
+    {jobs.length ? <div className="campaign-list">{jobs.map((job) => <div className="campaign-row" key={String(job.id)}><div><strong>{String(job.title ?? job.asset_id)}</strong><small>{String(job.operation)} · attempt {String(job.attempts)}</small></div><b>{String(job.status)}</b>{["failed", "dead_lettered", "needs_review", "skipped"].includes(String(job.status)) && <button type="button" className="text-button" onClick={() => void replay(String(job.id))}>Replay</button>}</div>)}</div> : <div className="empty-state">No jobs match this filter.</div>}
+  </section>;
+}
+
+function AdminOperationsPanel({ api, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
+  return <div className="admin-operations">
+    <PayoutBatchAdmin api={api} onNotice={onNotice} />
+    <PhotoIndexHealth api={api} onNotice={onNotice} />
+    <WebhookSubscriptionsAdmin api={api} onNotice={onNotice} />
+  </div>;
+}
+
+function GovernanceWorkspace({ api, onNotice, sessionUser }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void; sessionUser: SessionUser }) {
   const [items, setItems] = useState<Asset[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [stage, setStage] = useState<WorkflowStage | "all">("all");
@@ -240,6 +1041,10 @@ function GovernanceWorkspace({ api, onNotice }: { api: (path: string, init?: Req
   }, [api]);
 
   async function action(name: "run_ai_tagging" | "save_correction" | "approve", updates: Partial<Asset> = {}) {
+    if (name === "run_ai_tagging") {
+      onNotice("AI enrichment runs once at upload. Save a manual metadata correction for later changes.");
+      return;
+    }
     if (!selected) return;
     try {
       const response = await api(`/api/governance/assets/${selected.id}/action`, { method: "POST", body: JSON.stringify({ action: name, ...updates }) });
@@ -250,7 +1055,7 @@ function GovernanceWorkspace({ api, onNotice }: { api: (path: string, init?: Req
       const refreshed = await api("/api/governance/assets?stage=all");
       if (refreshed.ok) setItems((await refreshed.json() as { results: Asset[] }).results);
     } catch { onNotice("The governance action was not saved. No local decision was applied."); return; }
-    onNotice(name === "run_ai_tagging" ? "AI enrichment queued for this media revision; seller/editor review will still be required." : name === "save_correction" ? "This exact metadata revision is now recorded as human-reviewed." : "Approved revision queued for keyword and semantic indexing.");
+    onNotice(name === "save_correction" ? "This exact metadata revision is now recorded as human-reviewed." : "Approved revision queued for keyword and semantic indexing.");
   }
 
   async function checkout() {
@@ -260,7 +1065,10 @@ function GovernanceWorkspace({ api, onNotice }: { api: (path: string, init?: Req
     catch { onNotice(validation.allowed ? "Checkout could not be opened. Payment was not created." : `Checkout blocked: ${validation.blockingReasons[0]}`); }
   }
 
-  return <main className="governance-page"><div className="governance-intro"><div><span className="section-kicker">CURATOR OPERATIONS / METADATA GOVERNANCE</span><h1>Review what the model <em>cannot know.</em></h1><p>Assets move from source file to licensable record through an explicit, auditable chain.</p></div><div className="governance-summary"><strong>{items.filter((item) => item.workflowStage !== "approval").length}</strong><span>assets need human attention</span></div></div><div className="governance-pipeline"><button className={stage === "all" ? "active" : ""} onClick={() => setStage("all")}><b>00</b><span>All assets<small>Full pipeline</small></span><strong>{items.length}</strong></button>{(["ingestion", "ai_tagging", "curator_correction", "approval"] as WorkflowStage[]).map((value, index) => <React.Fragment key={value}><i>→</i><button className={stage === value ? "active" : ""} onClick={() => setStage(value)}><b>0{index + 1}</b><span>{value === "ai_tagging" ? "AI tagging" : value === "curator_correction" ? "Curator correction" : value[0].toUpperCase() + value.slice(1)}<small>{items.filter((item) => item.workflowStage === value).length} records</small></span><strong>{items.filter((item) => item.workflowStage === value).length}</strong></button></React.Fragment>)}</div><div className="governance-grid"><div className="governance-queue"><div className="governance-queue-heading"><span className="section-kicker">REVIEW QUEUE</span><span>{visible.length} records</span></div>{visible.map((item) => <button key={item.id} className={`governance-item ${item.id === selected?.id ? "selected" : ""}`} onClick={() => setSelectedId(item.id)}><div className={`governance-thumb ${item.kind}`}><span>{item.kind === "video" ? "▶" : "V"}</span></div><div><small>{item.workflowStage === "curator_correction" ? "Needs correction" : item.workflowStage === "ai_tagging" ? "AI tagging" : item.workflowStage === "approval" ? "Approved" : "Ingestion"}</small><strong>{item.title}</strong><span>{item.contributor} · {item.city ?? item.country}</span></div><i className={item.humanVerified ? "verified" : ""}></i></button>)}</div>{selected && <GovernanceDetail asset={selected} licenceType={licenceType} setLicenceType={setLicenceType} validation={validation!} onAction={action} onCheckout={checkout} />}</div></main>;
+  return <>
+  <main className="governance-page"><div className="governance-intro"><div><span className="section-kicker">CURATOR OPERATIONS / METADATA GOVERNANCE</span><h1>Review what the model <em>cannot know.</em></h1><p>Assets move from source file to licensable record through an explicit, auditable chain.</p></div><div className="governance-summary"><strong>{items.filter((item) => item.workflowStage !== "approval").length}</strong><span>assets need human attention</span></div></div><div className="governance-pipeline"><button className={stage === "all" ? "active" : ""} onClick={() => setStage("all")}><b>00</b><span>All assets<small>Full pipeline</small></span><strong>{items.length}</strong></button>{(["ingestion", "ai_tagging", "curator_correction", "approval"] as WorkflowStage[]).map((value, index) => <React.Fragment key={value}><i>→</i><button className={stage === value ? "active" : ""} onClick={() => setStage(value)}><b>0{index + 1}</b><span>{value === "ai_tagging" ? "AI tagging" : value === "curator_correction" ? "Curator correction" : value[0].toUpperCase() + value.slice(1)}<small>{items.filter((item) => item.workflowStage === value).length} records</small></span><strong>{items.filter((item) => item.workflowStage === value).length}</strong></button></React.Fragment>)}</div><div className="governance-grid"><div className="governance-queue"><div className="governance-queue-heading"><span className="section-kicker">REVIEW QUEUE</span><span>{visible.length} records</span></div>{visible.map((item) => <button key={item.id} className={`governance-item ${item.id === selected?.id ? "selected" : ""}`} onClick={() => setSelectedId(item.id)}><div className={`governance-thumb ${item.kind}`}><span>{item.kind === "video" ? "▶" : "V"}</span></div><div><small>{item.workflowStage === "curator_correction" ? "Needs correction" : item.workflowStage === "ai_tagging" ? "AI tagging" : item.workflowStage === "approval" ? "Approved" : "Ingestion"}</small><strong>{item.title}</strong><span>{item.contributor} · {item.city ?? item.country}</span></div><i className={item.humanVerified ? "verified" : ""}></i></button>)}</div>{selected && <GovernanceDetail asset={selected} licenceType={licenceType} setLicenceType={setLicenceType} validation={validation!} onAction={action} onCheckout={checkout} />}</div></main>
+  {sessionUser.role === "admin" && <AdminOperationsPanel api={api} onNotice={onNotice} />}
+  </>;
 }
 
 function GovernanceDetail({ asset, licenceType, setLicenceType, validation, onAction, onCheckout }: { asset: Asset; licenceType: LicenceType; setLicenceType: (value: LicenceType) => void; validation: ReturnType<typeof archiveDomain.evaluateLicenceRequest>; onAction: (name: "run_ai_tagging" | "save_correction" | "approve", updates?: Partial<Asset>) => void; onCheckout: () => void }) {
@@ -292,17 +1100,86 @@ function AssetPricingFields({ asset, setAsset }: { asset: { monetizationModel: M
   return <div className="asset-pricing-fields"><label>How should this asset be sold?<select value={asset.monetizationModel} onChange={(event) => setAsset({ ...asset, monetizationModel: event.target.value as MonetizationModel })}><option value="membership">Membership access</option><option value="individual_license">Sell an individual licence</option><option value="custom_quote">Custom quote for premium work</option></select></label>{asset.monetizationModel === "individual_license" && <label>Annual licence price (ZAR)<input required min="1" step="0.01" type="number" value={asset.licensePriceZar} onChange={(event) => setAsset({ ...asset, licensePriceZar: event.target.value })} placeholder="e.g. 2500" /><small className="field-help">Your price is used for a standard one-year licence. Rights and releases still need editorial approval.</small></label>}{asset.monetizationModel === "custom_quote" && <small className="field-help">Buyers will be asked to contact you for a bespoke price instead of checking out immediately.</small>}</div>;
 }
 
+function putFileWithProgress(url: string, file: File, onProgress: (percent: number) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("PUT", url);
+    request.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+    request.upload.onprogress = (event) => { if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100)); };
+    request.onload = () => { if (request.status >= 200 && request.status < 300) resolve(); else reject(new Error(`Upload failed with status ${request.status}`)); };
+    request.onerror = () => reject(new Error("Upload failed due to a network error"));
+    request.send(file);
+  });
+}
+
 function ContributorWorkspace({ api, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
   const [form, setForm] = useState({ bio: "", organisationName: "", location: "", contributorType: "individual", equipment: "", portfolioUrl: "", acceptTerms: false });
   const [asset, setAsset] = useState({ kind: "image", title: "", description: "", caption: "", city: "", province: "", locality: "", landmark: "", subjectTags: "", culturalTags: "", rightsStatus: "pending", modelReleaseStatus: "unknown", propertyReleaseStatus: "unknown", monetizationModel: "membership" as MonetizationModel, licensePriceZar: "" });
   const [file, setFile] = useState<File | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [uploadError, setUploadError] = useState("");
+  const [pendingUpload, setPendingUpload] = useState<{ assetId: string; uploadUrl: string; uploadId: string } | null>(null);
   const [seller, setSeller] = useState({ signerName: "", signatureReference: "", provider: "stripe_connect", providerAccountId: "", accountHolderName: "", accountLast4: "", branchLast4: "" });
   const [turnstileToken, setTurnstileToken] = useState("");
   const [saving, setSaving] = useState(false);
+  const [completed, setCompleted] = useState<Partial<Record<OnboardingStepKey, boolean>>>({});
+
+  useEffect(() => {
+    let active = true;
+    api("/api/onboarding/status").then(async (response) => {
+      if (!response.ok) return;
+      const data = await response.json() as { workflow?: Record<string, unknown> | null };
+      if (!active || !data.workflow) return;
+      const workflow = data.workflow;
+      setCompleted({
+        profile: Boolean(workflow.user_id) || ["submitted", "approved"].includes(String(workflow.onboarding_status ?? "")),
+        seller: Boolean(workflow.tender_id),
+        asset: false,
+      });
+      if (typeof workflow.organisation_name === "string" && workflow.organisation_name) setForm((current) => ({ ...current, organisationName: String(workflow.organisation_name), bio: typeof workflow.bio === "string" ? workflow.bio : current.bio }));
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [api]);
 
   async function saveOnboarding(event: React.FormEvent) {
     event.preventDefault(); setSaving(true);
-    try { const response = await api("/api/onboarding", { method: "PUT", body: JSON.stringify({ ...form, languages: ["English", "isiXhosa", "Afrikaans"], specialties: asset.subjectTags.split(",").map((tag) => tag.trim()).filter(Boolean) }) }); if (!response.ok) throw new Error(); onNotice("Contributor profile submitted for verification."); } catch { onNotice("Profile captured in the workspace. Apply migration 0002_phase1_core.sql and connect auth to persist it."); } finally { setSaving(false); }
+    try { const response = await api("/api/onboarding", { method: "PUT", body: JSON.stringify({ ...form, languages: ["English", "isiXhosa", "Afrikaans"], specialties: asset.subjectTags.split(",").map((tag) => tag.trim()).filter(Boolean) }) }); if (!response.ok) throw new Error(); onNotice("Contributor profile submitted for verification."); setCompleted((current) => ({ ...current, profile: true })); } catch { onNotice("Profile captured in the workspace. Apply migration 0002_phase1_core.sql and connect auth to persist it."); } finally { setSaving(false); }
+  }
+
+  async function runUpload(assetId: string, uploadFile: File) {
+    setUploadProgress(0);
+    setUploadError("");
+    try {
+      const sessionResponse = await api("/api/uploads", { method: "POST", body: JSON.stringify({ filename: uploadFile.name, contentType: uploadFile.type, sizeBytes: uploadFile.size, assetId }) });
+      const session = await sessionResponse.json() as { uploadUrl?: string; uploadId: string };
+      if (!sessionResponse.ok || !session.uploadUrl) throw new Error("R2 is not configured");
+      setPendingUpload({ assetId, uploadUrl: session.uploadUrl, uploadId: session.uploadId });
+      await putFileWithProgress(session.uploadUrl, uploadFile, setUploadProgress);
+      const completionResponse = await api(`/api/uploads/${session.uploadId}/complete`, { method: "POST", body: "{}" });
+      if (!completionResponse.ok) throw new Error(`Upload completion failed (${completionResponse.status})`);
+      setUploadProgress(100);
+      setPendingUpload(null);
+      return true;
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : "The upload failed. Check your connection and try again.");
+      return false;
+    }
+  }
+
+  async function retryUpload() {
+    if (!pendingUpload || !file) return;
+    setUploadProgress(0);
+    setUploadError("");
+    try {
+      await putFileWithProgress(pendingUpload.uploadUrl, file, setUploadProgress);
+      const completionResponse = await api(`/api/uploads/${pendingUpload.uploadId}/complete`, { method: "POST", body: "{}" });
+      if (!completionResponse.ok) throw new Error(`Upload completion failed (${completionResponse.status})`);
+      setUploadProgress(100);
+      setPendingUpload(null);
+      onNotice("Upload completed after retry. Asset submitted to the editorial review queue.");
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : "The retry failed. Check your connection and try again.");
+    }
   }
 
   async function createAsset(event: React.FormEvent) {
@@ -313,14 +1190,10 @@ function ContributorWorkspace({ api, onNotice }: { api: (path: string, init?: Re
       if (!createdResponse.ok) throw new Error();
       const created = await createdResponse.json() as { id: string };
       if (file) {
-        const sessionResponse = await api("/api/uploads", { method: "POST", body: JSON.stringify({ filename: file.name, contentType: file.type, sizeBytes: file.size, assetId: created.id }) });
-        const session = await sessionResponse.json() as { uploadUrl?: string; uploadId: string };
-        if (!sessionResponse.ok || !session.uploadUrl) throw new Error("R2 is not configured");
-        const uploadResponse = await fetch(session.uploadUrl, { method: "PUT", headers: { "Content-Type": file.type }, body: file });
-        if (!uploadResponse.ok) throw new Error("R2 upload failed");
-        await api(`/api/uploads/${session.uploadId}/complete`, { method: "POST", body: "{}" });
+        const uploaded = await runUpload(created.id, file);
+        if (!uploaded) { onNotice("Asset record saved, but the media upload failed. Retry the upload below without losing your submission."); setSaving(false); return; }
       }
-      onNotice("Asset submitted to the editorial review queue."); setAsset({ ...asset, title: "", description: "", caption: "" }); setFile(null);
+      onNotice("Asset submitted to the editorial review queue."); setCompleted((current) => ({ ...current, asset: true })); setAsset({ ...asset, title: "", description: "", caption: "" }); setFile(null); setUploadProgress(null);
     } catch { onNotice("The metadata form is ready, but persistence needs a local D1 migration and R2 credentials."); } finally { setSaving(false); }
   }
 
@@ -331,13 +1204,13 @@ function ContributorWorkspace({ api, onNotice }: { api: (path: string, init?: Re
       if (!walletResponse.ok) throw new Error("wallet");
       const contractResponse = await api("/api/onboarding/contract", { method: "POST", body: JSON.stringify({ signerName: seller.signerName, signatureMethod: "firma", signatureReference: seller.signatureReference, turnstileToken: turnstileToken || undefined }) });
       if (!contractResponse.ok) throw new Error("contract");
-      onNotice("Contract signed and tender submitted. Complete KYC documents before admin approval.");
+      onNotice("Contract signed and tender submitted. Complete KYC documents before admin approval."); setCompleted((current) => ({ ...current, seller: true }));
     } catch { onNotice("Seller workflow needs the 0005 migration, a configured Turnstile secret, and provider wallet credentials."); } finally { setSaving(false); }
   }
 
-  return <main className="workspace-page"><div className="workspace-intro"><span className="section-kicker">CONTRIBUTOR WORKSPACE</span><h1>Keep the <em>context.</em></h1><p>Submit a record with the location, rights, and cultural context an editor needs to trust it.</p></div><div className="workspace-grid"><form className="workspace-card" onSubmit={saveOnboarding}><div className="card-heading"><span className="section-kicker">01 · PROFILE</span><span className="status-pill">Draft</span></div><h2>Your contributor profile</h2><label>Organisation or public name<input value={form.organisationName} onChange={(event) => setForm({ ...form, organisationName: event.target.value })} /></label><label>Biography<textarea value={form.bio} onChange={(event) => setForm({ ...form, bio: event.target.value })} /></label><div className="two-fields"><label>Contributor type<select value={form.contributorType} onChange={(event) => setForm({ ...form, contributorType: event.target.value })}><option value="individual">Individual</option><option value="agency">Agency</option><option value="archive">Archive</option><option value="institution">Institution</option></select></label><label>Base location<input value={form.location} onChange={(event) => setForm({ ...form, location: event.target.value })} /></label></div><label>Portfolio URL<input value={form.portfolioUrl} onChange={(event) => setForm({ ...form, portfolioUrl: event.target.value })} placeholder="https://…" /></label><label className="checkbox-row"><input type="checkbox" checked={form.acceptTerms} onChange={(event) => setForm({ ...form, acceptTerms: event.target.checked })} /> I accept the contributor terms</label><button className="dark-button" disabled={saving}>Save profile <span>↗</span></button></form>
-    <form className="workspace-card" onSubmit={submitSellerWorkflow}><div className="card-heading"><span className="section-kicker">02 · SELLER SETUP</span><span className="status-pill warm">Pending tender</span></div><h2>Sign terms & set payout</h2><p className="dialog-intro">Your signed terms hash, KYC case, and payout wallet are linked to one internal approval record. Raw bank credentials are never stored here.</p><label>Signer name<input required value={seller.signerName} onChange={(event) => setSeller({ ...seller, signerName: event.target.value })} /></label><label>Firma signature reference<input required minLength={8} value={seller.signatureReference} onChange={(event) => setSeller({ ...seller, signatureReference: event.target.value })} placeholder="Reference returned by Firma" /></label><div className="two-fields"><label>Payout rail<select value={seller.provider} onChange={(event) => setSeller({ ...seller, provider: event.target.value })}><option value="stripe_connect">Stripe Connect</option><option value="payfast">PayFast</option><option value="za_bank">South African bank adapter</option></select></label><label>Provider account ID<input value={seller.providerAccountId} onChange={(event) => setSeller({ ...seller, providerAccountId: event.target.value })} placeholder="Connected account / recipient reference" /></label></div><label>Account holder<input required value={seller.accountHolderName} onChange={(event) => setSeller({ ...seller, accountHolderName: event.target.value })} /></label><div className="two-fields"><label>Account last 4<input inputMode="numeric" pattern="\d{4}" value={seller.accountLast4} onChange={(event) => setSeller({ ...seller, accountLast4: event.target.value })} /></label><label>Branch last 4<input inputMode="numeric" pattern="\d{4}" value={seller.branchLast4} onChange={(event) => setSeller({ ...seller, branchLast4: event.target.value })} /></label></div><TurnstileChallenge onToken={setTurnstileToken} /><label className="checkbox-row"><input type="checkbox" required /> I agree to the current Contributor Terms of Service and authorize this digital signature record.</label><button className="dark-button" disabled={saving}>Submit seller tender <span>↗</span></button></form>
-    <form className="workspace-card" onSubmit={createAsset}><div className="card-heading"><span className="section-kicker">02 · INGESTION</span><span className="status-pill warm">Needs review</span></div><h2>Submit a record</h2><AssetPricingFields asset={asset} setAsset={setAsset} /><div className="two-fields"><label>Media type<select value={asset.kind} onChange={(event) => setAsset({ ...asset, kind: event.target.value })}><option value="image">Photography</option><option value="video">Film & video</option></select></label><label>File<input type="file" accept="image/*,video/*" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label></div><label>Title<input required value={asset.title} onChange={(event) => setAsset({ ...asset, title: event.target.value })} placeholder="A precise, human title" /></label><label>Caption<textarea value={asset.caption} onChange={(event) => setAsset({ ...asset, caption: event.target.value })} placeholder="What is actually happening in the frame?" /></label><div className="two-fields"><label>City<input value={asset.city} onChange={(event) => setAsset({ ...asset, city: event.target.value })} /></label><label>Locality<input value={asset.locality} onChange={(event) => setAsset({ ...asset, locality: event.target.value })} placeholder="Cape Flats, Bo-Kaap…" /></label></div><label>Subject tags<input value={asset.subjectTags} onChange={(event) => setAsset({ ...asset, subjectTags: event.target.value })} placeholder="people, food, community" /></label><label>Cultural context tags<input value={asset.culturalTags} onChange={(event) => setAsset({ ...asset, culturalTags: event.target.value })} placeholder="South African braai, wood-fire braai" /></label><div className="two-fields"><label>Rights<select value={asset.rightsStatus} onChange={(event) => setAsset({ ...asset, rightsStatus: event.target.value })}><option value="pending">Pending verification</option><option value="editorial_only">Editorial only</option><option value="verified">Commercial licensing</option></select></label><label>Model release<select value={asset.modelReleaseStatus} onChange={(event) => setAsset({ ...asset, modelReleaseStatus: event.target.value })}><option value="unknown">Unknown</option><option value="not_required">Not required</option><option value="pending">Pending</option><option value="verified">Verified</option></select></label></div><label>Property release<select value={asset.propertyReleaseStatus} onChange={(event) => setAsset({ ...asset, propertyReleaseStatus: event.target.value })}><option value="unknown">Unknown</option><option value="not_required">Not required</option><option value="pending">Pending</option><option value="verified">Verified</option></select></label><small className="field-help">Commercial campaigns may require model and property evidence. Editorial-only work must remain clearly labelled.</small><button className="dark-button" disabled={saving || !asset.title}>{saving ? "Submitting…" : "Submit for review"} <span>↗</span></button></form></div></main>;
+  return <main className="workspace-page"><div className="workspace-intro"><span className="section-kicker">CONTRIBUTOR WORKSPACE</span><h1>Keep the <em>context.</em></h1><p>Submit a record with the location, rights, and cultural context an editor needs to trust it.</p></div><OnboardingStepper completed={completed} /><div className="workspace-grid"><form className="workspace-card" id="onboarding-profile" onSubmit={saveOnboarding}><div className="card-heading"><span className="section-kicker">01 · PROFILE</span>{completed.profile ? <span className="status-pill cool">Submitted</span> : <span className="status-pill">Draft</span>}</div><h2>Your contributor profile</h2><label>Organisation or public name<input value={form.organisationName} onChange={(event) => setForm({ ...form, organisationName: event.target.value })} /></label><label>Biography<textarea value={form.bio} onChange={(event) => setForm({ ...form, bio: event.target.value })} /></label><div className="two-fields"><label>Contributor type<select value={form.contributorType} onChange={(event) => setForm({ ...form, contributorType: event.target.value })}><option value="individual">Individual</option><option value="agency">Agency</option><option value="archive">Archive</option><option value="institution">Institution</option></select></label><label>Base location<input value={form.location} onChange={(event) => setForm({ ...form, location: event.target.value })} /></label></div><label>Portfolio URL<input value={form.portfolioUrl} onChange={(event) => setForm({ ...form, portfolioUrl: event.target.value })} placeholder="https://…" /></label><label className="checkbox-row"><input type="checkbox" checked={form.acceptTerms} onChange={(event) => setForm({ ...form, acceptTerms: event.target.checked })} /> I accept the contributor terms</label><button className="dark-button" disabled={saving}>Save profile <span>↗</span></button></form>
+    <form className="workspace-card" id="onboarding-seller" onSubmit={submitSellerWorkflow}><div className="card-heading"><span className="section-kicker">02 · SELLER SETUP</span>{completed.seller ? <span className="status-pill cool">Tender submitted</span> : <span className="status-pill warm">Pending tender</span>}</div><h2>Sign terms & set payout</h2><p className="dialog-intro">Your signed terms hash, KYC case, and payout wallet are linked to one internal approval record. Raw bank credentials are never stored here.</p><label>Signer name<input required value={seller.signerName} onChange={(event) => setSeller({ ...seller, signerName: event.target.value })} /></label><label>Firma signature reference<input required minLength={8} value={seller.signatureReference} onChange={(event) => setSeller({ ...seller, signatureReference: event.target.value })} placeholder="Reference returned by Firma" /></label><div className="two-fields"><label>Payout rail<select value={seller.provider} onChange={(event) => setSeller({ ...seller, provider: event.target.value })}><option value="stripe_connect">Stripe Connect</option><option value="payfast">PayFast</option><option value="za_bank">South African bank adapter</option></select></label><label>Provider account ID<input value={seller.providerAccountId} onChange={(event) => setSeller({ ...seller, providerAccountId: event.target.value })} placeholder="Connected account / recipient reference" /></label></div><label>Account holder<input required value={seller.accountHolderName} onChange={(event) => setSeller({ ...seller, accountHolderName: event.target.value })} /></label><div className="two-fields"><label>Account last 4<input inputMode="numeric" pattern="\d{4}" value={seller.accountLast4} onChange={(event) => setSeller({ ...seller, accountLast4: event.target.value })} /></label><label>Branch last 4<input inputMode="numeric" pattern="\d{4}" value={seller.branchLast4} onChange={(event) => setSeller({ ...seller, branchLast4: event.target.value })} /></label></div><TurnstileChallenge onToken={setTurnstileToken} /><label className="checkbox-row"><input type="checkbox" required /> I agree to the current Contributor Terms of Service and authorize this digital signature record.</label><button className="dark-button" disabled={saving}>Submit seller tender <span>↗</span></button></form>
+    <form className="workspace-card" id="onboarding-asset" onSubmit={createAsset}><div className="card-heading"><span className="section-kicker">03 · FIRST ASSET</span>{completed.asset ? <span className="status-pill cool">In review</span> : <span className="status-pill warm">Needs review</span>}</div><h2>Submit a record</h2><AssetPricingFields asset={asset} setAsset={setAsset} /><div className="two-fields"><label>Media type<select value={asset.kind} onChange={(event) => setAsset({ ...asset, kind: event.target.value })}><option value="image">Photography</option><option value="video">Film & video</option></select></label><label>Source file<input type="file" accept="image/*,video/*" onChange={(event) => setFile(event.target.files?.[0] ?? null)} />{file ? <small className="field-help">{file.name} · {Math.max(1, Math.round(file.size / 1024 / 1024))} MB — uploads after the record is created</small> : <small className="field-help">Image or video up to the configured limit. The file uploads privately after the record is created.</small>}{uploadProgress !== null && <div className="upload-progress" role="status"><div className="upload-progress-track"><span style={{ width: `${uploadProgress}%` }} /></div><small>{uploadProgress < 100 ? `Uploading… ${uploadProgress}%` : "Upload complete"}</small></div>}{uploadError && <div className="upload-error" role="alert"><span>{uploadError}</span><button type="button" className="outline-button" onClick={() => void retryUpload()}>Retry upload</button></div>}</label></div><label>Title<input required value={asset.title} onChange={(event) => setAsset({ ...asset, title: event.target.value })} placeholder="A precise, human title" /></label><label>Caption<textarea value={asset.caption} onChange={(event) => setAsset({ ...asset, caption: event.target.value })} placeholder="What is actually happening in the frame?" /></label><div className="two-fields"><label>City<input value={asset.city} onChange={(event) => setAsset({ ...asset, city: event.target.value })} /></label><label>Locality<input value={asset.locality} onChange={(event) => setAsset({ ...asset, locality: event.target.value })} placeholder="Cape Flats, Bo-Kaap…" /></label></div><label>Subject tags<input value={asset.subjectTags} onChange={(event) => setAsset({ ...asset, subjectTags: event.target.value })} placeholder="people, food, community" /></label><label>Cultural context tags<input value={asset.culturalTags} onChange={(event) => setAsset({ ...asset, culturalTags: event.target.value })} placeholder="South African braai, wood-fire braai" /></label><div className="two-fields"><label>Rights<select value={asset.rightsStatus} onChange={(event) => setAsset({ ...asset, rightsStatus: event.target.value })}><option value="pending">Pending verification</option><option value="editorial_only">Editorial only</option><option value="verified">Commercial licensing</option></select></label><label>Model release<select value={asset.modelReleaseStatus} onChange={(event) => setAsset({ ...asset, modelReleaseStatus: event.target.value })}><option value="unknown">Unknown</option><option value="not_required">Not required</option><option value="pending">Pending</option><option value="verified">Verified</option></select></label></div><label>Property release<select value={asset.propertyReleaseStatus} onChange={(event) => setAsset({ ...asset, propertyReleaseStatus: event.target.value })}><option value="unknown">Unknown</option><option value="not_required">Not required</option><option value="pending">Pending</option><option value="verified">Verified</option></select></label><small className="field-help">Commercial campaigns may require model and property evidence. Editorial-only work must remain clearly labelled.</small><button className="dark-button" disabled={saving || !asset.title}>{saving ? "Submitting…" : "Submit for review"} <span>↗</span></button></form></div></main>;
 }
 
 type TenderRecord = { [key: string]: string | null | undefined; wallet_id?: string | null };
@@ -351,7 +1224,17 @@ function ReviewWorkspace({ items, api, onNotice, onReload }: { items: Asset[]; a
   return <main className="workspace-page"><div className="workspace-intro"><span className="section-kicker">EDITORIAL GOVERNANCE</span><h1>Review what is <em>real.</em></h1><p>Publish only what has evidence for place, context, rights, consent, and seller identity.</p></div><section className="review-queue"><div className="card-heading"><span className="section-kicker">PENDING TENDERS</span><span>{tenders.length} seller submissions</span></div>{tenders.length ? tenders.map((tender) => <article className="review-item" key={String(tender.id)}><div className="review-copy"><div className="card-heading"><span className="section-kicker">{String(tender.id).slice(0, 8)} · {String(tender.created_at ?? "")}</span><span className="status-pill warm">{String(tender.status)}</span></div><h2>{String(tender.display_name)}</h2><p>{String(tender.email)} · contract {String(tender.contract_version)} · hash {String(tender.contract_hash).slice(0, 16)}…</p><div className="review-evidence"><span>KYC {String(tender.verification_status ?? "missing")}</span><span>Wallet {String(tender.wallet_provider ?? "missing")} / {String(tender.wallet_status ?? "missing")}</span><span>Risk {String(tender.risk_level ?? "unknown")}</span></div><div className="review-actions">{tender.wallet_id && tender.wallet_status !== "verified" && <button className="outline-button" onClick={() => verifyWallet(tender)}>Verify wallet</button>}<button className="dark-button" onClick={() => decideTender(tender, "approved")}>Accept tender</button><button className="ghost-button" onClick={() => decideTender(tender, "corrections_requested")}>Request corrections</button><button className="ghost-button danger-button" onClick={() => decideTender(tender, "rejected")}>Reject</button></div></div></article>) : <div className="empty-state">No seller tenders are waiting for review.</div>}</section><div className="review-queue">{items.length ? items.map((asset) => <article className="review-item" key={asset.id}><div className={`review-visual ${asset.kind}`}><span>{asset.kind === "video" ? "▶" : "V"}</span></div><div className="review-copy"><div className="card-heading"><span className="section-kicker">{asset.city}, {asset.province}</span><span className={`status-pill ${asset.humanVerified ? "cool" : "warm"}`}>{asset.humanVerified ? "Verified" : "Needs review"}</span></div><h2>{asset.title}</h2><p>{asset.caption || asset.description}</p><div className="review-tags">{asset.culturalTags.map((tag) => <span key={tag}>{tag}</span>)}</div><div className="review-evidence"><span>Authenticity {archiveDomain.percent(asset.authenticityConfidence)}%</span><span>Rights {asset.rightsStatus}</span><span>Model release {asset.modelReleaseStatus}</span></div><div className="review-actions"><button className="dark-button" onClick={() => decide(asset, "approved")}>Approve</button><button className="ghost-button" onClick={() => decide(asset, "needs_changes")}>Request changes</button><button className="ghost-button danger-button" onClick={() => decide(asset, "rejected")}>Reject</button></div></div></article>) : <div className="empty-state">No records are waiting for editorial review.</div>}</div></main>;
 }
 
-function AssetCard({ asset, index, onOpen }: { asset: Asset; index: number; onOpen: (asset: Asset) => void }) { const explanation = asset.matchExplanation ?? archiveDomain.buildMatchExplanation(asset); return <button type="button" className={`asset-card card-${index + 1}`} onClick={() => onOpen(asset)} aria-haspopup="dialog"><div className={`asset-visual visual-${index + 1} ${asset.kind}`}><div className="visual-overlay"><span aria-hidden="true">{asset.kind === "video" ? "▶" : "V"}</span><span>{asset.kind === "video" ? "01:24" : "4K"}</span></div><div className="visual-place">{asset.landmark ?? asset.locality ?? asset.city}</div></div><div className="asset-info"><div><h3>{asset.title}</h3><p>{asset.city}, {asset.province}</p><span className={`confidence-chip ${archiveDomain.confidenceLabel(explanation.matchConfidence)}`}>{archiveDomain.percent(explanation.matchConfidence)}% match</span><small className="asset-pricing-label">{assetPricingLabel(asset)}</small></div><span className={`status-dot ${asset.humanVerified ? "verified" : "review"}`} title={asset.humanVerified ? "Human verified" : "Needs editor review"} aria-label={asset.humanVerified ? "Human verified" : "Needs editor review"} /></div></button>; }
+function MediaAsset({ asset, controls = false }: { asset: Asset; controls?: boolean }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [asset.id, asset.previewUrl, asset.streamEmbedUrl]);
+  if (failed || (!asset.previewUrl && !asset.streamEmbedUrl)) return <div className="media-unavailable" role="status">Preview unavailable</div>;
+  if (controls && asset.streamEmbedUrl) return <iframe className="media-frame" src={asset.streamEmbedUrl} title={`${asset.title} video player`} allow="accelerometer; gyroscope; autoplay; encrypted-media; picture-in-picture" allowFullScreen />;
+  if (asset.kind === "video" && asset.previewUrl) return <video className="media-element" src={asset.previewUrl} controls={controls} playsInline preload={controls ? "metadata" : "none"} aria-label={`${asset.title} video preview`} onError={() => setFailed(true)} />;
+  if (asset.kind === "image" && asset.previewUrl) return <img className="media-element" src={asset.previewUrl} alt={asset.title} loading={controls ? "eager" : "lazy"} onError={() => setFailed(true)} />;
+  return <div className="media-unavailable" role="status">Stream playback is not configured</div>;
+}
+
+function AssetCard({ asset, index, onOpen }: { asset: Asset; index: number; onOpen: (asset: Asset) => void }) { const explanation = asset.matchExplanation ?? archiveDomain.buildMatchExplanation(asset); return <button type="button" className={`asset-card card-${index + 1}`} onClick={() => onOpen(asset)} aria-haspopup="dialog"><div className={`asset-visual visual-${index + 1} ${asset.kind}`}>{asset.previewUrl && <MediaAsset asset={asset} />}<div className="visual-overlay"><span aria-hidden="true">{asset.kind === "video" ? "▶" : "V"}</span><span>{asset.kind === "video" ? "FILM" : "4K"}</span></div><div className="visual-place">{asset.landmark ?? asset.locality ?? asset.city}</div></div><div className="asset-info"><div><h3>{asset.title}</h3><p>{asset.city}, {asset.province}</p><span className={`confidence-chip ${archiveDomain.confidenceLabel(explanation.matchConfidence)}`}>{archiveDomain.percent(explanation.matchConfidence)}% match</span><small className="asset-pricing-label">{assetPricingLabel(asset)}</small></div><span className={`status-dot ${asset.humanVerified ? "verified" : "review"}`} title={asset.humanVerified ? "Human verified" : "Needs editor review"} aria-label={asset.humanVerified ? "Human verified" : "Needs editor review"} /></div></button>; }
 
 function rightsLabel(status: Asset["rightsStatus"]): string {
   return status === "editorial_only" ? "Editorial use only" : status === "verified" ? "Commercial licensing" : status === "restricted" ? "Restricted use" : "Rights under review";
@@ -361,7 +1244,56 @@ function releaseLabel(status: Asset["modelReleaseStatus"]): string {
   return status === "not_required" ? "Not required" : status === "verified" ? "Verified" : status === "pending" ? "Pending review" : "Not confirmed";
 }
 
-function AssetModal({ asset, onClose, onNotice }: { asset: Asset; onClose: () => void; onNotice: (notice: string) => void }) {
+function AssetLightboxAction({ asset, sessionUser, api, onNotice }: { asset: Asset; sessionUser: SessionUser | null; api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
+  const [lightboxes, setLightboxes] = useState<BuyerLightbox[]>([]);
+  const [saving, setSaving] = useState(false);
+  const isBuyer = sessionUser?.role === "buyer" || sessionUser?.role === "admin";
+
+  useEffect(() => {
+    if (!isBuyer) return;
+    let active = true;
+    api("/api/lightboxes").then(async (response) => { if (!response.ok) return; const data = await response.json() as { results: BuyerLightbox[] }; if (active) setLightboxes(data.results); }).catch(() => undefined);
+    return () => { active = false; };
+  }, [api, isBuyer]);
+
+  if (!isBuyer) return null;
+
+  async function saveToLightbox(lightboxId: string) {
+    setSaving(true);
+    try {
+      const response = await api(`/api/lightboxes/${lightboxId}/assets`, { method: "POST", body: JSON.stringify({ assetId: asset.id }) });
+      if (!response.ok) throw new Error();
+      onNotice(`Saved "${asset.title}" to your lightbox.`);
+    } catch {
+      onNotice("Could not save this asset to a lightbox.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return <div className="lightbox-action" aria-label="Save to lightbox">
+    {lightboxes.length
+      ? <label>Save to lightbox<select disabled={saving} defaultValue="" onChange={(event) => { if (event.target.value) void saveToLightbox(event.target.value); }}><option value="" disabled>Choose a lightbox…</option>{lightboxes.map((lightbox) => <option key={lightbox.id} value={lightbox.id}>{lightbox.title}</option>)}</select></label>
+      : <small className="field-help">Create a lightbox from your Buyer workspace to shortlist this asset.</small>}
+  </div>;
+}
+
+function AssetVersionHistory({ asset, sessionUser, api }: { asset: Asset; sessionUser: SessionUser | null; api: (path: string, init?: RequestInit) => Promise<Response> }) {
+  const [events, setEvents] = useState<AssetVersionEvent[] | null>(null);
+  const canView = sessionUser && ["editor", "admin", "contributor"].includes(sessionUser.role);
+
+  useEffect(() => {
+    if (!canView) return;
+    let active = true;
+    api(`/api/assets/${asset.id}/versions`).then(async (response) => { if (!response.ok) return; const data = await response.json() as { results: AssetVersionEvent[] }; if (active) setEvents(data.results); }).catch(() => { if (active) setEvents([]); });
+    return () => { active = false; };
+  }, [api, asset.id, canView]);
+
+  if (!canView || !events?.length) return null;
+  return <details className="version-history"><summary>Revision history ({events.length})</summary><ol>{events.map((event) => <li key={event.id}><strong>Rev {event.assetRevision ?? "—"}</strong><span>{event.summary}</span><small>{event.actorName} · {new Date(event.createdAt).toLocaleString("en-ZA")}</small></li>)}</ol></details>;
+}
+
+function AssetModal({ asset, onClose, onNotice, sessionUser, api }: { asset: Asset; onClose: () => void; onNotice: (notice: string) => void; sessionUser: SessionUser | null; api: (path: string, init?: RequestInit) => Promise<Response> }) {
   const explanation = asset.matchExplanation ?? archiveDomain.buildMatchExplanation(asset);
   const model = asset.monetizationModel ?? "membership";
   const requestLabel = model === "custom_quote" ? "Request custom quote" : model === "individual_license" ? "Request individual licence" : "Request membership access";
@@ -369,6 +1301,8 @@ function AssetModal({ asset, onClose, onNotice }: { asset: Asset; onClose: () =>
   const dialogRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
     closeButtonRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") { event.preventDefault(); onClose(); return; }
@@ -381,10 +1315,10 @@ function AssetModal({ asset, onClose, onNotice }: { asset: Asset; onClose: () =>
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     };
     window.addEventListener("keydown", onKeyDown);
-    return () => { window.removeEventListener("keydown", onKeyDown); previousFocus?.focus(); };
+    return () => { window.removeEventListener("keydown", onKeyDown); document.body.style.overflow = previousOverflow; previousFocus?.focus(); };
   }, []);
   const useGuidance = asset.rightsStatus === "editorial_only" ? "Editorial use only — not cleared for advertising or promotion." : asset.rightsStatus === "verified" ? "Commercial licensing is available subject to the selected licence and release evidence." : "Licence availability is subject to rights review.";
-  return <div className="modal-backdrop" role="presentation" onClick={onClose}><div ref={dialogRef} className="asset-modal" role="dialog" aria-modal="true" aria-labelledby="asset-title" onClick={(event) => event.stopPropagation()}><button ref={closeButtonRef} type="button" className="close-button" onClick={onClose} aria-label="Close asset details">×</button><div className={`modal-visual ${asset.kind}`} aria-hidden="true"><span>{asset.kind === "video" ? "▶" : "V"}</span></div><div className="modal-copy"><span className="section-kicker">{asset.kind === "video" ? "FILM & VIDEO" : "PHOTOGRAPHY"} · {asset.city ?? "LOCATION EVIDENCE PENDING"}</span><h2 id="asset-title">{asset.title}</h2><p>{asset.caption || asset.description}</p><div className="tag-list">{asset.visualLocationType && asset.visualLocationType !== "unknown" && <span>Setting: {asset.visualLocationType.replaceAll("_", " ")}</span>}{asset.primaryCategory && asset.primaryCategory !== "other" && <span>Category: {asset.primaryCategory.replaceAll("_", " ")}</span>}{asset.culturalTags.map((tag) => <span key={tag}>{tag}</span>)}</div><div className="match-box"><div className="card-heading"><span className="section-kicker">WHY THIS MATCHED</span><strong>{archiveDomain.percent(explanation.matchConfidence)}% {archiveDomain.confidenceLabel(explanation.matchConfidence)}</strong></div>{explanation.signals.slice(0, 3).map((signal) => <p key={signal.label}><b>{signal.label}:</b> {signal.detail}</p>)}<small>{explanation.metadataReviewNote}</small></div><div className="rights-summary" aria-label="Licence and rights summary"><span>Use: <b>{rightsLabel(asset.rightsStatus)}</b></span><span>Model release: <b>{releaseLabel(asset.modelReleaseStatus)}</b></span><span>Property release: <b>{releaseLabel(asset.propertyReleaseStatus)}</b></span><span>Authenticity: <b>{archiveDomain.percent(asset.authenticityConfidence)}%</b></span><span>Access: <b>{assetPricingLabel(asset)}</b></span></div><p className={`usage-guidance ${asset.rightsStatus === "editorial_only" ? "warning" : ""}`} role="note">{useGuidance}</p><div className="modal-actions"><button type="button" className="dark-button" onClick={() => { onNotice(asset.rightsStatus === "editorial_only" ? "Sign in to review editorial licence terms and request access." : "Sign in to review licence options, release evidence, and request access."); onClose(); }}>{requestLabel} <span>↗</span></button><button type="button" className="ghost-button" onClick={() => { onNotice("Lightbox saving is not available until an authenticated workspace is connected."); onClose(); }}>Save to lightbox</button></div></div></div></div>;
+  return <div className="modal-backdrop" role="presentation" onClick={onClose}><div ref={dialogRef} className="asset-modal" role="dialog" aria-modal="true" aria-labelledby="asset-title" onClick={(event) => event.stopPropagation()}><button ref={closeButtonRef} type="button" className="close-button" onClick={onClose} aria-label="Close asset details">×</button><div className={`modal-visual ${asset.kind}`}><MediaAsset asset={asset} controls /></div><div className="modal-copy"><span className="section-kicker">{asset.kind === "video" ? "FILM & VIDEO" : "PHOTOGRAPHY"} · {asset.city ?? "LOCATION EVIDENCE PENDING"}</span><h2 id="asset-title">{asset.title}</h2><p>{asset.caption || asset.description}</p><div className="tag-list">{asset.visualLocationType && asset.visualLocationType !== "unknown" && <span>Setting: {asset.visualLocationType.replaceAll("_", " ")}</span>}{asset.primaryCategory && asset.primaryCategory !== "other" && <span>Category: {asset.primaryCategory.replaceAll("_", " ")}</span>}{asset.culturalTags.map((tag) => <span key={tag}>{tag}</span>)}</div><div className="match-box"><div className="card-heading"><span className="section-kicker">WHY THIS MATCHED</span><strong>{archiveDomain.percent(explanation.matchConfidence)}% {archiveDomain.confidenceLabel(explanation.matchConfidence)}</strong></div>{explanation.signals.slice(0, 3).map((signal) => <p key={signal.label}><b>{signal.label}:</b> {signal.detail}</p>)}<small>{explanation.metadataReviewNote}</small></div><div className="rights-summary" aria-label="Licence and rights summary"><span>Use: <b>{rightsLabel(asset.rightsStatus)}</b></span><span>Model release: <b>{releaseLabel(asset.modelReleaseStatus)}</b></span><span>Property release: <b>{releaseLabel(asset.propertyReleaseStatus)}</b></span><span>Authenticity: <b>{archiveDomain.percent(asset.authenticityConfidence)}%</b></span><span>Access: <b>{assetPricingLabel(asset)}</b></span></div><AssetLightboxAction asset={asset} sessionUser={sessionUser} api={api} onNotice={onNotice} /><AssetVersionHistory asset={asset} sessionUser={sessionUser} api={api} /><p className={`usage-guidance ${asset.rightsStatus === "editorial_only" ? "warning" : ""}`} role="note">{useGuidance}</p><div className="modal-actions"><button type="button" className="dark-button" onClick={() => { onNotice(asset.rightsStatus === "editorial_only" ? "Sign in to review editorial licence terms and request access." : "Sign in to review licence options, release evidence, and request access."); onClose(); }}>{requestLabel} <span>↗</span></button><button type="button" className="ghost-button" onClick={() => { onNotice("Lightbox saving is not available until an authenticated workspace is connected."); onClose(); }}>Save to lightbox</button></div></div></div></div>;
 }
 
 createRoot(document.getElementById("root")!).render(<React.StrictMode><App /></React.StrictMode>);

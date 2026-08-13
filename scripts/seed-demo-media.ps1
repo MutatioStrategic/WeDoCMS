@@ -1,16 +1,22 @@
+param(
+  [switch]$Remote
+)
+
 $ErrorActionPreference = "Stop"
 
 <##
-Downloads the rights-aware South African demo set and places it in local Wrangler D1/R2.
+Downloads the rights-aware South African demo set and places it in Wrangler D1/R2.
 
-This is intentionally local-only. It does not write to a remote Cloudflare account.
-Use the source_url/source_download_url fields in migrations 0011/0012 when promoting records
-to a configured staging or production environment.
+Local is the default. Pass -Remote only when deliberately promoting the fixtures to
+the configured Cloudflare account. Use the source_url/source_download_url fields in
+migrations 0011/0012 when promoting records to a configured staging or production environment.
 #>
 
 $root = Split-Path -Parent $PSScriptRoot
 $fixtureRoot = Join-Path $root "fixtures\demo-media"
 $bucket = "veld-archive-media"
+$storageFlag = if ($Remote) { "--remote" } else { "--local" }
+$targetLabel = if ($Remote) { "remote Cloudflare" } else { "local Wrangler" }
 
 $media = @(
   @{ file = "table-mountain-cape-town.jpg"; key = "originals/demo/table-mountain-cape-town.jpg"; preview = "previews/demo/table-mountain-cape-town.jpg"; type = "image/jpeg"; url = "https://upload.wikimedia.org/wikipedia/commons/1/14/Cape_Town_%28ZA%29%2C_Table_Mountain_--_2024_--_2794%2B96%2B98%2B2800%2B01.jpg" },
@@ -34,24 +40,24 @@ foreach ($item in $media) {
   }
 }
 
-Write-Host "Applying local D1 migrations..."
-npx wrangler d1 migrations apply veld-archive --local
-if ($LASTEXITCODE -ne 0) { throw "Local D1 migration failed." }
+Write-Host "Applying $targetLabel D1 migrations..."
+npx.cmd wrangler d1 migrations apply veld-archive $storageFlag
+if ($LASTEXITCODE -ne 0) { throw "D1 migration failed." }
 
 foreach ($item in $media) {
   $path = Join-Path $fixtureRoot $item.file
-  Write-Host "Uploading $($item.key) to local R2..."
-  npx wrangler r2 object put "$bucket/$($item.key)" --local --file $path --content-type $item.type --force
+  Write-Host "Uploading $($item.key) to $targetLabel R2..."
+  npx.cmd wrangler r2 object put "$bucket/$($item.key)" $storageFlag --file $path --content-type $item.type --force
   if ($LASTEXITCODE -ne 0) { throw "Original R2 upload failed for $($item.file)." }
 
-  Write-Host "Uploading $($item.preview) to local R2..."
-  npx wrangler r2 object put "$bucket/$($item.preview)" --local --file $path --content-type $item.type --force
+  Write-Host "Uploading $($item.preview) to $targetLabel R2..."
+  npx.cmd wrangler r2 object put "$bucket/$($item.preview)" $storageFlag --file $path --content-type $item.type --force
   if ($LASTEXITCODE -ne 0) { throw "Preview R2 upload failed for $($item.file)." }
 }
 
-Write-Host "Verifying seeded D1 records..."
+Write-Host "Verifying seeded D1 records in $targetLabel..."
 $query = "SELECT id, kind, status, title, source_license, source_attribution FROM assets WHERE demo_seed = 1 ORDER BY id"
-npx wrangler d1 execute veld-archive --local --command $query
+npx.cmd wrangler d1 execute veld-archive $storageFlag --command $query
 if ($LASTEXITCODE -ne 0) { throw "D1 verification failed." }
 
-Write-Host "Demo media seed complete. Files are in $fixtureRoot and local R2 bucket $bucket."
+Write-Host "Demo media seed complete. Files are in $fixtureRoot and $targetLabel R2 bucket $bucket."
