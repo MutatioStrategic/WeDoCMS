@@ -179,7 +179,7 @@ footer { display: flex; justify-content: space-between; align-items: center; pad
 .card-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .status-pill { padding: 6px 8px; border-radius: 999px; color: #5d6f58; background: #e1eadc; font: 9px 'DM Mono', monospace; text-transform: uppercase; letter-spacing: .06em; }
 .status-pill.warm { color: #a45a3f; background: #f4dfd2; }
-.status-pill.cool { color: #4d706e; background: #dcebea; }
+.status-pill.cool { color: #4a6b69; background: #dcebea; }
 .workspace-card label { display: block; margin-bottom: 15px; color: #70766c; font: 10px 'DM Mono', monospace; text-transform: uppercase; letter-spacing: .06em; }
 .workspace-card input:not([type="checkbox"]), .workspace-card textarea, .workspace-card select { width: 100%; margin-top: 7px; border: 1px solid #d9d6cb; border-radius: 3px; padding: 11px 12px; outline: 0; color: #172019; background: #fbf9f4; font: 12px 'DM Sans', sans-serif; text-transform: none; letter-spacing: normal; }
 .workspace-card textarea { min-height: 76px; resize: vertical; }

@@ -151,8 +151,15 @@ response = await call(`/api/governance/assets/${knownAsset?.id ?? "missing"}/act
   body: JSON.stringify({ action: "run_ai_tagging" }),
 });
 body = await readJson(response);
-observe("moderation queue/schema fault containment", response, body, [200, 503]);
-assert(response.status === 503 ? body?.code === "metadata_schema_unavailable" : ["enrichment_queued", "enrichment_retry_pending"].includes(body?.indexing), "moderation queue/schema result was not explicit");
+observe("moderation queue/schema fault containment", response, body, [200, 409, 503]);
+assert(
+  response.status === 503
+    ? body?.code === "metadata_schema_unavailable"
+    : response.status === 409
+      ? body?.code === "ai_enrichment_upload_only"
+      : ["enrichment_queued", "enrichment_retry_pending"].includes(body?.indexing),
+  "moderation queue/schema result was not explicit",
+);
 afterAssets = await contributorAssets();
 const moderatedAsset = afterAssets.find((asset) => asset.id === knownAsset?.id);
 assert(moderatedAsset?.status === "needs_review", "moderation queue fault changed the asset to a publishable state");
