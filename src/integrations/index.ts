@@ -6,6 +6,7 @@ export * from "./email";
 
 import { PayFastPayoutAdapter, PayoutProviderRegistry, SouthAfricanBankPayoutAdapter, StripeConnectPayoutAdapter } from "./payouts";
 import { JsonPaymentAdapter, PaymentProviderRegistry } from "./payments";
+import { PayFastPaymentAdapter } from "./payfast";
 import { CloudflareEmailAdapter, EmailProviderRegistry, JsonEmailAdapter } from "./email";
 
 /** The environment values needed to compose the available integrations. */
@@ -13,6 +14,11 @@ export type IntegrationEnvironment = {
   PAYMENT_PROVIDER?: string;
   PAYMENT_ENDPOINT?: string;
   PAYMENT_TOKEN?: string;
+  PAYFAST_MERCHANT_ID?: string;
+  PAYFAST_MERCHANT_KEY?: string;
+  PAYFAST_PASSPHRASE?: string;
+  PAYFAST_NOTIFY_URL?: string;
+  PAYFAST_PAYMENT_ENDPOINT?: string;
   STRIPE_SECRET_KEY?: string;
   PAYFAST_ENDPOINT?: string;
   PAYFAST_TOKEN?: string;
@@ -43,7 +49,15 @@ export class IntegrationContainer {
     this.payouts = new PayoutProviderRegistry();
     this.email = new EmailProviderRegistry();
 
-    if (environment.PAYMENT_PROVIDER && environment.PAYMENT_ENDPOINT && environment.PAYMENT_TOKEN) {
+    if (environment.PAYMENT_PROVIDER === "payfast" && environment.PAYFAST_MERCHANT_ID && environment.PAYFAST_MERCHANT_KEY && environment.PAYFAST_NOTIFY_URL) {
+      this.payments.register(new PayFastPaymentAdapter({
+        merchantId: environment.PAYFAST_MERCHANT_ID,
+        merchantKey: environment.PAYFAST_MERCHANT_KEY,
+        passphrase: environment.PAYFAST_PASSPHRASE,
+        notifyUrl: environment.PAYFAST_NOTIFY_URL,
+        endpoint: environment.PAYFAST_PAYMENT_ENDPOINT,
+      }));
+    } else if (environment.PAYMENT_PROVIDER && environment.PAYMENT_ENDPOINT && environment.PAYMENT_TOKEN) {
       this.payments.register(new JsonPaymentAdapter({
         provider: environment.PAYMENT_PROVIDER,
         endpoint: environment.PAYMENT_ENDPOINT,

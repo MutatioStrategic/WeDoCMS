@@ -19,6 +19,7 @@ export type PaymentSession = {
   provider: string;
   status: "created" | "pending";
   checkoutUrl: string;
+  checkoutForm?: { action: string; fields: Record<string, string> };
   providerReference?: string;
   providerSubscriptionReference?: string;
   raw?: unknown;

@@ -1117,6 +1117,30 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/webhooks/payfast:
+    post:
+      operationId: receivePayFastNotification
+      summary: Receive and verify a PayFast Instant Transaction Notification
+      description: Validates the PayFast MD5 signature, merchant, source IP, payment reference, amount, and status before applying the normalized payment event.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [merchant_id, m_payment_id, payment_status, amount_gross, signature]
+              properties:
+                merchant_id: { type: string }
+                m_payment_id: { type: string }
+                pf_payment_id: { type: string }
+                payment_status: { type: string, enum: [COMPLETE, FAILED, CANCELLED] }
+                amount_gross: { type: string }
+                signature: { type: string }
+      responses:
+        '200': { description: Notification accepted or normalized payment event already processed }
+        '401': { description: 'Invalid PayFast signature', content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '403': { description: 'Notification source IP is not trusted', content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '422': { description: 'Invalid merchant, payment reference, amount, or status', content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
   /api/security/turnstile:
     post:
       operationId: verifyTurnstile

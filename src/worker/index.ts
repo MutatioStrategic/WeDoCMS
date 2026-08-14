@@ -32,6 +32,7 @@ import {
   type AuditCatalogRow,
 } from "./audit-analytics";
 import { IntegrationContainer } from "../integrations";
+import { isPayFastIp, payfastAmountCents, verifyPayFastSignature } from "../integrations/payfast";
 import { CREDIT_UNIT_CENTS, PLATFORM_SUBSCRIPTION_PRICE_CENTS, creditPurchaseAmountCents, isCalendarDate, nextMonthlyChargeDate } from "./buyer-finance";
 import { monthlyPayoutSchedule } from "./payout-schedule";
 import { buildStatementCsv, buildStatementPdf } from "./statement-export";
@@ -142,6 +143,11 @@ type SecretBindings = {
   PAYMENT_PROVIDER?: string;
   PAYMENT_ENDPOINT?: string;
   PAYMENT_TOKEN?: string;
+  PAYFAST_MERCHANT_ID?: string;
+  PAYFAST_MERCHANT_KEY?: string;
+  PAYFAST_PASSPHRASE?: string;
+  PAYFAST_NOTIFY_URL?: string;
+  PAYFAST_PAYMENT_ENDPOINT?: string;
   EMAIL_PROVIDER?: string;
   EMAIL_ENDPOINT?: string;
   EMAIL_TOKEN?: string;
@@ -1268,7 +1274,7 @@ const paymentSessionSchema = z.object({
 app.post("/api/payments/:licenceId/session", async (c) => {
   const user = await requestUser(c);
   if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, 401);
-  if (!c.env.PAYMENT_PROVIDER || !c.env.PAYMENT_ENDPOINT || !c.env.PAYMENT_TOKEN) return c.json({ error: "Payment provider is not configured" }, 503);
+  if (!paymentProviderConfigured(c.env)) return c.json({ error: "Payment provider is not configured" }, 503);
   const payload = paymentSessionSchema.parse(await c.req.json());
   const licence = await c.env.DB.prepare(`
     SELECT l.id, l.price_cents, l.status, l.payment_reference, u.email
@@ -1279,7 +1285,7 @@ app.post("/api/payments/:licenceId/session", async (c) => {
   if (licence.status !== "pending") return c.json({ error: `Licence cannot be paid from status ${licence.status}` }, 409);
   const integrations = new IntegrationContainer(c.env);
   try {
-    const session = await integrations.payments.get(c.env.PAYMENT_PROVIDER).createCheckoutSession({
+    const session = await integrations.payments.get(c.env.PAYMENT_PROVIDER!).createCheckoutSession({
       idempotencyKey: `licence:${licence.id}`,
       licenceId: licence.id,
       amountCents: Number(licence.price_cents),
@@ -1375,7 +1381,7 @@ const photographerSubscriptionSchema = z.object({
 app.post("/api/subscriptions/checkout", async (c) => {
   const user = await requestUser(c);
   if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, 401);
-  if (!c.env.PAYMENT_PROVIDER || !c.env.PAYMENT_ENDPOINT || !c.env.PAYMENT_TOKEN) return c.json({ error: "Payment provider is not configured" }, 503);
+  if (!paymentProviderConfigured(c.env)) return c.json({ error: "Payment provider is not configured" }, 503);
   const payload = photographerSubscriptionSchema.parse(await c.req.json());
   const photographer = await c.env.DB.prepare("SELECT id, email, role FROM users WHERE id = ? AND role = 'contributor'").bind(payload.photographerId).first<{ id: string; email: string; role: string }>();
   if (!photographer || photographer.id === user.id) return c.json({ error: "Photographer not found" }, 404);
@@ -1390,7 +1396,7 @@ app.post("/api/subscriptions/checkout", async (c) => {
     ON CONFLICT(organization_id, photographer_id, subscriber_id) DO UPDATE SET status = 'pending', price_cents = excluded.price_cents, currency = excluded.currency, duration_days = excluded.duration_days, updated_at = CURRENT_TIMESTAMP
   `).bind(subscriptionId, user.organizationId, photographer.id, user.id, priceCents, payload.durationDays).run();
   try {
-    const session = await new IntegrationContainer(c.env).payments.get(c.env.PAYMENT_PROVIDER).createCheckoutSession({
+    const session = await new IntegrationContainer(c.env).payments.get(c.env.PAYMENT_PROVIDER!).createCheckoutSession({
       idempotencyKey: `photographer-subscription:${subscriptionId}:${payload.durationDays}`,
       referenceId: subscriptionId,
       productType: "photographer_subscription",
@@ -1465,10 +1471,15 @@ function buyerAccount(c: { env: Bindings; req: { raw: Request } }): Promise<Requ
   return getRequestUser(c.env, c.req.raw);
 }
 
+function paymentProviderConfigured(env: Pick<Bindings, "PAYMENT_PROVIDER" | "PAYMENT_ENDPOINT" | "PAYMENT_TOKEN" | "PAYMENT_WEBHOOK_SECRET" | "PAYFAST_MERCHANT_ID" | "PAYFAST_MERCHANT_KEY" | "PAYFAST_NOTIFY_URL">): boolean {
+  if (env.PAYMENT_PROVIDER === "payfast") return Boolean(env.PAYFAST_MERCHANT_ID && env.PAYFAST_MERCHANT_KEY && env.PAYFAST_NOTIFY_URL && env.PAYMENT_WEBHOOK_SECRET);
+  return Boolean(env.PAYMENT_PROVIDER && env.PAYMENT_ENDPOINT && env.PAYMENT_TOKEN && env.PAYMENT_WEBHOOK_SECRET);
+}
+
 app.post("/api/buyer/platform-subscription/checkout", async (c) => {
   const user = await buyerAccount(c);
   if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, 403);
-  if (!c.env.PAYMENT_PROVIDER || !c.env.PAYMENT_ENDPOINT || !c.env.PAYMENT_TOKEN) return c.json({ error: "Payment provider is not configured for recurring membership" }, 503);
+  if (!paymentProviderConfigured(c.env)) return c.json({ error: "Payment provider is not configured for recurring membership" }, 503);
   const payload = platformSubscriptionRequestSchema.parse(await c.req.json());
   const today = new Date().toISOString().slice(0, 10);
   if (payload.startDate < today) return c.json({ error: "Membership start date cannot be in the past" }, 422);
@@ -1483,7 +1494,7 @@ app.post("/api/buyer/platform-subscription/checkout", async (c) => {
     ON CONFLICT(organization_id, buyer_id) DO UPDATE SET status = 'pending', price_cents = excluded.price_cents, currency = excluded.currency, billing_day = excluded.billing_day, start_date = excluded.start_date, next_charge_date = excluded.next_charge_date, cancelled_at = NULL, updated_at = CURRENT_TIMESTAMP
   `).bind(subscriptionId, user.organizationId, user.id, priceCents, payload.billingDay, payload.startDate, payload.startDate).run();
   try {
-    const session = await new IntegrationContainer(c.env).payments.get(c.env.PAYMENT_PROVIDER).createCheckoutSession({
+    const session = await new IntegrationContainer(c.env).payments.get(c.env.PAYMENT_PROVIDER!).createCheckoutSession({
       idempotencyKey: `platform-subscription:${subscriptionId}:${payload.startDate}:${payload.billingDay}`,
       referenceId: subscriptionId,
       productType: "platform_subscription",
@@ -1539,14 +1550,14 @@ const creditPurchaseRequestSchema = z.object({
 app.post("/api/buyer/credits/checkout", async (c) => {
   const user = await buyerAccount(c);
   if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, 403);
-  if (!c.env.PAYMENT_PROVIDER || !c.env.PAYMENT_ENDPOINT || !c.env.PAYMENT_TOKEN) return c.json({ error: "Payment provider is not configured for credit purchases" }, 503);
+  if (!paymentProviderConfigured(c.env)) return c.json({ error: "Payment provider is not configured for credit purchases" }, 503);
   const payload = creditPurchaseRequestSchema.parse(await c.req.json());
   const amountCents = creditPurchaseAmountCents(payload.credits);
   const purchaseId = crypto.randomUUID();
   await c.env.DB.prepare("INSERT INTO buyer_credit_purchases (id, organization_id, buyer_id, credits, amount_cents, currency) VALUES (?, ?, ?, ?, ?, 'ZAR')")
     .bind(purchaseId, user.organizationId, user.id, payload.credits, amountCents).run();
   try {
-    const session = await new IntegrationContainer(c.env).payments.get(c.env.PAYMENT_PROVIDER).createCheckoutSession({
+    const session = await new IntegrationContainer(c.env).payments.get(c.env.PAYMENT_PROVIDER!).createCheckoutSession({
       idempotencyKey: `credit-purchase:${purchaseId}`,
       referenceId: purchaseId,
       productType: "credit_purchase",
@@ -1725,6 +1736,36 @@ app.post("/api/webhooks/payments", async (c) => {
     await c.env.DB.prepare("UPDATE payment_webhook_events SET status = 'failed', failure_reason = ? WHERE id = ?").bind(error instanceof Error ? error.message : "payment_event_failed", eventId).run();
     return c.json({ error: "Payment event could not be applied", eventId }, 422);
   }
+});
+
+app.post("/api/webhooks/payfast", async (c) => {
+  if (!paymentProviderConfigured(c.env) || c.env.PAYMENT_PROVIDER !== "payfast") return c.json({ error: "PayFast payment provider is not configured" }, 503);
+  const sourceIp = c.req.header("cf-connecting-ip") ?? c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ?? "";
+  if (!isPayFastIp(sourceIp)) return c.json({ error: "PayFast notification source is not trusted" }, 403);
+  const body = await c.req.text();
+  const params = new URLSearchParams(body);
+  const fields = [...params.entries()];
+  const providedSignature = params.get("signature") ?? "";
+  if (!providedSignature || !verifyPayFastSignature(fields.filter(([key]) => key !== "signature"), providedSignature, c.env.PAYFAST_PASSPHRASE)) return c.json({ error: "Invalid PayFast notification signature" }, 401);
+  if (params.get("merchant_id") !== c.env.PAYFAST_MERCHANT_ID) return c.json({ error: "PayFast merchant mismatch" }, 422);
+  const reference = params.get("m_payment_id")?.trim();
+  if (!reference) return c.json({ error: "PayFast payment reference is missing" }, 422);
+  const [licence, photographerSubscription, platformSubscription, creditPurchase] = await c.env.DB.batch([
+    c.env.DB.prepare("SELECT id FROM licences WHERE id = ?").bind(reference),
+    c.env.DB.prepare("SELECT id FROM photographer_subscriptions WHERE id = ?").bind(reference),
+    c.env.DB.prepare("SELECT id FROM buyer_platform_subscriptions WHERE id = ?").bind(reference),
+    c.env.DB.prepare("SELECT id FROM buyer_credit_purchases WHERE id = ?").bind(reference),
+  ]);
+  const product = licence.results.length ? { productType: "licence" as const, licenceId: reference } : photographerSubscription.results.length ? { productType: "photographer_subscription" as const, subscriptionId: reference } : platformSubscription.results.length ? { productType: "platform_subscription" as const, subscriptionId: reference } : creditPurchase.results.length ? { productType: "credit_purchase" as const, creditPurchaseId: reference } : null;
+  if (!product) return c.json({ error: "PayFast payment reference is not recognized" }, 404);
+  const status = (params.get("payment_status") ?? "").toUpperCase();
+  const type = status === "COMPLETE" ? "payment_succeeded" : status === "FAILED" || status === "CANCELLED" ? "payment_failed" : null;
+  if (!type) return c.json({ error: "Unsupported PayFast payment status" }, 422);
+  let amountCents: number;
+  try { amountCents = payfastAmountCents(params.get("amount_gross") ?? ""); } catch { return c.json({ error: "PayFast payment amount is invalid" }, 422); }
+  const normalized = JSON.stringify({ provider: "payfast", eventId: params.get("pf_payment_id") ?? `payfast:${reference}:${status}:${amountCents}`, type, ...product, paymentReference: params.get("pf_payment_id") ?? reference, amountCents, currency: "ZAR" });
+  const internalSignature = hex(await hmac(utf8(c.env.PAYMENT_WEBHOOK_SECRET!), normalized));
+  return app.fetch(new Request(new URL("/api/webhooks/payments", c.req.url), { method: "POST", headers: { "Content-Type": "application/json", "X-Payment-Signature": internalSignature }, body: normalized }), c.env, c.executionCtx);
 });
 
 app.get("/api/ops/reconciliation/payments", async (c) => {

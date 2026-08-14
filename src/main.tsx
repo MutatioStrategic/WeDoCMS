@@ -809,6 +809,32 @@ type BuyerPurchaseHistoryItem = { id: string; kind: string; title: string; statu
 type BuyerCreditsAccount = { oneCreditCents: number; balanceCredits: number; transactions: { id: string; transaction_type: string; credits: number; amount_cents: number; reference_type: string | null; created_at: string }[]; pendingPurchases: { id: string; credits: number; amount_cents: number; status: string; created_at: string }[] };
 type BuyerPlatformSubscription = { id: string; status: string; priceCents: number; currency: string; billingDay: number; startDate: string; nextChargeDate: string; lastPaymentAt: string | null; cancelledAt: string | null; createdAt: string; updatedAt: string };
 
+type HostedCheckoutResponse = { checkoutUrl?: string; checkoutForm?: { action: string; fields: Record<string, string> } };
+
+function openHostedCheckout(data: HostedCheckoutResponse): void {
+  if (data.checkoutForm) {
+    const form = document.createElement("form");
+    form.method = "POST";
+    form.action = data.checkoutForm.action;
+    form.style.display = "none";
+    for (const [name, value] of Object.entries(data.checkoutForm.fields)) {
+      const input = document.createElement("input");
+      input.type = "hidden";
+      input.name = name;
+      input.value = value;
+      form.appendChild(input);
+    }
+    document.body.appendChild(form);
+    form.submit();
+    return;
+  }
+  if (data.checkoutUrl) {
+    window.location.assign(data.checkoutUrl);
+    return;
+  }
+  throw new Error("Checkout session did not include a payment destination");
+}
+
 function formatPurchaseDate(value: string): string {
   return new Intl.DateTimeFormat("en-ZA", { dateStyle: "medium" }).format(new Date(value));
 }
@@ -847,8 +873,8 @@ function BuyerFinancePanel({ api, onNotice }: { api: (path: string, init?: Reque
     setBusy("subscription");
     try {
       const response = await api("/api/buyer/platform-subscription/checkout", { method: "POST", body: JSON.stringify({ startDate, billingDay: Number(billingDay), successUrl: `${window.location.origin}/?payment=success`, cancelUrl: `${window.location.origin}/?payment=cancelled` }) });
-      const data = await readJson<{ checkoutUrl: string }>(response, "Membership checkout unavailable");
-      window.location.assign(data.checkoutUrl);
+      const data = await readJson<HostedCheckoutResponse>(response, "Membership checkout unavailable");
+      openHostedCheckout(data);
     } catch { onNotice("Membership checkout is unavailable. No recurring payment was created."); } finally { setBusy(null); }
   }
 
@@ -859,8 +885,8 @@ function BuyerFinancePanel({ api, onNotice }: { api: (path: string, init?: Reque
     setBusy("credits");
     try {
       const response = await api("/api/buyer/credits/checkout", { method: "POST", body: JSON.stringify({ credits: quantity, successUrl: `${window.location.origin}/?payment=success`, cancelUrl: `${window.location.origin}/?payment=cancelled` }) });
-      const data = await readJson<{ checkoutUrl: string }>(response, "Credit checkout unavailable");
-      window.location.assign(data.checkoutUrl);
+      const data = await readJson<HostedCheckoutResponse>(response, "Credit checkout unavailable");
+      openHostedCheckout(data);
     } catch { onNotice("Credit checkout is unavailable. Credits are added only after verified payment."); } finally { setBusy(null); }
   }
 
