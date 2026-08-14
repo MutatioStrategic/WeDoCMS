@@ -43,6 +43,7 @@ type ApprovalLedgerEntry = {
 type AuditAnalyticsConnectors = {
   pipeline: "configured" | "not_configured";
   r2DataCatalog: "configured" | "not_configured";
+  r2Sql: "configured" | "not_configured";
   table: string;
   catalogSearch?: "ready" | "not_configured" | "unavailable";
 };
@@ -343,7 +344,7 @@ function App() {
     {view === "community" && <CommunityWorkspace api={api} onNotice={setNotice} sessionUser={sessionUser} />}
     {sessionUser && isWorkspaceRoute && <WorkspaceShell view={view} sessionUser={sessionUser} navigate={navigate} authBusy={authBusy} onSignOut={signOut} api={api}>
       {view === "dashboard" && <DashboardHome sessionUser={sessionUser} api={api} navigate={navigate} />}
-      {view === "contributor" && <><ContributorWorkspace api={api} onNotice={setNotice} /><AnalyticsDashboard role="contributor" /></>}
+      {view === "contributor" && <><ContributorWorkspace api={api} onNotice={setNotice} /><ContributorRevenuePanel api={api} /><ContributorFinanceBreakdownPanel api={api} /><ContributorStatementTools api={api} /><AnalyticsDashboard role="contributor" /></>}
       {view === "buyer" && <><BuyerWorkspace assets={assets} api={api} navigate={navigate} onNotice={setNotice} /><AnalyticsDashboard role="buyer" /></>}
       {view === "review" && <ReviewWorkspace items={reviewItems} api={api} onNotice={setNotice} onReload={loadReviewQueue} />}
       {view === "governance" && <GovernanceWorkspace api={api} onNotice={setNotice} sessionUser={sessionUser} />}
@@ -351,7 +352,7 @@ function App() {
     </WorkspaceShell>}
 
     {!(sessionUser && isWorkspaceRoute) && <footer><button className="wordmark wordmark-button" onClick={() => navigate("explore")}><VeldWordmark /></button><span>© 2026 Veld Archive · South Africa</span><span>Context before category.</span></footer>}
-    {selectedAsset && <AssetModal asset={selectedAsset} onClose={closeAsset} onNotice={setNotice} sessionUser={sessionUser} api={api} />}
+    {selectedAsset && <AssetModal asset={selectedAsset} onClose={closeAsset} onNotice={setNotice} sessionUser={sessionUser} api={api} trackEvent={trackEvent} />}
   </div>;
 }
 
@@ -721,7 +722,8 @@ function AdminLedgerWorkspace({ api, onNotice }: { api: (path: string, init?: Re
       <div className="ledger-connectors" aria-label="Audit connector status">
         <span>D1 live <strong>connected</strong></span>
         <span>Pipeline <strong>{connectors?.pipeline ?? "not_configured"}</strong></span>
-        <span>R2 Data Catalog <strong>{connectors?.catalogSearch === "unavailable" ? "unavailable" : connectors?.r2DataCatalog ?? "not_configured"}</strong></span>
+        <span>R2 Data Catalog <strong>{connectors?.r2DataCatalog ?? "not_configured"}</strong></span>
+        <span>R2 SQL search <strong>{connectors?.catalogSearch === "unavailable" ? "unavailable" : connectors?.r2Sql ?? "not_configured"}</strong></span>
         {connectors?.table && <span>Table <strong>{connectors.table}</strong></span>}
       </div>
       {searchState === "unavailable" && <div className="empty-state" role="alert">Cross-system search could not be completed. Retry after checking the Worker connector configuration.</div>}
@@ -803,6 +805,227 @@ function BuyerActionsPanelNext({ navigate, onNotice }: { navigate: (view: View) 
 }
 
 type LicenceHistoryItem = { id: string; assetId: string; assetTitle: string; licenceType: string; territory: string; durationDays: number; priceCents: number; status: string; createdAt: string; previewUrl: string | null };
+type BuyerPurchaseHistoryItem = { id: string; kind: string; title: string; status: string; amountCents: number; currency: string; createdAt: string; details: string; referenceId: string };
+type BuyerCreditsAccount = { oneCreditCents: number; balanceCredits: number; transactions: { id: string; transaction_type: string; credits: number; amount_cents: number; reference_type: string | null; created_at: string }[]; pendingPurchases: { id: string; credits: number; amount_cents: number; status: string; created_at: string }[] };
+type BuyerPlatformSubscription = { id: string; status: string; priceCents: number; currency: string; billingDay: number; startDate: string; nextChargeDate: string; lastPaymentAt: string | null; cancelledAt: string | null; createdAt: string; updatedAt: string };
+
+function formatPurchaseDate(value: string): string {
+  return new Intl.DateTimeFormat("en-ZA", { dateStyle: "medium" }).format(new Date(value));
+}
+
+function BuyerFinancePanel({ api, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const [purchases, setPurchases] = useState<BuyerPurchaseHistoryItem[]>([]);
+  const [credits, setCredits] = useState<BuyerCreditsAccount | null>(null);
+  const [subscription, setSubscription] = useState<BuyerPlatformSubscription | null>(null);
+  const [startDate, setStartDate] = useState(today);
+  const [billingDay, setBillingDay] = useState("1");
+  const [creditQuantity, setCreditQuantity] = useState("1");
+  const [state, setState] = useState<"loading" | "ready" | "unavailable">("loading");
+  const [busy, setBusy] = useState<"subscription" | "credits" | "cancel" | null>(null);
+
+  const load = useCallback(async () => {
+    setState("loading");
+    try {
+      const [purchaseResponse, creditResponse, subscriptionResponse] = await Promise.all([api("/api/my/purchases"), api("/api/my/credits"), api("/api/my/platform-subscription")]);
+      const purchaseData = await readJson<{ results: BuyerPurchaseHistoryItem[] }>(purchaseResponse, "Purchase history unavailable");
+      const creditData = await readJson<BuyerCreditsAccount>(creditResponse, "Credit account unavailable");
+      const subscriptionData = await readJson<{ subscription: BuyerPlatformSubscription | null }>(subscriptionResponse, "Membership details unavailable");
+      setPurchases(purchaseData.results);
+      setCredits(creditData);
+      setSubscription(subscriptionData.subscription);
+      setState("ready");
+    } catch {
+      setState("unavailable");
+    }
+  }, [api]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  async function startMembership(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy("subscription");
+    try {
+      const response = await api("/api/buyer/platform-subscription/checkout", { method: "POST", body: JSON.stringify({ startDate, billingDay: Number(billingDay), successUrl: `${window.location.origin}/?payment=success`, cancelUrl: `${window.location.origin}/?payment=cancelled` }) });
+      const data = await readJson<{ checkoutUrl: string }>(response, "Membership checkout unavailable");
+      window.location.assign(data.checkoutUrl);
+    } catch { onNotice("Membership checkout is unavailable. No recurring payment was created."); } finally { setBusy(null); }
+  }
+
+  async function buyCredits(event: React.FormEvent) {
+    event.preventDefault();
+    const quantity = Number(creditQuantity);
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 1000) return;
+    setBusy("credits");
+    try {
+      const response = await api("/api/buyer/credits/checkout", { method: "POST", body: JSON.stringify({ credits: quantity, successUrl: `${window.location.origin}/?payment=success`, cancelUrl: `${window.location.origin}/?payment=cancelled` }) });
+      const data = await readJson<{ checkoutUrl: string }>(response, "Credit checkout unavailable");
+      window.location.assign(data.checkoutUrl);
+    } catch { onNotice("Credit checkout is unavailable. Credits are added only after verified payment."); } finally { setBusy(null); }
+  }
+
+  async function cancelMembership() {
+    setBusy("cancel");
+    try { await readJson(await api("/api/my/platform-subscription/cancel", { method: "POST", body: "{}" }), "Membership cancellation unavailable"); onNotice("Your recurring membership has been cancelled."); await load(); }
+    catch { onNotice("We could not cancel the membership. No change was made."); } finally { setBusy(null); }
+  }
+
+  return <section id="buyer-finance" className="buyer-finance" aria-labelledby="buyer-finance-title">
+    <div className="card-heading"><div><span className="section-kicker">BUYER ACCOUNT / PAYMENTS</span><h2 id="buyer-finance-title">Your purchase history and <em>buying power.</em></h2></div><span className="status-pill cool">Live account data</span></div>
+    {state === "loading" && <div className="empty-state" role="status">Loading your purchase history, membership, and credits...</div>}
+    {state === "unavailable" && <div className="empty-state" role="alert">Buyer payment details are unavailable. No cached balances or purchase records are shown.</div>}
+    {state === "ready" && <>
+      <div className="metric-grid buyer-finance-metrics">
+        <MetricCard label="Purchases recorded" value={purchases.length.toString()} detail="licences, credits, and membership" />
+        <MetricCard label="Available credits" value={(credits?.balanceCredits ?? 0).toLocaleString()} detail="1 credit = R100" tone={credits?.balanceCredits ? "green" : undefined} />
+        <MetricCard label="Membership" value={subscription?.status === "active" ? "Active" : subscription?.status ?? "Not started"} detail="R1,299 per month" tone={subscription?.status === "active" ? "green" : undefined} />
+        <MetricCard label="Paid history" value={formatZar(purchases.filter((item) => item.status === "paid" || item.status === "payment_succeeded").reduce((sum, item) => sum + item.amountCents, 0))} detail="verified completed payments" />
+      </div>
+      <div className="buyer-finance-columns">
+        <article className="buyer-finance-card">
+          <div className="card-heading"><div><span className="section-kicker">MONTHLY MEMBERSHIP</span><h3>Keep access ready for the next brief.</h3></div><span className="status-pill warm">R1,299 / month</span></div>
+          <p className="buyer-finance-copy">Choose the first charge date and the day of month for recurring charges. Your membership becomes active only after the payment provider confirms the payment.</p>
+          {subscription?.status === "active" || subscription?.status === "pending" || subscription?.status === "past_due"
+           ? <div className="buyer-finance-status"><strong>{subscription.status.replaceAll("_", " ")}</strong><span>Next charge: {subscription.nextChargeDate} - billing day {subscription.billingDay}</span><button type="button" className="text-button" disabled={busy !== null} onClick={() => void cancelMembership()}>{busy === "cancel" ? "Cancelling..." : "Cancel membership"}</button></div>
+            : <form className="buyer-finance-form" onSubmit={startMembership}><label>Start date<input type="date" min={today} value={startDate} onChange={(event) => setStartDate(event.target.value)} required /></label><label>Monthly billing day<select value={billingDay} onChange={(event) => setBillingDay(event.target.value)}>{Array.from({ length: 28 }, (_, index) => index + 1).map((day) => <option key={day} value={day}>{day}{day === 1 ? "st" : day === 2 ? "nd" : day === 3 ? "rd" : "th"} of each month</option>)}</select></label><button type="submit" className="dark-button" disabled={busy !== null}>{busy === "subscription" ? "Opening checkout..." : "Start membership"}</button></form>}
+        </article>
+        <article className="buyer-finance-card">
+          <div className="card-heading"><div><span className="section-kicker">ARCHIVE CREDITS</span><h3>Buy credits for artist quotes.</h3></div><span className="status-pill cool">R100 / credit</span></div>
+          <p className="buyer-finance-copy">Credits are held in your account after verified payment and can be used toward custom, tailor-made licences agreed with artists.</p>
+          <form className="buyer-finance-form" onSubmit={buyCredits}><label>Credits to buy<input type="number" min="1" max="1000" step="1" value={creditQuantity} onChange={(event) => setCreditQuantity(event.target.value)} required /></label><div className="buyer-finance-total"><span>Total</span><strong>{formatZar((Number(creditQuantity) || 0) * 10000)}</strong></div><button type="submit" className="dark-button" disabled={busy !== null}>{busy === "credits" ? "Opening checkout..." : "Buy credits"}</button></form>
+          <div className="buyer-finance-balance"><strong>{(credits?.balanceCredits ?? 0).toLocaleString()}</strong><span>credits available for future custom licences</span></div>
+        </article>
+      </div>
+      <article className="buyer-finance-card buyer-purchase-history"><div className="card-heading"><div><span className="section-kicker">ALL PURCHASES</span><h3>Everything bought on this account.</h3></div><span className="status-pill cool">{purchases.length} record{purchases.length === 1 ? "" : "s"}</span></div>{purchases.length ? <div className="purchase-history-list">{purchases.map((purchase) => <div className="purchase-history-row" key={`${purchase.kind}:${purchase.id}`}><div><strong>{purchase.title}</strong><small>{purchase.details} · {formatPurchaseDate(purchase.createdAt)}</small></div><b className={`purchase-status ${purchase.status}`}>{purchase.status.replaceAll("_", " ")}</b><span>{formatZar(purchase.amountCents)}</span></div>)}</div> : <div className="empty-state">No purchases are recorded yet. Your completed licences, credits, and membership payments will appear here.</div>}</article>
+    </>}
+  </section>;
+}
+
+type ContributorRevenueStatement = {
+  statement: {
+    currency: string;
+    generatedAt: string;
+    customPricedLicences: {
+      results: { id: string; assetId: string; assetTitle: string; kind: string; licenceType: string; territory: string; durationDays: number; purchaseCents: number; royaltyCents: number; platformFeeCents: number; refundedCents: number; status: string; buyerName: string; paidAt: string | null; createdAt: string }[];
+      total: number;
+      purchaseCents: number;
+      royaltyCents: number;
+      platformFeeCents: number;
+      refundedCents: number;
+    };
+    mediaInventory: {
+      total: number;
+      results: { id: string; title: string; kind: string; status: string; monetizationModel: string; licensePriceCents: number | null }[];
+      byTypeAndPackage: { kind: string; monetizationModel: string; total: number; published: number }[];
+    };
+    paymentFlow: {
+      byStatus: { status: string; transactionCount: number; amountCents: number }[];
+      packageMix: { licenceType: string; durationDays: number; territory: string; transactionCount: number; purchaseCents: number; royaltyCents: number; refundedCents: number }[];
+      transactionCount: number;
+    };
+    performance: {
+      range: string;
+      summary: { views: number; downloads: number; subscriptionDownloads: number; licensedAssets: number; royaltyCents: number; roiStatus: string; roiExplanation: string };
+      assets: { id: string; title: string; kind: string; views: number; downloads: number; subscriptionDownloads: number; licenceCount: number; royaltyCents: number; royaltyPerThousandViewsCents: number | null }[];
+    };
+    veldSubscriptionRoyalty: { status: "not_allocated"; amountCents: number; period: string | null; subscriptionPurchases: number; subscriptionGrossCents: number; explanation: string };
+    payoutPosition: { postedRoyaltyCents: number; paidOutCents: number; inFlightCents: number; failedPayoutCents: number; outstandingCents: number; note: string };
+    payoutPolicy: { cadence: "monthly"; method: "lump_sum"; payoutDayOfMonth: number; timeZone: string; nextScheduledPayoutDate: string; amountExpectedCents: number; status: string; explanation: string };
+    privacy: { buyerIdentity: string; hidden: string[]; scope: string };
+  };
+};
+
+function ContributorRevenuePanel({ api }: { api: (path: string, init?: RequestInit) => Promise<Response> }) {
+  const [data, setData] = useState<ContributorRevenueStatement | null>(null);
+  const [state, setState] = useState<"loading" | "ready" | "unavailable">("loading");
+
+  useEffect(() => {
+    let active = true;
+    setState("loading");
+    api("/api/analytics/contributor/revenue")
+      .then((response) => readJson<ContributorRevenueStatement>(response, "Revenue statement unavailable"))
+      .then((next) => { if (active) { setData(next); setState("ready"); } })
+      .catch(() => { if (active) { setData(null); setState("unavailable"); } });
+    return () => { active = false; };
+  }, [api]);
+
+  if (state === "loading") return <section className="revenue-panel" aria-busy="true"><div className="empty-state" role="status">Loading your licence and royalty statement...</div></section>;
+  if (!data) return <section className="revenue-panel"><div className="empty-state">Your revenue statement is unavailable. No cached or estimated figures are shown.</div></section>;
+  const statement = data.statement;
+  return <section className="revenue-panel" aria-labelledby="revenue-statement-title">
+    <div className="revenue-heading"><div><span className="section-kicker">SELLER FINANCE / RIGHTS STATEMENT</span><h2 id="revenue-statement-title">Know who licensed your work — and what Veld <em>owes.</em></h2><p>This statement is limited to your media and your organisation. It separates custom-priced licence sales from any Veld subscription royalty allocation.</p></div><span className="status-pill cool">Authenticated seller view</span></div>
+    <div className="revenue-summary"><MetricCard label="Custom licence royalties" value={formatZar(statement.customPricedLicences.royaltyCents)} detail="posted contributor royalty entries" tone="green" /><MetricCard label="Paid out" value={formatZar(statement.payoutPosition.paidOutCents)} detail="matched to approved payout batches" /><MetricCard label="Outstanding" value={formatZar(statement.payoutPosition.outstandingCents)} detail="not yet matched to a payout" tone={statement.payoutPosition.outstandingCents ? "rust" : "green"} /><MetricCard label="Subscription royalty" value={statement.veldSubscriptionRoyalty.status === "not_allocated" ? "Not allocated" : formatZar(statement.veldSubscriptionRoyalty.amountCents)} detail="Veld pool status" /></div>
+    <div className="revenue-columns">
+      <article className="revenue-card revenue-wide"><div className="card-heading"><div><span className="section-kicker">CUSTOM-PRICED LICENCES</span><h3>Who bought your media</h3></div><span className="status-pill cool">{statement.customPricedLicences.total} record{statement.customPricedLicences.total === 1 ? "" : "s"}</span></div><p className="revenue-explanation"><strong>Yes:</strong> you can see the buyer display name, asset, licence scope, purchase amount, and status for paid custom-priced media you own. Email addresses, payment details, provider references, and private checkout data are hidden.</p>{statement.customPricedLicences.results.length ? <div className="revenue-table-wrap"><table className="revenue-table"><caption className="sr-only">Custom-priced media licence buyers and royalties</caption><thead><tr><th>Buyer</th><th>Media / scope</th><th>Purchase</th><th>Your royalty</th><th>Status</th></tr></thead><tbody>{statement.customPricedLicences.results.map((licence) => <tr key={licence.id}><td><strong>{licence.buyerName}</strong><small>Display name only</small></td><td><strong>{licence.assetTitle}</strong><small>{licence.kind} · {licence.licenceType} · {licence.territory}</small></td><td>{formatZar(licence.purchaseCents)}</td><td>{formatZar(licence.royaltyCents)}</td><td><span className={`revenue-status ${licence.status}`}>{licence.status}</span></td></tr>)}</tbody></table></div> : <div className="empty-state">No paid custom-priced licences are recorded for your media yet.</div>}</article>
+      <article className="revenue-card"><div className="card-heading"><div><span className="section-kicker">VELD SUBSCRIPTION ROYALTY</span><h3>Generic contribution status</h3></div><span className="status-pill warm">Not allocated</span></div><p className="revenue-explanation"><strong>Important:</strong> Veld currently records subscription access separately, but has not posted a generic royalty-pool allocation to this account. No subscription royalty amount is estimated or promised until Veld publishes the period, allocation basis, and ledger entry.</p><div className="revenue-facts"><span><strong>{statement.veldSubscriptionRoyalty.subscriptionPurchases}</strong> subscription purchase{statement.veldSubscriptionRoyalty.subscriptionPurchases === 1 ? "" : "s"} linked to your profile</span><span><strong>{formatZar(statement.veldSubscriptionRoyalty.subscriptionGrossCents)}</strong> subscription receipts recorded, not your royalty</span></div><p className="privacy-note">{statement.payoutPosition.note}</p></article>
+    </div>
+    <p className="privacy-note"><strong>Privacy and safety:</strong> {statement.privacy.scope} {statement.privacy.buyerIdentity} Hidden: {statement.privacy.hidden.join(", ")}.</p>
+  </section>;
+}
+
+function ContributorFinanceBreakdownPanel({ api }: { api: (path: string, init?: RequestInit) => Promise<Response> }) {
+  const [data, setData] = useState<ContributorRevenueStatement | null>(null);
+  const [state, setState] = useState<"loading" | "ready" | "unavailable">("loading");
+
+  useEffect(() => {
+    let active = true;
+    api("/api/analytics/contributor/revenue")
+      .then((response) => readJson<ContributorRevenueStatement>(response, "Finance statement unavailable"))
+      .then((next) => { if (active) { setData(next); setState("ready"); } })
+      .catch(() => { if (active) setState("unavailable"); });
+    return () => { active = false; };
+  }, [api]);
+
+  if (state === "loading") return <section className="revenue-detail-panel" aria-busy="true"><div className="empty-state" role="status">Loading media, packages, and transaction totals...</div></section>;
+  if (!data) return <section className="revenue-detail-panel"><div className="empty-state">The detailed finance breakdown is unavailable. The statement will not show cached or estimated totals.</div></section>;
+  const statement = data.statement;
+  return <section className="revenue-detail-panel" aria-labelledby="seller-finance-detail-title">
+    <div className="revenue-heading"><div><span className="section-kicker">END-TO-END SELLER STATEMENT</span><h2 id="seller-finance-detail-title">Your listings, packages, and <em>money trail.</em></h2><p>Every number below is tied to your owned media, a recorded licence status, a posted ledger entry, or a payout batch. Subscription receipts are shown as context—not as your royalty.</p></div><span className="status-pill warm">Payout on the 25th</span></div>
+    <div className="payout-policy-banner"><div><span className="section-kicker">NEXT LUMP-SUM PAYOUT</span><strong>{formatZar(statement.payoutPolicy.amountExpectedCents)}</strong><span>expected from posted, not-yet-paid royalties</span></div><div><strong>{statement.payoutPolicy.nextScheduledPayoutDate}</strong><span>{statement.payoutPolicy.timeZone} · {statement.payoutPolicy.status.replaceAll("_", " ")}</span></div><p>{statement.payoutPolicy.explanation}</p></div>
+    <div className="revenue-columns">
+      <article className="revenue-card"><div className="card-heading"><div><span className="section-kicker">MEDIA INVENTORY</span><h3>What you have listed</h3></div><span className="status-pill cool">{statement.mediaInventory.total} records</span></div><div className="statement-breakdown">{statement.mediaInventory.byTypeAndPackage.map((item) => <div key={`${item.kind}-${item.monetizationModel}`}><strong>{item.total}</strong><span>{item.kind} · {item.monetizationModel.replaceAll("_", " ")}</span><small>{item.published} published</small></div>)}</div><div className="revenue-table-wrap"><table className="revenue-table statement-table"><caption className="sr-only">Seller media inventory and payment packages</caption><thead><tr><th>Media</th><th>Type</th><th>Listing package</th><th>Price</th><th>Status</th></tr></thead><tbody>{statement.mediaInventory.results.map((item) => <tr key={item.id}><td><strong>{item.title}</strong></td><td>{item.kind}</td><td>{item.monetizationModel.replaceAll("_", " ")}</td><td>{item.licensePriceCents === null ? "Quote" : formatZar(item.licensePriceCents)}</td><td><span className="revenue-status">{item.status}</span></td></tr>)}</tbody></table></div></article>
+      <article className="revenue-card"><div className="card-heading"><div><span className="section-kicker">PAYMENT FLOW</span><h3>Transaction status</h3></div><span className="status-pill cool">{statement.paymentFlow.transactionCount} licences</span></div><div className="statement-breakdown">{statement.paymentFlow.byStatus.map((item) => <div key={item.status}><strong>{formatZar(item.amountCents)}</strong><span>{item.status}</span><small>{item.transactionCount} record{item.transactionCount === 1 ? "" : "s"}</small></div>)}</div><p className="privacy-note">This flow excludes provider references and payment credentials. It includes pending, paid, refunded, expired, and cancelled licence records belonging to your media.</p></article>
+    </div>
+    <article className="revenue-card revenue-package-card"><div className="card-heading"><div><span className="section-kicker">LICENCE PACKAGES SOLD</span><h3>Package and transaction amounts</h3></div></div><div className="revenue-table-wrap"><table className="revenue-table"><caption className="sr-only">Licence packages and transaction amounts</caption><thead><tr><th>Package</th><th>Duration / territory</th><th>Transactions</th><th>Purchase total</th><th>Your royalty</th><th>Refunded</th></tr></thead><tbody>{statement.paymentFlow.packageMix.length ? statement.paymentFlow.packageMix.map((item) => <tr key={`${item.licenceType}-${item.durationDays}-${item.territory}`}><td><strong>{item.licenceType}</strong></td><td>{item.durationDays} days · {item.territory}</td><td>{item.transactionCount}</td><td>{formatZar(item.purchaseCents)}</td><td>{formatZar(item.royaltyCents)}</td><td>{formatZar(item.refundedCents)}</td></tr>) : <tr><td colSpan={6}>No paid or refunded licence transactions are recorded yet.</td></tr>}</tbody></table></div></article>
+  </section>;
+}
+
+function ContributorStatementTools({ api }: { api: (path: string, init?: RequestInit) => Promise<Response> }) {
+  const [data, setData] = useState<ContributorRevenueStatement | null>(null);
+  const [busy, setBusy] = useState<"csv" | "pdf" | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    api("/api/analytics/contributor/revenue")
+      .then((response) => readJson<ContributorRevenueStatement>(response, "Performance statement unavailable"))
+      .then(setData)
+      .catch(() => setError("Performance data is unavailable; exports remain disabled until the statement can be verified."));
+  }, [api]);
+
+  async function download(format: "csv" | "pdf") {
+    setBusy(format); setError("");
+    try {
+      const response = await api(`/api/analytics/contributor/revenue.${format}`);
+      if (!response.ok) throw new Error();
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `veld-seller-statement-${new Date().toISOString().slice(0, 10)}.${format}`;
+      document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
+    } catch { setError(`The ${format.toUpperCase()} statement could not be generated. No partial file was downloaded.`); }
+    finally { setBusy(null); }
+  }
+
+  if (!data) return <section className="revenue-tools-panel"><div className="empty-state">{error || "Loading export and performance tools..."}</div></section>;
+  const statement = data.statement;
+  const points = statement.performance.assets.filter((item) => item.views > 0).sort((a, b) => b.views - a.views).slice(0, 8).map((item) => ({ label: item.title.slice(0, 18), value: item.views }));
+  return <section className="revenue-tools-panel" aria-labelledby="seller-statement-tools-title">
+    <div className="revenue-heading"><div><span className="section-kicker">STATEMENT TOOLS / PERFORMANCE</span><h2 id="seller-statement-tools-title">Download the record. Read the <em>signal.</em></h2><p>PDF is a presentation-ready finance statement. CSV is the audit-friendly detail export. Both use the same authenticated, owner-scoped statement.</p></div><div className="statement-export-actions"><button type="button" className="outline-button" disabled={busy !== null} onClick={() => void download("pdf")}>{busy === "pdf" ? "Preparing PDF…" : "Download PDF"}</button><button type="button" className="dark-button" disabled={busy !== null} onClick={() => void download("csv")}>{busy === "csv" ? "Preparing CSV…" : "Download CSV"}</button></div></div>
+    {error && <p className="upload-error" role="alert">{error}</p>}
+    <div className="analytics-columns seller-performance-columns"><article className="analytics-card analytics-wide"><div className="card-heading"><div><span className="section-kicker">ROYALTY YIELD / {statement.performance.range}</span><h3>Where attention becomes value</h3></div><span className="status-pill cool">Proxy, not ROI</span></div><MetricBars points={points} tone="rust" /><p className="privacy-note">{statement.performance.summary.roiExplanation}</p></article><article className="analytics-card"><span className="section-kicker">PERFORMANCE TOTALS</span><h3>{statement.performance.summary.views.toLocaleString()} views</h3><p>{statement.performance.summary.downloads.toLocaleString()} downloads · {statement.performance.summary.subscriptionDownloads.toLocaleString()} subscription downloads · {statement.performance.summary.licensedAssets} assets with licence activity.</p><p>A true ROI percentage is unavailable because seller costs are not recorded.</p><div className="seller-performance-list">{statement.performance.assets.filter((item) => item.views > 0 || item.licenceCount > 0 || item.downloads > 0).slice(0, 6).map((item) => <div key={item.id}><strong>{item.title}</strong><span>{item.views.toLocaleString()} views · {item.downloads.toLocaleString()} downloads · {item.licenceCount} licences · {formatZar(item.royaltyCents)}</span></div>)}</div></article></div>
+  </section>;
+}
 
 type CheckoutValidationResponse = ReturnType<typeof archiveDomain.evaluateLicenceRequest> & {
   assetId: string;
@@ -939,6 +1162,7 @@ function BuyerWorkspace({ assets, api, navigate, onNotice }: { assets: Asset[]; 
   }
 
   return <>
+    <BuyerFinancePanel api={api} onNotice={onNotice} />
     <BuyerActionsPanelNext navigate={navigate} onNotice={onNotice} />
     <BuyerLicenceValidationPanel assets={assets} api={api} navigate={navigate} onNotice={onNotice} onRefresh={load} />
     <section className="buyer-collections" aria-label="Licences, lightboxes, and saved searches">
@@ -1360,13 +1584,19 @@ function AssetVersionHistory({ asset, sessionUser, api }: { asset: Asset; sessio
   return <details className="version-history"><summary>Revision history ({events.length})</summary><ol>{events.map((event) => <li key={event.id}><strong>Rev {event.assetRevision ?? "—"}</strong><span>{event.summary}</span><small>{event.actorName} · {new Date(event.createdAt).toLocaleString("en-ZA")}</small></li>)}</ol></details>;
 }
 
-function AssetModal({ asset, onClose, onNotice, sessionUser, api }: { asset: Asset; onClose: () => void; onNotice: (notice: string) => void; sessionUser: SessionUser | null; api: (path: string, init?: RequestInit) => Promise<Response> }) {
+function AssetModal({ asset, onClose, onNotice, sessionUser, api, trackEvent }: { asset: Asset; onClose: () => void; onNotice: (notice: string) => void; sessionUser: SessionUser | null; api: (path: string, init?: RequestInit) => Promise<Response>; trackEvent: (payload: Record<string, unknown>) => void }) {
   const explanation = asset.matchExplanation ?? archiveDomain.buildMatchExplanation(asset);
   const model = asset.monetizationModel ?? "membership";
   const requestLabel = model === "custom_quote" ? "Request custom quote" : model === "individual_license" ? "Request individual licence" : "Request membership access";
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const [paidPreviewAccess, setPaidPreviewAccess] = useState(false);
+  const viewRecorded = useRef(false);
+  useEffect(() => {
+    if (viewRecorded.current) return;
+    viewRecorded.current = true;
+    trackEvent({ type: "asset_view", assetId: asset.id });
+  }, [asset.id, trackEvent]);
   useEffect(() => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const previousOverflow = document.body.style.overflow;

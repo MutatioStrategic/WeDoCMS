@@ -49,6 +49,38 @@ The frontend runs on Vite. To run the Worker API locally after installing Wrangl
 npm run worker:dev
 ```
 
+For token-free local photo enrichment, keep Ollama running with the `moondream`
+vision model installed. The ignored `.dev.vars` file selects the loopback
+provider for Wrangler development; deployed Workers continue to use the
+Cloudflare AI binding. Install and verify it with:
+
+```powershell
+ollama pull moondream
+npm run test:local-vision -- fixtures/demo-media/garden-route-south-africa.jpg
+npm run worker:dev
+```
+
+Moondream 2 is a local fallback for development, not a claim of parity with
+the pinned Cloudflare Moondream 3.1 model. Its output remains a suggestion and
+must pass the same validation and human-review workflow.
+
+The current production candidate is Qwen3-VL 8B, served locally from
+`C:\OllamaModels` on the RTX 5070 through the authenticated `jh1-ocr-gpu`
+Cloudflare Tunnel. The local proxy binds only to loopback and requires the
+`VISION_PROXY_TOKEN` user secret; the Worker stores the matching value as
+`REMOTE_VISION_TOKEN`. After a reboot, start the local stack and connector
+before processing uploads:
+
+```powershell
+npm run vision:stack
+cloudflared tunnel --config "$env:LOCALAPPDATA\JH1 OCR\cloudflared\jh1-ocr-gpu-config.yml" run jh1-ocr-gpu
+```
+
+The production endpoint is `https://veld-vision.mutatiostrategic.io/api/generate`.
+It is not usable without the bearer token. If the GPU host is unavailable,
+switch `PHOTO_VISION_PROVIDER` to the Cloudflare binding and redeploy; do not
+expose Ollama directly or commit the token.
+
 ### Deployment topology and live smoke test
 
 The frontend and `/api/*` routes are served by the Worker configured in

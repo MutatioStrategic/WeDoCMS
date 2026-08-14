@@ -53,6 +53,27 @@ The unavailable-backend state explains that no licence or payment was created
 and offers a retry. A missing published-asset state sends the buyer back to
 approved archive search.
 
+## Buyer purchase history, membership, and credits
+
+1. A signed-in buyer opens the Buyer ROI workspace and sees the complete
+   purchase history, including licences, photographer subscriptions, monthly
+   membership payments, and credit purchases.
+2. The buyer chooses a membership start date and billing day from 1 to 28,
+   then opens hosted payment checkout for the fixed R1299 monthly price.
+3. The membership remains pending until the signed payment webhook confirms
+   payment. A confirmed payment activates the membership and records the next
+   monthly charge date; a failed payment shows a past-due state.
+4. The buyer enters a whole number of credits and opens hosted checkout. Each
+   credit costs R100, and credits are added to the buyer ledger only after the
+   signed payment webhook confirms payment.
+5. The buyer can cancel a pending or active membership. Credit balances and
+   transaction history remain visible for future custom licences agreed with
+   artists.
+
+The unavailable-backend state does not show cached money or credit balances and
+offers a retry. Checkout routes fail closed when the payment provider is not
+configured, and payment success is never inferred from the browser redirect.
+
 ## Contributor to publication
 
 ```mermaid

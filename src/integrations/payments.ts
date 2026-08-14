@@ -4,7 +4,8 @@ export type PaymentSessionRequest = {
   idempotencyKey: string;
   licenceId?: string;
   referenceId?: string;
-  productType?: "licence" | "photographer_subscription";
+  productType?: "licence" | "photographer_subscription" | "platform_subscription" | "credit_purchase";
+  recurring?: { interval: "month"; billingDay: number; startDate: string };
   amountCents: number;
   currency: string;
   buyer: { id: string; email: string };
@@ -19,6 +20,7 @@ export type PaymentSession = {
   status: "created" | "pending";
   checkoutUrl: string;
   providerReference?: string;
+  providerSubscriptionReference?: string;
   raw?: unknown;
 };
 
@@ -35,6 +37,8 @@ type JsonPaymentResponse = {
   status?: string;
   paymentReference?: string;
   payment_reference?: string;
+  subscriptionReference?: string;
+  subscription_reference?: string;
 };
 
 /**
@@ -68,6 +72,7 @@ export class JsonPaymentAdapter implements PaymentProvider {
         cancelUrl: request.cancelUrl,
         metadata: request.metadata,
         productType: request.productType ?? "licence",
+        recurring: request.recurring,
       }),
     });
     const value = await readJson<JsonPaymentResponse>(response, this.provider);
@@ -79,6 +84,7 @@ export class JsonPaymentAdapter implements PaymentProvider {
       status: value.status === "created" ? "created" : "pending",
       checkoutUrl,
       providerReference: value.paymentReference ?? value.payment_reference ?? value.id,
+      providerSubscriptionReference: value.subscriptionReference ?? value.subscription_reference,
       raw: value,
     };
   }

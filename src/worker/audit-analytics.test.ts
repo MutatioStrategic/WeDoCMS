@@ -25,9 +25,10 @@ afterEach(() => vi.restoreAllMocks());
 
 describe("audit analytics connector", () => {
   it("reports the catalog as unavailable until the endpoint and token are configured", () => {
-    expect(auditAnalyticsStatus({ R2_ANALYTICS_BUCKET: "veld-archive-analytics" })).toEqual({
+    expect(auditAnalyticsStatus({ R2_ANALYTICS_BUCKET: "veld-archive-analytics", R2_DATA_CATALOG_ENABLED: "true" })).toEqual({
       pipeline: "not_configured",
-      r2DataCatalog: "not_configured",
+      r2DataCatalog: "configured",
+      r2Sql: "not_configured",
       table: "audit.events",
     });
   });

@@ -7,6 +7,7 @@ export type MonetizationModel = "membership" | "individual_license" | "custom_qu
 export type MetadataReviewStatus = "reviewed" | "needs_context" | "blocked";
 export type MetadataProvenance = "contributor" | "editor" | "ai_suggested";
 export type VisualLocationType = "urban_street" | "coastal_landscape" | "market_scene" | "indoor" | "residential" | "rural_landscape" | "industrial" | "event" | "transport" | "nature" | "sports" | "food" | "other" | "unknown";
+export type SceneContext = "animal_close_up" | "plant_close_up" | "garden" | "field" | "mountain" | "street" | "shoreline" | "indoor_object" | "unknown";
 export type PhotoCategory = "people" | "lifestyle" | "travel" | "nature" | "architecture" | "food" | "business" | "transport" | "arts_culture" | "sport" | "news_editorial" | "objects" | "other";
 export type AiMetadataSuggestion = Record<string, unknown>;
 
@@ -60,6 +61,7 @@ export type Asset = {
   aiTags: string[];
   aiSuggestedMetadata?: AiMetadataSuggestion;
   visualLocationType?: VisualLocationType;
+  sceneContext?: SceneContext;
   primaryCategory?: PhotoCategory;
   sceneAttributes?: string[];
   visibleText?: string;
@@ -132,7 +134,7 @@ function hybridKeywordScore(row: Record<string, unknown>, query: string): number
   if (!queryTerms.length) return 0;
   const text = (value: unknown): string => typeof value === "string" ? value : "";
   const fields: Array<[string, number]> = [
-    [text(row.title), 3.2], [text(row.ocr_text), 3], [text(row.visual_location_type).replaceAll("_", " "), 2.8],
+    [text(row.title), 3.2], [text(row.ocr_text), 3], [text(row.visual_location_type).replaceAll("_", " "), 2.8], [text(row.scene_context).replaceAll("_", " "), 2.4],
     [text(row.primary_category).replaceAll("_", " "), 2.6], [storedList(row, "subject_tags").join(" "), 2.5],
     [storedList(row, "ai_tags").join(" "), 2.1], [storedList(row, "scene_attributes").join(" "), 2],
     [text(row.caption), 1.8], [text(row.description), 1.6],
@@ -181,7 +183,7 @@ export function buildMatchExplanation(asset: Asset, query = ""): MatchExplanatio
     { field: "caption", label: "Caption", value: asset.caption, weight: 0.74 },
     { field: "location", label: "Evidence-backed location", value: [asset.country, asset.province, asset.city, asset.locality, asset.landmark].filter(Boolean).join(" "), weight: 0.9 },
     { field: "subject", label: "Subject tags", value: asset.subjectTags.join(" "), weight: 0.84 },
-    { field: "context", label: "Visual classification", value: [asset.visualLocationType?.replaceAll("_", " "), asset.primaryCategory?.replaceAll("_", " "), ...(asset.sceneAttributes ?? []), ...asset.culturalTags].filter(Boolean).join(" "), weight: 0.78 },
+    { field: "context", label: "Visual classification", value: [asset.visualLocationType?.replaceAll("_", " "), asset.sceneContext?.replaceAll("_", " "), asset.primaryCategory?.replaceAll("_", " "), ...(asset.sceneAttributes ?? []), ...asset.culturalTags].filter(Boolean).join(" "), weight: 0.78 },
   ];
   const matched = fields
     .map((field) => ({ ...field, hits: queryTokens.filter((token) => field.value.toLowerCase().includes(token)) }))
@@ -208,7 +210,7 @@ export function buildMatchExplanation(asset: Asset, query = ""): MatchExplanatio
   addMetadata("Location", [asset.city, asset.province, asset.country].filter(Boolean).join(", "));
   addMetadata("Landmark", asset.landmark);
   addMetadata("Subject tags", asset.subjectTags.join(", "));
-  addMetadata("Visible location type", asset.visualLocationType?.replaceAll("_", " "));
+  addMetadata("Visible location type", [asset.visualLocationType, asset.sceneContext].filter(Boolean).map((value) => value!.replaceAll("_", " ")).join(", "));
   addMetadata("Primary category", asset.primaryCategory?.replaceAll("_", " "));
   addMetadata("Visible text", asset.visibleText);
   addMetadata("Context tags", asset.culturalTags.join(", "));
@@ -235,7 +237,7 @@ function assetSearchText(asset: Asset): Array<[string, number]> {
     [asset.aiTags.join(" "), 2.1],
     [asset.caption, 1.9],
     [asset.description, 1.7],
-    [[asset.visualLocationType?.replaceAll("_", " "), asset.primaryCategory?.replaceAll("_", " "), ...(asset.sceneAttributes ?? [])].filter(Boolean).join(" "), 1.6],
+    [[asset.visualLocationType?.replaceAll("_", " "), asset.sceneContext?.replaceAll("_", " "), asset.primaryCategory?.replaceAll("_", " "), ...(asset.sceneAttributes ?? [])].filter(Boolean).join(" "), 1.6],
   ];
 }
 

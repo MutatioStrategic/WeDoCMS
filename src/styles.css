@@ -519,6 +519,52 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .privacy-consent:hover { background: #334337; }
 .global-notice { max-width: 1190px; margin: 14px auto 0; padding: 11px 15px; border: 1px solid #d9dfd2; color: #34443a; background: #e8eee3; font-size: 11px; line-height: 1.45; }
 .analytics-page { max-width: 1190px; margin: 0 auto; padding: 78px 30px 110px; }
+.revenue-panel { max-width: 1190px; margin: 0 auto; padding: 30px 30px 20px; }
+.revenue-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; }
+.revenue-heading h2 { margin: 10px 0 8px; font-size: clamp(30px, 4vw, 48px); line-height: .98; letter-spacing: -.06em; }
+.revenue-heading p { max-width: 620px; margin: 0; color: #697269; font-size: 13px; line-height: 1.55; }
+.revenue-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 26px; }
+.revenue-card, .revenue-explanation, .revenue-privacy { border: 1px solid #d9d6cd; background: #f8f6f0; padding: 18px; }
+.revenue-card small { display: block; color: #6e756d; font: 10px 'DM Mono', monospace; text-transform: uppercase; }
+.revenue-card strong { display: block; margin-top: 10px; color: #202820; font-size: 24px; letter-spacing: -.04em; }
+.revenue-columns { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(280px, 1fr); gap: 12px; margin-top: 12px; }
+.revenue-explanation { background: #edf1e8; }
+.revenue-explanation h3, .revenue-privacy h3 { margin: 0 0 10px; font-size: 16px; letter-spacing: -.03em; }
+.revenue-explanation p, .revenue-privacy p { margin: 0; color: #5f695f; font-size: 12px; line-height: 1.6; }
+.revenue-table-wrap { overflow-x: auto; margin-top: 12px; border: 1px solid #d9d6cd; background: #fffdf9; }
+.revenue-table { width: 100%; min-width: 720px; border-collapse: collapse; }
+.revenue-table th, .revenue-table td { padding: 12px 14px; border-bottom: 1px solid #e7e3da; text-align: left; vertical-align: top; font-size: 12px; }
+.revenue-table th { color: #697269; background: #f1eee6; font: 10px 'DM Mono', monospace; text-transform: uppercase; }
+.revenue-table td strong { display: block; color: #253027; }
+.revenue-table td small { display: block; margin-top: 4px; color: #7a8178; }
+.revenue-status { color: #4e6c4c; font: 10px 'DM Mono', monospace; text-transform: uppercase; }
+.revenue-privacy { margin-top: 12px; }
+.revenue-detail-panel { max-width: 1190px; margin: 0 auto; padding: 20px 30px 100px; }
+.payout-policy-banner { display: grid; grid-template-columns: minmax(180px, .7fr) minmax(180px, .7fr) minmax(0, 1.6fr); gap: 18px; align-items: center; margin-top: 25px; border-left: 3px solid #7a3524; padding: 18px 20px; background: #f1eee6; }
+.payout-policy-banner div { display: grid; gap: 5px; }
+.payout-policy-banner strong { color: #273128; font-size: 22px; letter-spacing: -.04em; }
+.payout-policy-banner span { color: #697269; font-size: 11px; line-height: 1.4; }
+.payout-policy-banner p { margin: 0; color: #5f695f; font-size: 12px; line-height: 1.55; }
+.statement-breakdown { display: grid; gap: 1px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 15px 0; border: 1px solid #e3dfd6; background: #e3dfd6; }
+.statement-breakdown > div { display: grid; gap: 4px; padding: 12px; background: #fffdf9; }
+.statement-breakdown strong { color: #273128; font-size: 18px; }
+.statement-breakdown span, .statement-breakdown small { color: #697269; font-size: 11px; }
+.revenue-package-card { margin-top: 12px; }
+.statement-table { min-width: 760px; }
+.revenue-tools-panel { max-width: 1190px; margin: 0 auto; padding: 10px 30px 100px; }
+.statement-export-actions { display: flex; gap: 8px; align-items: center; }
+.statement-export-actions button { min-height: 40px; white-space: nowrap; }
+.seller-performance-columns { margin-top: 25px; }
+.seller-performance-columns .analytics-card h3 { margin: 10px 0; font-size: 26px; letter-spacing: -.045em; }
+.seller-performance-list { display: grid; gap: 10px; margin-top: 18px; }
+.seller-performance-list > div { display: grid; gap: 4px; border-top: 1px solid #e3dfd6; padding-top: 9px; }
+.seller-performance-list strong { color: #273128; font-size: 12px; }
+.seller-performance-list span { color: #697269; font-size: 11px; }
+@media (max-width: 820px) { .revenue-detail-panel { padding: 15px 20px 80px; }.payout-policy-banner { grid-template-columns: 1fr 1fr; }.payout-policy-banner p { grid-column: 1 / -1; } }
+@media (max-width: 560px) { .payout-policy-banner { grid-template-columns: 1fr; }.payout-policy-banner p { grid-column: auto; } }
+@media (max-width: 820px) { .revenue-summary { grid-template-columns: 1fr 1fr; }.revenue-columns { grid-template-columns: 1fr; }.revenue-heading { display: block; } }
+@media (max-width: 560px) { .statement-export-actions { display: grid; margin-top: 18px; }.statement-export-actions button { width: 100%; } }
+@media (max-width: 560px) { .revenue-panel { padding: 25px 20px 12px; }.revenue-summary { grid-template-columns: 1fr; }.revenue-card strong { font-size: 21px; } }
 .analytics-page .workspace-intro { max-width: 640px; margin-bottom: 42px; }
 .analytics-page .workspace-intro h1 { margin: 14px 0 16px; font-size: clamp(46px, 6vw, 76px); line-height: .94; letter-spacing: -.07em; font-weight: 600; }
 .analytics-page .workspace-intro p { max-width: 500px; color: #747a6f; font-size: 14px; line-height: 1.6; }
@@ -636,6 +682,38 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 
 /* Buyer licence workflow panel */
+.buyer-finance { margin-bottom: 30px; padding: 24px; border: 1px solid #d7ddd1; background: #f7f9f4; }
+.buyer-finance .status-pill.cool { color: #315d5a; }
+.buyer-finance .status-pill.warm { color: #873f2d; }
+.buyer-finance .card-heading { margin-bottom: 16px; }
+.buyer-finance-metrics { margin-top: 18px; }
+.buyer-finance-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 10px; }
+.buyer-finance-card { min-width: 0; padding: 19px; border: 1px solid #d9d6cd; background: #fffdf9; }
+.buyer-finance-card h3 { margin: 9px 0 0; font-size: 18px; letter-spacing: -.035em; }
+.buyer-finance-copy { max-width: 620px; margin: 13px 0 18px; color: #536153; font-size: 11px; line-height: 1.55; }
+.buyer-finance-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 10px; align-items: end; }
+.buyer-finance-form label { min-width: 0; color: #5d675d; font: 9px 'DM Mono', monospace; text-transform: uppercase; }
+.buyer-finance-form input, .buyer-finance-form select { width: 100%; margin-top: 7px; border: 1px solid #d0d9ca; border-radius: 3px; padding: 10px; color: #263128; background: #fffdf9; font: 11px 'DM Sans', sans-serif; text-transform: none; }
+.buyer-finance-total { display: grid; gap: 4px; align-content: end; min-height: 43px; }
+.buyer-finance-total span, .buyer-finance-balance span { color: #697269; font: 9px 'DM Mono', monospace; text-transform: uppercase; }
+.buyer-finance-total strong { color: #263128; font-size: 18px; }
+.buyer-finance-status { display: grid; gap: 6px; padding: 13px; border-left: 3px solid #6b925c; background: #edf4e9; }
+.buyer-finance-status strong { color: #3f5f35; font: 12px 'DM Mono', monospace; text-transform: uppercase; }
+.buyer-finance-status span { color: #536153; font-size: 11px; }
+.buyer-finance-status .text-button { justify-self: start; padding: 0; }
+.buyer-finance-balance { display: flex; align-items: baseline; gap: 9px; margin-top: 15px; padding-top: 13px; border-top: 1px solid #e7e3da; }
+.buyer-finance-balance strong { color: #3f5f35; font-size: 24px; }
+.buyer-purchase-history { margin-top: 10px; }
+.purchase-history-list { display: grid; gap: 0; margin-top: 12px; border-top: 1px solid #e7e3da; }
+.purchase-history-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 14px; align-items: center; padding: 12px 0; border-bottom: 1px solid #e7e3da; }
+.purchase-history-row > div { min-width: 0; }
+.purchase-history-row strong, .purchase-history-row small { display: block; }
+.purchase-history-row strong { overflow: hidden; color: #253027; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.purchase-history-row small { margin-top: 4px; color: #697269; font: 9px 'DM Mono', monospace; }
+.purchase-history-row > span { color: #253027; font: 11px 'DM Mono', monospace; white-space: nowrap; }
+.purchase-status { padding: 5px 7px; color: #5d675d; background: #e9e5dc; font: 9px 'DM Mono', monospace; text-transform: uppercase; white-space: nowrap; }
+.purchase-status.paid, .purchase-status.payment_succeeded { color: #3f5f35; background: #e1eadb; }
+.purchase-status.pending { color: #7a5f4c; background: #f1dfd6; }
 .buyer-actions { margin-bottom: 30px; padding: 24px; border: 1px solid #dedbd1; background: #fffdf9; }
 .buyer-actions .card-heading { margin-bottom: 16px; }
 .licence-validation-panel { margin-bottom: 30px; padding: 24px; border: 1px solid #cfd9c8; background: #f4f7f0; }
@@ -669,6 +747,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .validation-error { margin-top: 16px; padding: 12px 14px; border-left: 3px solid #bd5e3f; color: #7e4434; background: #f8e9e1; font-size: 11px; line-height: 1.45; }
 
 @media (max-width: 900px) { .action-grid, .step-track { grid-template-columns: 1fr; } .dashboard-heading { display: block; } .dashboard-date { margin-top: 16px; text-align: left; } }
+@media (max-width: 900px) { .buyer-finance-columns { grid-template-columns: 1fr; } .buyer-finance-form { grid-template-columns: repeat(2, minmax(0, 1fr)); } .buyer-finance-form button { grid-column: 1 / -1; justify-self: start; } }
+@media (max-width: 560px) { .buyer-finance { padding: 20px; }.buyer-finance-form { grid-template-columns: 1fr; }.buyer-finance-form button { width: 100%; }.buyer-finance-total { min-height: 0; }.purchase-history-row { grid-template-columns: 1fr auto; gap: 8px; }.purchase-history-row > span { grid-column: 2; grid-row: 1; }.purchase-status { grid-column: 1; grid-row: 2; justify-self: start; } }
 .demand-pill { padding: 6px 8px; color: #5e7955; background: #e3eadf; font: 9px 'DM Mono', monospace; }
 .opportunity-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px; }
 .opportunity-card { padding: 22px; background: #e8dfd5; }.opportunity-card.cool { background: #dce7e2; }.opportunity-card h3 { margin: 25px 0 9px; font-size: 16px; font-weight: 600; letter-spacing: -.03em; }.opportunity-card p { margin: 0; color: #70776e; font-size: 11px; line-height: 1.55; }

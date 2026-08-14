@@ -133,6 +133,7 @@ export const governanceActionRequestSchema = z.object({
   propertyReleaseStatus: releaseStatusSchema.optional(),
   aiTags: z.array(z.string().trim().min(1).max(80)).max(30).optional(),
   visualLocationType: z.enum(["urban_street", "coastal_landscape", "market_scene", "indoor", "residential", "rural_landscape", "industrial", "event", "transport", "nature", "sports", "food", "other", "unknown"]).optional(),
+  sceneContext: z.enum(["animal_close_up", "plant_close_up", "garden", "field", "mountain", "street", "shoreline", "indoor_object", "unknown"]).optional(),
   primaryCategory: z.enum(["people", "lifestyle", "travel", "nature", "architecture", "food", "business", "transport", "arts_culture", "sport", "news_editorial", "objects", "other"]).optional(),
   sceneAttributes: z.array(z.enum(["indoor", "outdoor", "daylight", "night", "sunrise_sunset", "people_present", "no_people", "crowd", "single_person", "group", "vehicle", "building", "landscape", "close_up", "wide_view", "aerial", "food_present", "text_present", "copy_space"])).max(30).optional(),
   visibleText: z.string().trim().max(2000).optional(),
@@ -188,11 +189,14 @@ export const paymentWebhookRequestSchema = z.object({
   provider: z.string().trim().min(2).max(80),
   eventId: z.string().trim().min(4).max(240),
   type: z.enum(["payment_succeeded", "payment_failed", "refund", "chargeback"]),
-  licenceId: z.string().min(1).max(120),
+  licenceId: z.string().min(1).max(120).optional(),
+  subscriptionId: z.string().min(1).max(120).optional(),
+  creditPurchaseId: z.string().min(1).max(120).optional(),
+  productType: z.enum(["licence", "photographer_subscription", "platform_subscription", "credit_purchase"]).default("licence"),
   paymentReference: z.string().trim().max(240).optional(),
   amountCents: z.number().int().positive().max(100_000_000),
   currency: z.string().length(3),
-});
+}).refine((value) => value.productType === "licence" ? Boolean(value.licenceId) : value.productType === "credit_purchase" ? Boolean(value.creditPurchaseId) : Boolean(value.subscriptionId), { message: "A product reference is required" });
 
 export const streamWebhookRequestSchema = z.object({
   uid: z.string().trim().max(240).optional(),

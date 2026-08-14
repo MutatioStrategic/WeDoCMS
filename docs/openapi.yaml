@@ -514,6 +514,95 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/analytics/contributor/revenue:
+    get:
+      operationId: getContributorRevenueStatement
+      summary: Read an owner-scoped licence and subscription royalty statement
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Owner-scoped statement with privacy-preserving buyer and payout details
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [statement]
+                properties:
+                  statement:
+                    type: object
+                    required: [performance]
+                    properties:
+                      performance:
+                        type: object
+                        required: [range, summary, assets]
+                        properties:
+                          range: { type: string }
+                          summary:
+                            type: object
+                            required: [views, downloads, subscriptionDownloads, licensedAssets, royaltyCents, roiStatus, roiExplanation]
+                            properties:
+                              views: { type: integer, minimum: 0 }
+                              downloads: { type: integer, minimum: 0 }
+                              subscriptionDownloads: { type: integer, minimum: 0 }
+                              licensedAssets: { type: integer, minimum: 0 }
+                              royaltyCents: { type: integer, minimum: 0 }
+                              roiStatus: { type: string, enum: [not_available] }
+                              roiExplanation: { type: string }
+                          assets:
+                            type: array
+                            items:
+                              type: object
+                              required: [id, title, kind, views, downloads, subscriptionDownloads, licenceCount, royaltyCents, royaltyPerThousandViewsCents]
+                              properties:
+                                id: { type: string }
+                                title: { type: string }
+                                kind: { type: string, enum: [image, video] }
+                                views: { type: integer, minimum: 0 }
+                                downloads: { type: integer, minimum: 0 }
+                                subscriptionDownloads: { type: integer, minimum: 0 }
+                                licenceCount: { type: integer, minimum: 0 }
+                                royaltyCents: { type: integer, minimum: 0 }
+                                royaltyPerThousandViewsCents: { type: integer, minimum: 0, nullable: true }
+                    additionalProperties: true
+                additionalProperties: false
+        '403':
+          description: Contributor or admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/analytics/contributor/revenue.csv:
+    get:
+      operationId: downloadContributorRevenueCsv
+      summary: Download the authenticated seller statement as CSV
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Owner-scoped CSV statement
+          content:
+            text/csv: { schema: { type: string } }
+        '403':
+          description: Contributor or admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/analytics/contributor/revenue.pdf:
+    get:
+      operationId: downloadContributorRevenuePdf
+      summary: Download the authenticated seller statement as PDF
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Owner-scoped presentation-ready PDF statement
+          content:
+            application/pdf: { schema: { type: string, format: binary } }
+        '403':
+          description: Contributor or admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
   /api/uploads:
     post:
       operationId: createUploadSession
@@ -636,6 +725,108 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/my/purchases:
+    get:
+      operationId: listMyPurchases
+      summary: List the signed-in buyer's complete purchase history
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Licences, photographer subscriptions, platform membership payments, and credit purchases ordered newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results, summary]
+                properties:
+                  results: { type: array, items: { type: object, additionalProperties: true } }
+                  summary: { type: object, additionalProperties: true }
+        '401': { description: Authentication required, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/my/credits:
+    get:
+      operationId: getMyCredits
+      summary: Get the signed-in buyer's credit balance and credit ledger
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Available credits, transactions, and pending purchases
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [oneCreditCents, balanceCredits, transactions, pendingPurchases]
+                properties:
+                  oneCreditCents: { type: integer, example: 10000 }
+                  balanceCredits: { type: integer, minimum: 0 }
+                  transactions: { type: array, items: { type: object, additionalProperties: true } }
+                  pendingPurchases: { type: array, items: { type: object, additionalProperties: true } }
+                additionalProperties: true
+        '401': { description: Buyer access required, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/buyer/credits/checkout:
+    post:
+      operationId: createBuyerCreditCheckout
+      summary: Create hosted checkout for archive credits priced at R100 per credit
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [credits, successUrl, cancelUrl]
+              properties:
+                credits: { type: integer, minimum: 1, maximum: 1000 }
+                successUrl: { type: string, maxLength: 2048 }
+                cancelUrl: { type: string, maxLength: 2048 }
+      responses:
+        '201':
+          description: Hosted credit checkout created
+          headers:
+            Location: { description: Hosted payment checkout resource, schema: { type: string } }
+          content: { application/json: { schema: { type: object, additionalProperties: true } } }
+        '401': { description: Buyer access required, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '503': { description: Payment provider unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/my/platform-subscription:
+    get:
+      operationId: getMyPlatformSubscription
+      summary: Get the signed-in buyer's R1299 monthly membership and payment history
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Membership record and signed payment events, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '401': { description: Buyer access required, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/buyer/platform-subscription/checkout:
+    post:
+      operationId: createBuyerPlatformSubscriptionCheckout
+      summary: Create hosted checkout for the R1299 monthly buyer membership
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [startDate, billingDay, successUrl, cancelUrl]
+              properties:
+                startDate: { type: string, format: date }
+                billingDay: { type: integer, minimum: 1, maximum: 28 }
+                successUrl: { type: string, maxLength: 2048 }
+                cancelUrl: { type: string, maxLength: 2048 }
+      responses:
+        '201':
+          description: Hosted membership checkout created
+          headers:
+            Location: { description: Hosted payment checkout resource, schema: { type: string } }
+          content: { application/json: { schema: { type: object, additionalProperties: true } } }
+        '409': { description: Membership already pending or active, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '503': { description: Payment provider unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/my/platform-subscription/cancel:
+    post:
+      operationId: cancelMyPlatformSubscription
+      summary: Cancel the signed-in buyer's pending or active monthly membership
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Membership cancelled, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '404': { description: Membership not found, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
   /api/assets/{id}:
     get:
       operationId: getAsset
@@ -897,6 +1088,24 @@ paths:
           in: header
           required: true
           schema: { type: string, minLength: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider, eventId, type, productType, amountCents, currency]
+              properties:
+                provider: { type: string }
+                eventId: { type: string }
+                type: { type: string, enum: [payment_succeeded, payment_failed, refund, chargeback] }
+                productType: { type: string, enum: [licence, photographer_subscription, platform_subscription, credit_purchase] }
+                licenceId: { type: string }
+                subscriptionId: { type: string }
+                creditPurchaseId: { type: string }
+                paymentReference: { type: string }
+                amountCents: { type: integer, minimum: 1 }
+                currency: { type: string, minLength: 3, maxLength: 3 }
       responses:
         '200':
           description: Event accepted or already processed
@@ -999,10 +1208,11 @@ components:
           additionalProperties: false
         analytics:
           type: object
-          required: [pipeline, r2DataCatalog, table]
+          required: [pipeline, r2DataCatalog, r2Sql, table]
           properties:
             pipeline: { type: string, enum: [configured, not_configured] }
             r2DataCatalog: { type: string, enum: [configured, not_configured] }
+            r2Sql: { type: string, enum: [configured, not_configured] }
             table: { type: string }
           additionalProperties: true
         results:
@@ -1098,6 +1308,7 @@ components:
         workflowStage: { type: string, enum: [ingestion, ai_tagging, curator_correction, approval] }
         aiTags: { type: array, items: { type: string } }
         visualLocationType: { type: string, enum: [urban_street, coastal_landscape, market_scene, indoor, residential, rural_landscape, industrial, event, transport, nature, sports, food, other, unknown] }
+        sceneContext: { type: string, enum: [animal_close_up, plant_close_up, garden, field, mountain, street, shoreline, indoor_object, unknown] }
         primaryCategory: { type: string, enum: [people, lifestyle, travel, nature, architecture, food, business, transport, arts_culture, sport, news_editorial, objects, other] }
         sceneAttributes: { type: array, items: { type: string } }
         visibleText: { type: string }
@@ -1184,6 +1395,7 @@ components:
         propertyReleaseStatus: { type: string, enum: [unknown, not_required, pending, verified] }
         aiTags: { type: array, maxItems: 30, items: { type: string, minLength: 1, maxLength: 80 } }
         visualLocationType: { type: string, enum: [urban_street, coastal_landscape, market_scene, indoor, residential, rural_landscape, industrial, event, transport, nature, sports, food, other, unknown] }
+        sceneContext: { type: string, enum: [animal_close_up, plant_close_up, garden, field, mountain, street, shoreline, indoor_object, unknown] }
         primaryCategory: { type: string, enum: [people, lifestyle, travel, nature, architecture, food, business, transport, arts_culture, sport, news_editorial, objects, other] }
         sceneAttributes: { type: array, maxItems: 30, items: { type: string } }
         visibleText: { type: string, maxLength: 2000 }

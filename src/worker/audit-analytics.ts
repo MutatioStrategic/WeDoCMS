@@ -32,6 +32,7 @@ export type AuditAnalyticsConfig = {
   R2_ANALYTICS_BUCKET?: string;
   R2_ANALYTICS_NAMESPACE?: string;
   R2_ANALYTICS_TABLE?: string;
+  R2_DATA_CATALOG_ENABLED?: string;
 };
 
 export type AuditCatalogRow = {
@@ -64,6 +65,7 @@ export type AuditCatalogSearch = {
 export type AuditAnalyticsStatus = {
   pipeline: "configured" | "not_configured";
   r2DataCatalog: "configured" | "not_configured";
+  r2Sql: "configured" | "not_configured";
   table: string;
 };
 
@@ -128,7 +130,8 @@ export function auditAnalyticsStatus(config: AuditAnalyticsConfig): AuditAnalyti
   const table = config.R2_ANALYTICS_TABLE ?? "events";
   return {
     pipeline: config.AUDIT_ANALYTICS_PIPELINE ? "configured" : "not_configured",
-    r2DataCatalog: config.R2_SQL_AUTH_TOKEN && catalogEndpoint(config) ? "configured" : "not_configured",
+    r2DataCatalog: config.R2_DATA_CATALOG_ENABLED === "true" || Boolean(config.R2_ANALYTICS_BUCKET && config.R2_ACCOUNT_ID) ? "configured" : "not_configured",
+    r2Sql: config.R2_SQL_AUTH_TOKEN && catalogEndpoint(config) ? "configured" : "not_configured",
     table: `${namespace}.${table}`,
   };
 }

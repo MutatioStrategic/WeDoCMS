@@ -5,6 +5,8 @@ import {
   normalizeVisionResult,
   mergeHybridSearchRows,
   parseVisionMetadata,
+  mergeAiMetadataFallback,
+  normalizeSceneContext,
   preparePhotoForVision,
   photoJobMatchesAsset,
   enqueuePhotoJob,
@@ -45,6 +47,49 @@ describe("photo AI indexing", () => {
     }) } };
     expect(normalizeVisionResult(wrapped)).toEqual(expect.any(String));
     expect(classifyVisionResult(wrapped).metadata.description).toContain("dog standing outdoors");
+  });
+
+  it("refines broad landscape labels into a specific visual scene context", () => {
+    expect(normalizeSceneContext({
+      description: "A tabby cat sitting outdoors among fallen leaves",
+      subjectTags: ["cat", "animal"],
+      locationType: "rural_landscape",
+      primaryCategory: "nature",
+      sceneAttributes: ["outdoor", "close_up"],
+      sceneContext: "unknown",
+    })).toBe("animal_close_up");
+    expect(normalizeSceneContext({
+      description: "A close-up of golden corn kernels",
+      subjectTags: ["corn", "plant"],
+      locationType: "food",
+      primaryCategory: "food",
+      sceneAttributes: ["close_up", "food_present"],
+      sceneContext: "unknown",
+    })).toBe("plant_close_up");
+    expect(normalizeSceneContext({
+      description: "A narrow street lined with old buildings and a car",
+      subjectTags: ["street", "vehicle"],
+      locationType: "urban_street",
+      primaryCategory: "architecture",
+      sceneAttributes: ["outdoor", "vehicle", "building"],
+      sceneContext: "unknown",
+    })).toBe("street");
+    expect(normalizeSceneContext({
+      description: "Aerial view of a circular plaza with radial stone sections and a central memorial flame",
+      subjectTags: ["architecture"],
+      locationType: "unknown",
+      primaryCategory: "architecture",
+      sceneAttributes: ["aerial", "wide_view"],
+      sceneContext: "garden",
+    })).toBe("unknown");
+    expect(normalizeSceneContext({
+      description: "Interior of a large church with vaulted ceilings, pews, and an organ",
+      subjectTags: ["architecture"],
+      locationType: "indoor",
+      primaryCategory: "architecture",
+      sceneAttributes: ["indoor", "building"],
+      sceneContext: "indoor_object",
+    })).toBe("unknown");
   });
 
   it("routes malformed, low-confidence, unreadable, and unsupported-language output to review", () => {
@@ -109,6 +154,28 @@ describe("photo AI indexing", () => {
     const replayed = await replayPhotoJob({ DB: db, PHOTO_ENRICHMENT_QUEUE: queue } as unknown as PhotoPipelineBindings, "enrich-job-1");
     expect(replayed).toBeNull();
     expect(queue.send).not.toHaveBeenCalled();
+  });
+
+  it("keeps AI description and tags as blank-field fallbacks even when review is required", () => {
+    const metadata = parseVisionMetadata({
+      description: "A blue minibus parked beside a paved road",
+      subjectTags: ["minibus", "road"],
+      locationType: "transport",
+      primaryCategory: "transport",
+      sceneAttributes: ["outdoor", "vehicle"],
+      confidence: 0.4,
+      fieldConfidences: { description: 0.4, locationType: 0.4, primaryCategory: 0.4 },
+    });
+    expect(mergeAiMetadataFallback({ description: "", caption: "", subjectTags: [] }, metadata)).toEqual({
+      description: "A blue minibus parked beside a paved road",
+      caption: "A blue minibus parked beside a paved road",
+      subjectTags: ["minibus", "road"],
+    });
+    expect(mergeAiMetadataFallback({ description: "Editor description", caption: "Editor caption", subjectTags: ["editor"] }, metadata)).toEqual({
+      description: "Editor description",
+      caption: "Editor caption",
+      subjectTags: ["editor", "minibus", "road"],
+    });
   });
 
   it("requeues an explicit admin re-enrichment for the same upload revision", async () => {

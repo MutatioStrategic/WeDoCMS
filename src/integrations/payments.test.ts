@@ -44,4 +44,34 @@ describe("JsonPaymentAdapter", () => {
       cancelUrl: "https://app.example/cancel",
     })).rejects.toThrow("hosted URL");
   });
+
+  it("passes membership recurrence details to the payment provider", async () => {
+    let request: Request | undefined;
+    const adapter = new JsonPaymentAdapter({
+      provider: "test-psp",
+      endpoint: "https://payments.example/checkout",
+      token: "secret",
+      fetcher: async (input, init) => {
+        request = new Request(input, init);
+        return new Response(JSON.stringify({ id: "psp-membership-1", checkoutUrl: "https://payments.example/pay/membership-1" }), { status: 201 });
+      },
+    });
+    await adapter.createCheckoutSession({
+      idempotencyKey: "platform_subscription:12345678",
+      referenceId: "platform-subscription-1",
+      productType: "platform_subscription",
+      recurring: { interval: "month", billingDay: 12, startDate: "2026-09-12" },
+      amountCents: 129900,
+      currency: "ZAR",
+      buyer: { id: "buyer-1", email: "buyer@example.com" },
+      successUrl: "https://app.example/success",
+      cancelUrl: "https://app.example/cancel",
+    });
+    expect(await request?.json()).toMatchObject({
+      reference: "platform-subscription-1",
+      productType: "platform_subscription",
+      amount: 129900,
+      recurring: { interval: "month", billingDay: 12, startDate: "2026-09-12" },
+    });
+  });
 });

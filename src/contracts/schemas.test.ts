@@ -98,6 +98,23 @@ describe("API contract Zod schemas", () => {
       amountCents: "1000",
       currency: "ZAR",
     }).success).toBe(false);
+    expect(paymentWebhookRequestSchema.safeParse({
+      provider: "test-provider",
+      eventId: "event-membership-1",
+      type: "payment_succeeded",
+      productType: "platform_subscription",
+      subscriptionId: "membership-1",
+      amountCents: 129900,
+      currency: "ZAR",
+    }).success).toBe(true);
+    expect(paymentWebhookRequestSchema.safeParse({
+      provider: "test-provider",
+      eventId: "event-credit-1",
+      type: "payment_succeeded",
+      productType: "credit_purchase",
+      amountCents: 10000,
+      currency: "ZAR",
+    }).success).toBe(false);
     expect(streamWebhookRequestSchema.safeParse({ uid: 42, status: { state: "ready" } }).success).toBe(false);
     expect(streamWebhookRequestSchema.parse({ uid: "stream-1", status: { state: "ready" } })).toEqual({ uid: "stream-1", status: { state: "ready" } });
   });

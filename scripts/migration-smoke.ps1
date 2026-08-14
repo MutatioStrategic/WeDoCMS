@@ -31,10 +31,14 @@ function Invoke-D1ExpectedFailure([string]$query) {
 try {
   npx wrangler d1 migrations apply veld-archive --local --persist-to $persistPath
 
-  $tables = @(Invoke-D1Json "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('organizations','organization_memberships','auth_sessions','notifications','rate_limit_buckets','media_scan_results','payment_webhook_events','payment_reconciliation_runs','rights_case_events','ops_actions','asset_search_fts','photo_ai_provenance') ORDER BY name")
-  foreach ($required in @("organizations", "organization_memberships", "auth_sessions", "payment_webhook_events", "rights_case_events", "asset_search_fts", "photo_ai_provenance")) {
+  $tables = @(Invoke-D1Json "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('organizations','organization_memberships','auth_sessions','notifications','rate_limit_buckets','media_scan_results','payment_webhook_events','payment_reconciliation_runs','rights_case_events','ops_actions','asset_search_fts','photo_ai_provenance','buyer_platform_subscriptions','buyer_credit_purchases','buyer_credit_transactions') ORDER BY name")
+  foreach ($required in @("organizations", "organization_memberships", "auth_sessions", "payment_webhook_events", "rights_case_events", "asset_search_fts", "photo_ai_provenance", "buyer_platform_subscriptions", "buyer_credit_purchases", "buyer_credit_transactions")) {
     if (-not ($tables.name -contains $required)) { throw "Required migrated table missing: $required" }
   }
+
+  Invoke-D1Json "INSERT INTO buyer_credit_purchases (id, organization_id, buyer_id, credits, amount_cents) VALUES ('credit-model-test', 'org-demo', 'demo-buyer', 3, 30000)" | Out-Null
+  Invoke-D1ExpectedFailure "INSERT INTO buyer_credit_purchases (id, organization_id, buyer_id, credits, amount_cents) VALUES ('credit-model-invalid', 'org-demo', 'demo-buyer', 3, 29900)"
+  Invoke-D1ExpectedFailure "INSERT INTO buyer_platform_subscriptions (id, organization_id, buyer_id, billing_day, start_date, next_charge_date) VALUES ('membership-model-invalid-day', 'org-demo', 'demo-buyer', 31, '2026-09-01', '2026-10-01')"
 
   $seed = @(Invoke-D1Json "SELECT status, workflow_stage, organization_id, monetization_model FROM assets WHERE id = 'asset-table-mountain'")[0]
   if ($seed.status -ne "published" -or $seed.workflow_stage -ne "approval" -or $seed.organization_id -ne "org-demo" -or $seed.monetization_model -ne "membership") {
