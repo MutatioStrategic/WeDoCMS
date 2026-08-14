@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { archiveDomain, type Asset, type AssetVersionEvent, type BuyerAnalytics, type BuyerLightbox, type CommunityOverview, type ContributorAnalytics, type LicenceType, type MonetizationModel, type NotificationItem, type PayoutBatchItem, type PayoutBatchSummary, type PhotoJobSummary, type SavedSearch, type SearchResponse, type TakedownReason, type WebhookSubscription, type WorkflowStage } from "./shared";
+import { archiveDomain, type Asset, type AssetVersionEvent, type BuyerAnalytics, type BuyerLightbox, type CommunityOverview, type ContributorAnalytics, type LicenceDescription, type LicenceType, type MonetizationModel, type NotificationItem, type PayoutBatchItem, type PayoutBatchSummary, type PhotoJobSummary, type SavedSearch, type SearchResponse, type TakedownReason, type WebhookSubscription, type WorkflowStage } from "./shared";
 import { testPhotoLibrary } from "./test-library";
 import "./styles.css";
 import { CommunityWorkspace } from "./community";
@@ -46,6 +46,13 @@ type AuditAnalyticsConnectors = {
   r2Sql: "configured" | "not_configured";
   table: string;
   catalogSearch?: "ready" | "not_configured" | "unavailable";
+};
+
+type AdminLicenceApprovalReport = {
+  summary: { buyerPreferences: number; enabledBuyers: number; autoApprovedRequests: number; unpaidAutoApprovedRequests: number; paidAutoApprovedRequests: number };
+  preferences: { id: string; buyerId: string; buyerName: string; buyerEmail: string; enabled: boolean; termsVersion: string; signedAt: string | null; signedBy: string | null; signerName: string | null; revokedAt: string | null; updatedAt: string; auditFallbackEvents: number }[];
+  autoApprovedRequests: { id: string; assetId: string; assetTitle: string; buyerId: string; buyerName: string; buyerEmail: string; licenceType: string; territory: string; durationDays: number; priceCents: number; status: string; approvalStatus: string; approvalMethod: string; approvedAt: string | null; createdAt: string }[];
+  operationalAuditEvents: { id: string; action: string; resourceId: string; status: string; createdAt: string }[];
 };
 
 function isJsonResponse(response: Response): boolean {
@@ -642,6 +649,32 @@ function DashboardHome({ sessionUser, api, navigate }: { sessionUser: SessionUse
   </main>;
 }
 
+function AdminLicenceApprovalPanel({ api, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
+  const [report, setReport] = useState<AdminLicenceApprovalReport | null>(null);
+  const [state, setState] = useState<"loading" | "ready" | "unavailable">("loading");
+
+  useEffect(() => {
+    let active = true;
+    api("/api/admin/licence-approvals")
+      .then((response) => readJson<AdminLicenceApprovalReport>(response, "Buyer licence approval report unavailable"))
+      .then((data) => { if (active) { setReport(data); setState("ready"); } })
+      .catch(() => { if (active) { setState("unavailable"); onNotice("Buyer licence approval visibility is unavailable. No cached admin decision data was shown."); } });
+    return () => { active = false; };
+  }, [api, onNotice]);
+
+  return <section className="admin-licence-approvals" aria-labelledby="admin-licence-approvals-title">
+    <div className="card-heading"><div><span className="section-kicker">CEO / BUYER LICENCE GOVERNANCE</span><h2 id="admin-licence-approvals-title">See who can <em>auto-approve.</em></h2></div><span className="status-pill cool">Tenant scoped</span></div>
+    {state === "loading" && <div className="empty-state" role="status">Loading buyer sign-offs and licence approval activity...</div>}
+    {state === "unavailable" && <div className="empty-state" role="alert">Buyer licence approval reporting is unavailable. Retry after checking the Worker and D1 migration.</div>}
+    {state === "ready" && report && <>
+      <p className="admin-licence-approvals-copy">This report shows each buyer’s current sign-off, the terms version accepted, revocations, and every licence request accepted through that setting. Payment status remains separate and visible.</p>
+      <div className="metric-grid admin-licence-approval-metrics"><MetricCard label="Enabled buyers" value={report.summary.enabledBuyers.toString()} detail={`${report.summary.buyerPreferences} preference record${report.summary.buyerPreferences === 1 ? "" : "s"}`} tone={report.summary.enabledBuyers ? "green" : undefined} /><MetricCard label="Auto-approved" value={report.summary.autoApprovedRequests.toString()} detail="licence requests" /><MetricCard label="Awaiting payment" value={report.summary.unpaidAutoApprovedRequests.toString()} detail="approval is not payment" tone={report.summary.unpaidAutoApprovedRequests ? "rust" : undefined} /><MetricCard label="Paid" value={report.summary.paidAutoApprovedRequests.toString()} detail="verified payment status" tone="green" /></div>
+      <div className="admin-licence-approval-columns"><article className="analytics-card"><div className="card-heading"><div><span className="section-kicker">BUYER SIGN-OFFS</span><h3>Who enabled the control</h3></div></div>{report.preferences.length ? <div className="admin-licence-preference-list">{report.preferences.map((item) => <div className="admin-licence-preference-row" key={item.id}><div><strong>{item.buyerName}</strong><small>{item.buyerEmail}</small></div><span className={`status-pill ${item.enabled ? "cool" : "warm"}`}>{item.enabled ? "Enabled" : "Off"}</span><div><small>{item.enabled ? "Signed" : item.revokedAt ? "Revoked" : "Not signed"}</small><strong>{item.signedAt ? formatPurchaseDate(item.signedAt) : "—"}</strong></div><small>{item.auditFallbackEvents ? `${item.auditFallbackEvents} operational audit event${item.auditFallbackEvents === 1 ? "" : "s"}` : `Terms ${item.termsVersion}`}</small></div>)}</div> : <div className="empty-state">No buyer auto-approval sign-offs have been recorded.</div>}</article><article className="analytics-card"><div className="card-heading"><div><span className="section-kicker">AUTO-APPROVED REQUESTS</span><h3>Licence activity and payment</h3></div></div>{report.autoApprovedRequests.length ? <div className="admin-licence-request-list">{report.autoApprovedRequests.slice(0, 8).map((item) => <div className="admin-licence-request-row" key={item.id}><div><strong>{item.assetTitle}</strong><small>{item.buyerName} · {item.licenceType} · {item.territory} · {item.durationDays} days</small></div><span className={`status-pill ${item.status === "paid" ? "cool" : "warm"}`}>{item.status === "paid" ? "Paid" : "Unpaid"}</span><b>{formatZar(item.priceCents)}</b></div>)}</div> : <div className="empty-state">No licence requests have used buyer auto-approval yet.</div>}</article></div>
+      <p className="privacy-note">Admin visibility is restricted to this organisation. Buyer email is shown here for internal governance; it is not exposed to contributors or public users.</p>
+    </>}
+  </section>;
+}
+
 function AdminLedgerWorkspace({ api, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
   const [category, setCategory] = useState<"all" | "user_account" | "image">("all");
   const [entries, setEntries] = useState<ApprovalLedgerEntry[]>([]);
@@ -700,6 +733,8 @@ function AdminLedgerWorkspace({ api, onNotice }: { api: (path: string, init?: Re
       <div><span className="section-kicker">TOP ADMIN / APPROVAL LEDGER</span><h1>Every sign-off in <em>one record.</em></h1><p>User-account approvals, seller signatures, verification updates, and image decisions are listed with actor, subject, resource, and proof state.</p></div>
       <div className="ledger-proof"><strong>{summary.verifiedIntegrity}</strong><span>verified signed audit events</span></div>
     </div>
+
+    <AdminLicenceApprovalPanel api={api} onNotice={onNotice} />
 
     <div className="ledger-stats" aria-busy={state === "loading"}>
       <MetricCard label="User account events" value={summary.userAccount.toString()} detail="seller signatures, KYC, tender decisions" tone={summary.userAccount ? "rust" : "green"} />
@@ -804,7 +839,8 @@ function BuyerActionsPanelNext({ navigate, onNotice }: { navigate: (view: View) 
   </section>;
 }
 
-type LicenceHistoryItem = { id: string; assetId: string; assetTitle: string; licenceType: string; territory: string; durationDays: number; priceCents: number; status: string; createdAt: string; previewUrl: string | null };
+type LicenceHistoryItem = { id: string; assetId: string; assetTitle: string; licenceType: string; licence: LicenceDescription; territory: string; durationDays: number; priceCents: number; status: string; approvalStatus: "pending" | "auto_approved"; approvalMethod: string | null; approvedAt: string | null; createdAt: string; previewUrl: string | null };
+type BuyerAutoApprovalPreference = { enabled: boolean; termsVersion: string; signedAt: string | null; signedBy: string | null; revokedAt: string | null; updatedAt: string | null; scope: string; policy: { acceptsAfterValidation: boolean; paymentStillRequired: boolean; appliesTo: string } };
 type BuyerPurchaseHistoryItem = { id: string; kind: string; title: string; status: string; amountCents: number; currency: string; createdAt: string; details: string; referenceId: string };
 type BuyerCreditsAccount = { oneCreditCents: number; balanceCredits: number; transactions: { id: string; transaction_type: string; credits: number; amount_cents: number; reference_type: string | null; created_at: string }[]; pendingPurchases: { id: string; credits: number; amount_cents: number; status: string; created_at: string }[] };
 type BuyerPlatformSubscription = { id: string; status: string; priceCents: number; currency: string; billingDay: number; startDate: string; nextChargeDate: string; lastPaymentAt: string | null; cancelledAt: string | null; createdAt: string; updatedAt: string };
@@ -923,6 +959,52 @@ function BuyerFinancePanel({ api, onNotice }: { api: (path: string, init?: Reque
         </article>
       </div>
       <article className="buyer-finance-card buyer-purchase-history"><div className="card-heading"><div><span className="section-kicker">ALL PURCHASES</span><h3>Everything bought on this account.</h3></div><span className="status-pill cool">{purchases.length} record{purchases.length === 1 ? "" : "s"}</span></div>{purchases.length ? <div className="purchase-history-list">{purchases.map((purchase) => <div className="purchase-history-row" key={`${purchase.kind}:${purchase.id}`}><div><strong>{purchase.title}</strong><small>{purchase.details} · {formatPurchaseDate(purchase.createdAt)}</small></div><b className={`purchase-status ${purchase.status}`}>{purchase.status.replaceAll("_", " ")}</b><span>{formatZar(purchase.amountCents)}</span></div>)}</div> : <div className="empty-state">No purchases are recorded yet. Your completed licences, credits, and membership payments will appear here.</div>}</article>
+    </>}
+  </section>;
+}
+
+function BuyerAutoApprovalPanel({ api, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
+  const [preference, setPreference] = useState<BuyerAutoApprovalPreference | null>(null);
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [state, setState] = useState<"loading" | "ready" | "unavailable">("loading");
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    setState("loading");
+    try {
+      const data = await readJson<BuyerAutoApprovalPreference>(await api("/api/buyer/licence-auto-approval"), "Auto-approval settings unavailable");
+      setPreference(data);
+      setState("ready");
+    } catch {
+      setState("unavailable");
+    }
+  }, [api]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  async function updatePreference(enabled: boolean) {
+    setBusy(true);
+    try {
+      const data = await readJson<BuyerAutoApprovalPreference>(await api("/api/buyer/licence-auto-approval", {
+        method: "PUT",
+        body: JSON.stringify({ enabled, acknowledged: enabled ? acknowledged : false, termsVersion: preference?.termsVersion ?? "licence-auto-approval-v1" }),
+      }), "Auto-approval setting unavailable");
+      setPreference(data);
+      setAcknowledged(false);
+      onNotice(enabled ? "Auto-approval is enabled for your new validated licence requests. Payment is still required." : "Auto-approval is off. New licence requests will remain pending until reviewed.");
+    } catch {
+      onNotice("The auto-approval setting was not changed. Your previous setting remains active.");
+    } finally { setBusy(false); }
+  }
+
+  return <section className="buyer-auto-approval" aria-labelledby="buyer-auto-approval-title">
+    <div className="card-heading"><div><span className="section-kicker">BUYER CONTROL / LICENCE SIGN-OFF</span><h2 id="buyer-auto-approval-title">Approve validated requests <em>automatically.</em></h2></div><span className={`status-pill ${preference?.enabled ? "cool" : "warm"}`}>{state === "loading" ? "Loading" : preference?.enabled ? "Enabled" : "Off"}</span></div>
+    {state === "unavailable" && <div className="empty-state" role="alert">Auto-approval settings are unavailable. No setting was changed; licence requests still require the normal review state.</div>}
+    {state !== "unavailable" && <>
+      <p className="buyer-finance-copy">When enabled, the Worker can accept your new licence request after the server-side rights and release checks pass. It does not bypass payment, change the price, or unlock an original file before verified payment.</p>
+      {preference?.enabled
+        ? <div className="buyer-auto-approval-enabled"><div><strong>Auto-approval is active</strong><span>Applies to: {preference.policy.appliesTo}. Signed {preference.signedAt ? formatPurchaseDate(preference.signedAt) : "now"}.</span></div><button type="button" className="outline-button" disabled={busy} onClick={() => void updatePreference(false)}>{busy ? "Updating..." : "Turn off auto-approval"}</button></div>
+        : <form className="buyer-auto-approval-form" onSubmit={(event) => { event.preventDefault(); if (acknowledged) void updatePreference(true); }}><label className="buyer-auto-approval-signoff"><input type="checkbox" checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} /><span><strong>I sign off on automatic acceptance.</strong><small>I understand that each new request that passes the checks will be accepted for payment without another manual approval step. Payment is still separately required.</small></span></label><button type="submit" className="dark-button" disabled={busy || !acknowledged}>{busy ? "Saving sign-off..." : "Enable auto-approval"}</button></form>}
     </>}
   </section>;
 }
@@ -1055,9 +1137,12 @@ function ContributorStatementTools({ api }: { api: (path: string, init?: Request
 
 type CheckoutValidationResponse = ReturnType<typeof archiveDomain.evaluateLicenceRequest> & {
   assetId: string;
+  licenceType: LicenceType;
+  licence: LicenceDescription;
   priceCents: number | null;
   currency: string;
   monetizationModel: MonetizationModel;
+  purchase: { paymentRequired: boolean; paymentStatus: string; originalAccess: string };
 };
 
 function BuyerLicenceValidationPanel({ assets, api, navigate, onNotice, onRefresh }: { assets: Asset[]; api: (path: string, init?: RequestInit) => Promise<Response>; navigate: (view: View) => void; onNotice: (notice: string) => void; onRefresh: () => Promise<void> }) {
@@ -1083,6 +1168,7 @@ function BuyerLicenceValidationPanel({ assets, api, navigate, onNotice, onRefres
 
   const selectedAsset = availableAssets.find((asset) => asset.id === selectedAssetId) ?? null;
   const duration = Number(durationDays);
+  const selectedLicenceDescription = archiveDomain.licenceDescription(licenceType);
 
   async function validate(event: React.FormEvent) {
     event.preventDefault();
@@ -1129,7 +1215,7 @@ function BuyerLicenceValidationPanel({ assets, api, navigate, onNotice, onRefres
       : <>
         <form className="licence-validation-form" onSubmit={validate}>
           <label>Asset to validate<select value={selectedAssetId} onChange={(event) => setSelectedAssetId(event.target.value)}>{availableAssets.map((asset) => <option key={asset.id} value={asset.id}>{asset.title} - {asset.city ?? asset.country ?? "Location pending"}</option>)}</select></label>
-          <label>Licence type<select value={licenceType} onChange={(event) => setLicenceType(event.target.value as LicenceType)}>{(["editorial", "commercial", "advertising", "social", "broadcast", "exclusive"] as LicenceType[]).map((value) => <option key={value} value={value}>{value[0].toUpperCase() + value.slice(1)}</option>)}</select></label>
+          <label>Licence type<select value={licenceType} onChange={(event) => setLicenceType(event.target.value as LicenceType)}>{(["editorial", "commercial", "advertising", "social", "broadcast", "exclusive"] as LicenceType[]).map((value) => <option key={value} value={value}>{archiveDomain.licenceDescription(value).label}</option>)}</select><small className="field-help">{selectedLicenceDescription.summary} {selectedLicenceDescription.usage}</small></label>
           <label>Territory<input required maxLength={80} value={territory} onChange={(event) => setTerritory(event.target.value)} /></label>
           <label>Duration<select value={durationDays} onChange={(event) => setDurationDays(event.target.value)}><option value="30">30 days</option><option value="90">90 days</option><option value="365">1 year</option><option value="730">2 years</option><option value="1095">3 years</option></select></label>
           <button type="submit" className="dark-button" disabled={state === "loading" || !territory.trim()}>{state === "loading" ? "Checking rights..." : "Run licence check"} <span>-&gt;</span></button>
@@ -1138,12 +1224,32 @@ function BuyerLicenceValidationPanel({ assets, api, navigate, onNotice, onRefres
         {state === "error" && <div className="validation-error" role="alert">{errorMessage}</div>}
         {state === "ready" && validation && <div className={`validation-result ${validation.allowed ? "allowed" : "blocked"}`} role="status" aria-live="polite">
           <div className="validation-result-heading"><div><span className="section-kicker">VALIDATION RESULT</span><h3>{validation.allowed ? "Ready for a licence request." : "This request is blocked."}</h3></div><strong>{validation.allowed ? (validation.priceCents === null ? "Custom quote" : formatZar(validation.priceCents)) : `${validation.blockingReasons.length} issue${validation.blockingReasons.length === 1 ? "" : "s"}`}</strong></div>
-          <p>{validation.allowed ? "The selected use passed the current approval, rights, and release checks. Creating a request does not charge payment." : "Resolve the failed checks or choose a narrower use before creating a request."}</p>
+          <p>{validation.allowed ? `${validation.licence.label}: ${validation.licence.summary} Creating a request does not charge payment; hosted checkout and a verified payment webhook are still required for original access.` : "Resolve the failed checks or choose a narrower use before creating a request."}</p>
+          <div className="purchase-description" role="note"><strong>Purchase path</strong><span>{validation.licence.usage}</span><small>{validation.licence.releaseNote} The displayed amount covers {durationDays} days in {territory.trim() || "the selected territory"}.</small></div>
           <div className="validation-checks">{validation.checks.map((check) => <div key={check.label}><span className={check.passed ? "check-pass" : "check-fail"}>{check.passed ? "OK" : "!"}</span><span><strong>{check.label}</strong><small>{check.detail}</small></span></div>)}</div>
           {validation.allowed && <button type="button" className="approve-button" disabled={creating} onClick={() => void createLicenceRequest()}>{creating ? "Creating request..." : validation.monetizationModel === "custom_quote" ? "Open custom-quote desk" : "Create licence request"} -&gt;</button>}
         </div>}
       </>}
   </section>;
+}
+
+function BuyerPendingLicencePanel({ licences, api, onNotice }: { licences: LicenceHistoryItem[]; api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
+  const pending = licences.filter((licence) => licence.status === "pending");
+  const [busyId, setBusyId] = useState<string | null>(null);
+  if (!pending.length) return null;
+
+  async function continueToPayment(licence: LicenceHistoryItem) {
+    setBusyId(licence.id);
+    try {
+      const response = await api(`/api/payments/${encodeURIComponent(licence.id)}/session`, { method: "POST", body: JSON.stringify({ successUrl: `${window.location.origin}/?payment=success`, cancelUrl: `${window.location.origin}/?payment=cancelled` }) });
+      const data = await readJson<HostedCheckoutResponse>(response, "Payment checkout unavailable");
+      openHostedCheckout(data);
+    } catch (error) {
+      onNotice(error instanceof Error && error.message.includes("Payment provider") ? "Payment is not available yet because Veld has not configured its payment provider. Your licence request is still safely pending." : "We could not open payment checkout. Your pending licence request was not changed.");
+    } finally { setBusyId(null); }
+  }
+
+  return <section className="buyer-pending-licences" aria-labelledby="pending-licences-title"><div className="card-heading"><div><span className="section-kicker">NEXT ACTION / PAYMENT</span><h2 id="pending-licences-title">Continue your pending <em>licence.</em></h2></div><span className="status-pill warm">No charge yet</span></div><p className="buyer-finance-copy">Your rights checks passed and the request is recorded. Continue to the hosted payment provider when checkout is configured; a browser redirect never marks the licence as paid.</p><div className="campaign-list">{pending.map((licence) => <div className="campaign-row pending-licence-row" key={licence.id}><div><strong>{licence.assetTitle}</strong><small>{licence.licenceType} · {licence.territory} · {licence.durationDays} days</small></div><b>{licence.approvalStatus === "auto_approved" ? "Auto-approved" : "Pending review"}</b><span>{formatZar(licence.priceCents)}</span><button type="button" className="outline-button" disabled={busyId !== null} onClick={() => void continueToPayment(licence)}>{busyId === licence.id ? "Opening..." : "Continue to payment"}</button></div>)}</div></section>;
 }
 
 function BuyerWorkspace({ assets, api, navigate, onNotice }: { assets: Asset[]; api: (path: string, init?: RequestInit) => Promise<Response>; navigate: (view: View) => void; onNotice: (notice: string) => void }) {
@@ -1189,12 +1295,14 @@ function BuyerWorkspace({ assets, api, navigate, onNotice }: { assets: Asset[]; 
 
   return <>
     <BuyerFinancePanel api={api} onNotice={onNotice} />
+    <BuyerAutoApprovalPanel api={api} onNotice={onNotice} />
     <BuyerActionsPanelNext navigate={navigate} onNotice={onNotice} />
     <BuyerLicenceValidationPanel assets={assets} api={api} navigate={navigate} onNotice={onNotice} onRefresh={load} />
+    <BuyerPendingLicencePanel licences={licences} api={api} onNotice={onNotice} />
     <section className="buyer-collections" aria-label="Licences, lightboxes, and saved searches">
       <div className="card-heading"><div><span className="section-kicker">LICENCE HISTORY</span><h2>What you have <em>licensed.</em></h2></div></div>
       {state === "unavailable" && <div className="empty-state">Licence history is unavailable right now.</div>}
-      {state !== "unavailable" && (licences.length ? <div className="campaign-list">{licences.map((licence) => <div className="campaign-row" key={licence.id}><div><strong>{licence.assetTitle}</strong><small>{licence.licenceType} · {licence.territory}</small></div><b>{licence.status}</b><span>{formatZar(licence.priceCents)}</span></div>)}</div> : <div className="empty-state">No licences yet. Search the archive to license your first asset.</div>)}
+      {state !== "unavailable" && (licences.length ? <div className="campaign-list">{licences.map((licence) => <div className="campaign-row" key={licence.id}><div><strong>{licence.assetTitle}</strong><small>{licence.licenceType} · {licence.territory}</small></div><b>{licence.approvalStatus === "auto_approved" ? "auto-approved / unpaid" : licence.status}</b><span>{formatZar(licence.priceCents)}</span></div>)}</div> : <div className="empty-state">No licences yet. Search the archive to license your first asset.</div>)}
 
       <div className="card-heading"><div><span className="section-kicker">LIGHTBOXES</span><h2>Shortlist assets for a <em>brief.</em></h2></div></div>
       <form className="inline-form" onSubmit={createLightbox}><input value={newLightboxTitle} onChange={(event) => setNewLightboxTitle(event.target.value)} placeholder="New lightbox title" aria-label="New lightbox title" /><button type="submit" className="outline-button">Create</button></form>

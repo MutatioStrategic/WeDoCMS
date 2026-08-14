@@ -661,6 +661,76 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/buyer/licence-auto-approval:
+    get:
+      operationId: getBuyerLicenceAutoApproval
+      summary: Get the signed-in buyer's licence auto-approval preference
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Buyer-controlled auto-approval setting and scope
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [enabled, termsVersion, scope, policy]
+                properties:
+                  enabled: { type: boolean }
+                  termsVersion: { type: string }
+                  signedAt: { type: string, nullable: true }
+                  signedBy: { type: string, nullable: true }
+                  revokedAt: { type: string, nullable: true }
+                  updatedAt: { type: string, nullable: true }
+                  scope: { type: string, enum: [validated_paid_licence_requests] }
+                  policy: { type: object, additionalProperties: true }
+        '403': { description: Buyer access required, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+    put:
+      operationId: updateBuyerLicenceAutoApproval
+      summary: Enable or revoke buyer-signed licence auto-approval
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled, acknowledged, termsVersion]
+              properties:
+                enabled: { type: boolean }
+                acknowledged: { type: boolean, description: Must be true when enabling auto-approval }
+                termsVersion: { type: string, example: licence-auto-approval-v1 }
+      responses:
+        '200':
+          description: Updated buyer auto-approval preference with audit event reference
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '403': { description: Buyer access required, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '422': { description: Current sign-off terms were not acknowledged, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '503': { description: Signed audit record unavailable; setting remains unchanged, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/admin/licence-approvals:
+    get:
+      operationId: getAdminLicenceApprovals
+      summary: Show buyer auto-approval preferences and auto-approved licence requests for the organisation
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Tenant-scoped buyer licence approval report
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [organization, summary, preferences, autoApprovedRequests, operationalAuditEvents]
+                properties:
+                  organization: { type: object, additionalProperties: true }
+                  summary: { type: object, additionalProperties: true }
+                  preferences: { type: array, items: { type: object, additionalProperties: true } }
+                  autoApprovedRequests: { type: array, items: { type: object, additionalProperties: true } }
+                  operationalAuditEvents: { type: array, items: { type: object, additionalProperties: true } }
+        '403': { description: Admin access required, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
   /api/checkout/validate:
     post:
       operationId: validateCheckout
@@ -1548,12 +1618,15 @@ components:
       additionalProperties: false
     CheckoutValidationResponse:
       type: object
-      required: [assetId, priceCents, currency, monetizationModel, allowed, checks, blockingReasons]
+      required: [assetId, licenceType, licence, priceCents, currency, monetizationModel, purchase, allowed, checks, blockingReasons]
       properties:
         assetId: { type: string }
+        licenceType: { type: string, enum: [editorial, commercial, advertising, social, broadcast, exclusive] }
+        licence: { type: object, required: [label, summary, usage, releaseNote], additionalProperties: false, properties: { label: { type: string }, summary: { type: string }, usage: { type: string }, releaseNote: { type: string } } }
         priceCents: { type: integer, minimum: 0, nullable: true }
         currency: { type: string, enum: [ZAR] }
         monetizationModel: { type: string, enum: [membership, individual_license, custom_quote] }
+        purchase: { type: object, required: [paymentRequired, paymentStatus, originalAccess], additionalProperties: false, properties: { paymentRequired: { type: boolean }, paymentStatus: { type: string }, originalAccess: { type: string } } }
         allowed: { type: boolean }
         checks:
           type: array

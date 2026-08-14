@@ -60,6 +60,7 @@ import {
 import { allowedOrigin, applySecurityHeaders, enforceRateLimit, scanMediaObject, type SecurityBindings } from "./security";
 import { createPresignedR2Url } from "./r2-presign";
 import { decidePayoutBatch } from "./payout-decision";
+import { AUTO_APPROVAL_SCOPE, AUTO_APPROVAL_TERMS_VERSION, autoApprovalIsActive, licenceApprovalStatus } from "./licence-approval";
 import {
   assetCreateRequestSchema as contractAssetCreateRequestSchema,
   assetCreateResponseSchema,
@@ -1130,7 +1131,7 @@ app.patch("/api/assets/:id", async (c) => {
 app.get("/api/my/assets", async (c) => {
   const user = await requestUser(c);
   if (!user) return c.json({ error: "Authentication required" }, 401);
-  const result = await c.env.DB.prepare("SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.organization_id = ? AND a.owner_id = ? ORDER BY a.updated_at DESC LIMIT 100").bind(user.organizationId, user.id).all<Record<string, unknown>>();
+  const result = await c.env.DB.prepare("SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.organization_id = ? AND a.owner_id = ? ORDER BY a.updated_at DESC").bind(user.organizationId, user.id).all<Record<string, unknown>>();
   return c.json({ results: (result.results as Record<string, unknown>[]).map((row) => assetRowToDomain(row, c.env)) });
 });
 
@@ -1244,7 +1245,173 @@ app.post("/api/checkout/validate", async (c) => {
   const request = licenceRequestSchema.parse(await c.req.json());
   const asset = await governanceAsset(c, request.assetId);
   if (!asset) return c.json({ error: "Asset not found" }, 404);
-  return c.json({ assetId: request.assetId, priceCents: licencePriceCents(request, asset), currency: "ZAR", monetizationModel: asset.monetizationModel ?? "membership", ...archiveDomain.evaluateLicenceRequest(asset, request) });
+  const priceCents = licencePriceCents(request, asset);
+  return c.json({
+    assetId: request.assetId,
+    licenceType: request.licenceType,
+    licence: archiveDomain.licenceDescription(request.licenceType),
+    priceCents,
+    currency: "ZAR",
+    monetizationModel: asset.monetizationModel ?? "membership",
+    purchase: { paymentRequired: true, paymentStatus: "not_charged_until_verified_checkout", originalAccess: "released_after_paid_webhook" },
+    ...archiveDomain.evaluateLicenceRequest(asset, request),
+  });
+});
+
+const buyerAutoApprovalPreferenceSchema = z.object({
+  enabled: z.boolean(),
+  acknowledged: z.boolean(),
+  termsVersion: z.string().trim().min(1).max(80),
+});
+
+type BuyerAutoApprovalPreferenceRow = {
+  id: string;
+  organization_id: string;
+  buyer_id: string;
+  enabled: number;
+  terms_version: string;
+  signed_at: string | null;
+  signed_by: string | null;
+  revoked_at: string | null;
+  updated_at: string;
+};
+
+function buyerAutoApprovalPreferenceResponse(row: BuyerAutoApprovalPreferenceRow | null) {
+  return {
+    enabled: Boolean(row?.enabled && row.terms_version === AUTO_APPROVAL_TERMS_VERSION && row.signed_at && row.signed_by),
+    termsVersion: row?.terms_version ?? AUTO_APPROVAL_TERMS_VERSION,
+    signedAt: row?.signed_at ?? null,
+    signedBy: row?.signed_by ?? null,
+    revokedAt: row?.revoked_at ?? null,
+    updatedAt: row?.updated_at ?? null,
+    scope: AUTO_APPROVAL_SCOPE,
+    policy: {
+      acceptsAfterValidation: true,
+      paymentStillRequired: true,
+      appliesTo: "This buyer's new licence requests in this organisation",
+    },
+  };
+}
+
+app.get("/api/buyer/licence-auto-approval", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, 403);
+  const row = await c.env.DB.prepare(`SELECT id, organization_id, buyer_id, enabled, terms_version, signed_at, signed_by, revoked_at, updated_at
+    FROM buyer_licence_approval_preferences WHERE organization_id = ? AND buyer_id = ?`)
+    .bind(user.organizationId, user.id).first<BuyerAutoApprovalPreferenceRow>();
+  return c.json(buyerAutoApprovalPreferenceResponse(row ?? null));
+});
+
+app.put("/api/buyer/licence-auto-approval", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, 403);
+  const payload = buyerAutoApprovalPreferenceSchema.parse(await c.req.json());
+  if (payload.enabled && (!payload.acknowledged || payload.termsVersion !== AUTO_APPROVAL_TERMS_VERSION)) {
+    return c.json({ error: "Current auto-approval terms must be acknowledged before enabling this setting" }, 422);
+  }
+
+  const previous = await c.env.DB.prepare(`SELECT id, organization_id, buyer_id, enabled, terms_version, signed_at, signed_by, revoked_at, updated_at
+    FROM buyer_licence_approval_preferences WHERE organization_id = ? AND buyer_id = ?`)
+    .bind(user.organizationId, user.id).first<BuyerAutoApprovalPreferenceRow>();
+  const preferenceId = previous?.id ?? crypto.randomUUID();
+  const now = new Date().toISOString();
+  const signedAt = payload.enabled ? now : previous?.signed_at ?? null;
+  const signedBy = payload.enabled ? user.id : previous?.signed_by ?? null;
+  const revokedAt = payload.enabled ? null : now;
+
+  await c.env.DB.prepare(`INSERT INTO buyer_licence_approval_preferences
+      (id, organization_id, buyer_id, enabled, terms_version, signed_at, signed_by, revoked_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(organization_id, buyer_id) DO UPDATE SET
+      enabled = excluded.enabled,
+      terms_version = excluded.terms_version,
+      signed_at = excluded.signed_at,
+      signed_by = excluded.signed_by,
+      revoked_at = excluded.revoked_at,
+      updated_at = excluded.updated_at`)
+    .bind(preferenceId, user.organizationId, user.id, payload.enabled ? 1 : 0, AUTO_APPROVAL_TERMS_VERSION, signedAt, signedBy, revokedAt, now).run();
+
+  let auditEventId: string;
+  let auditSource: "signed_audit" | "operational_audit" = "signed_audit";
+  try {
+    const audit = await appendAuditEvent(c.env, {
+      streamId: `org:${user.organizationId}:buyer-settings`,
+      actorId: user.id,
+      actorType: "user",
+      action: payload.enabled ? "buyer.licence_auto_approval.enabled" : "buyer.licence_auto_approval.disabled",
+      resourceType: "buyer_licence_approval_preference",
+      resourceId: preferenceId,
+      data: { enabled: payload.enabled, termsVersion: AUTO_APPROVAL_TERMS_VERSION, scope: AUTO_APPROVAL_SCOPE, signedAt, signedBy },
+      residencyRegion: user.residencyRegion,
+      actorResidencyRegion: user.residencyRegion,
+      organizationId: user.organizationId,
+    });
+    auditEventId = audit.event.eventId;
+  } catch (error) {
+    try {
+      auditEventId = crypto.randomUUID();
+      await c.env.DB.prepare("INSERT INTO ops_actions (id, organization_id, actor_id, action, resource_type, resource_id, status, details_json) VALUES (?, ?, ?, ?, ?, ?, 'completed', ?)")
+        .bind(auditEventId, user.organizationId, user.id, payload.enabled ? "buyer.licence_auto_approval.enabled" : "buyer.licence_auto_approval.disabled", "buyer_licence_approval_preference", preferenceId, JSON.stringify({ enabled: payload.enabled, termsVersion: AUTO_APPROVAL_TERMS_VERSION, scope: AUTO_APPROVAL_SCOPE, signedAt, signedBy, auditFallback: true })).run();
+      auditSource = "operational_audit";
+      logEvent("warn", "buyer.licence_auto_approval_signed_audit_unavailable", c.get("trace"), { preferenceId, error: error instanceof Error ? error.message : "unknown" });
+    } catch (fallbackError) {
+      if (previous) {
+        await c.env.DB.prepare(`UPDATE buyer_licence_approval_preferences SET enabled = ?, terms_version = ?, signed_at = ?, signed_by = ?, revoked_at = ?, updated_at = ? WHERE id = ? AND organization_id = ? AND buyer_id = ?`)
+          .bind(previous.enabled, previous.terms_version, previous.signed_at, previous.signed_by, previous.revoked_at, previous.updated_at, previous.id, user.organizationId, user.id).run();
+      } else {
+        await c.env.DB.prepare("DELETE FROM buyer_licence_approval_preferences WHERE id = ? AND organization_id = ? AND buyer_id = ?")
+          .bind(preferenceId, user.organizationId, user.id).run();
+      }
+      logEvent("error", "buyer.licence_auto_approval_audit_failed", c.get("trace"), { preferenceId, error: fallbackError instanceof Error ? fallbackError.message : "unknown" });
+      return c.json({ error: "The sign-off could not be recorded. Auto-approval remains unchanged." }, 503);
+    }
+  }
+
+  const row = await c.env.DB.prepare(`SELECT id, organization_id, buyer_id, enabled, terms_version, signed_at, signed_by, revoked_at, updated_at
+    FROM buyer_licence_approval_preferences WHERE id = ? AND organization_id = ? AND buyer_id = ?`)
+    .bind(preferenceId, user.organizationId, user.id).first<BuyerAutoApprovalPreferenceRow>();
+  return c.json({ ...buyerAutoApprovalPreferenceResponse(row ?? null), auditEventId, auditSource });
+});
+
+app.get("/api/admin/licence-approvals", async (c) => {
+  const admin = await requestUser(c);
+  if (!admin || !allowedRole(admin, ["admin"])) return c.json({ error: "Admin access required" }, 403);
+  const preferences = await c.env.DB.prepare(`SELECT p.id, p.buyer_id, p.enabled, p.terms_version, p.signed_at, p.signed_by, p.revoked_at, p.updated_at,
+      buyer.display_name AS buyer_name, buyer.email AS buyer_email, signer.display_name AS signer_name
+    FROM buyer_licence_approval_preferences p
+      JOIN users buyer ON buyer.id = p.buyer_id
+      LEFT JOIN users signer ON signer.id = p.signed_by
+    WHERE p.organization_id = ? ORDER BY p.updated_at DESC`).bind(admin.organizationId).all<Record<string, unknown>>();
+  const requests = await c.env.DB.prepare(`SELECT l.id, l.asset_id, l.buyer_id, l.licence_type, l.territory, l.duration_days, l.price_cents, l.status,
+      l.approval_status, l.approval_method, l.approved_at, l.created_at, buyer.display_name AS buyer_name, buyer.email AS buyer_email,
+      a.title AS asset_title
+    FROM licences l JOIN users buyer ON buyer.id = l.buyer_id JOIN assets a ON a.id = l.asset_id
+    WHERE l.organization_id = ? AND l.approval_method = 'buyer_auto_approval'
+    ORDER BY l.created_at DESC LIMIT 250`).bind(admin.organizationId).all<Record<string, unknown>>();
+  const operationalAudits = await c.env.DB.prepare(`SELECT id, action, resource_id, status, details_json, created_at
+    FROM ops_actions WHERE organization_id = ? AND action LIKE 'buyer.licence_auto_approval.%' ORDER BY created_at DESC LIMIT 250`).bind(admin.organizationId).all<Record<string, unknown>>();
+  const enabledCount = (preferences.results as Record<string, unknown>[]).filter((row) => Number(row.enabled) === 1).length;
+  const requestRows = requests.results as Record<string, unknown>[];
+  return c.json({
+    organization: { id: admin.organizationId, name: admin.organizationName },
+    summary: {
+      buyerPreferences: preferences.results.length,
+      enabledBuyers: enabledCount,
+      autoApprovedRequests: requestRows.length,
+      unpaidAutoApprovedRequests: requestRows.filter((row) => row.status !== "paid").length,
+      paidAutoApprovedRequests: requestRows.filter((row) => row.status === "paid").length,
+    },
+    preferences: preferences.results.map((row) => ({
+      id: String(row.id), buyerId: String(row.buyer_id), buyerName: String(row.buyer_name), buyerEmail: String(row.buyer_email), enabled: Number(row.enabled) === 1,
+      termsVersion: String(row.terms_version), signedAt: row.signed_at ? String(row.signed_at) : null, signedBy: row.signed_by ? String(row.signed_by) : null, signerName: row.signer_name ? String(row.signer_name) : null,
+      revokedAt: row.revoked_at ? String(row.revoked_at) : null, updatedAt: String(row.updated_at), auditFallbackEvents: operationalAudits.results.filter((audit) => String(audit.resource_id) === String(row.id)).length,
+    })),
+    autoApprovedRequests: requestRows.map((row) => ({
+      id: String(row.id), assetId: String(row.asset_id), assetTitle: String(row.asset_title), buyerId: String(row.buyer_id), buyerName: String(row.buyer_name), buyerEmail: String(row.buyer_email),
+      licenceType: String(row.licence_type), territory: String(row.territory), durationDays: Number(row.duration_days), priceCents: Number(row.price_cents), status: String(row.status), approvalStatus: String(row.approval_status), approvalMethod: String(row.approval_method), approvedAt: row.approved_at ? String(row.approved_at) : null, createdAt: String(row.created_at),
+    })),
+    operationalAuditEvents: operationalAudits.results.map((row) => ({ id: String(row.id), action: String(row.action), resourceId: String(row.resource_id), status: String(row.status), createdAt: String(row.created_at) })),
+  });
 });
 
 app.post("/api/checkout", async (c) => {
@@ -1261,9 +1428,57 @@ app.post("/api/checkout", async (c) => {
   const licenceId = crypto.randomUUID();
   const priceCents = licencePriceCents(request, asset);
   if (!priceCents) return c.json({ blocked: true, error: "A licence price is not configured for this asset." }, 422);
-  await c.env.DB.prepare("INSERT INTO licences (id, organization_id, asset_id, buyer_id, licence_type, territory, duration_days, price_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-    .bind(licenceId, user.organizationId, request.assetId, user.id, request.licenceType, request.territory, request.durationDays, priceCents).run();
-  return c.json({ blocked: false, licenceId, priceCents, currency: "ZAR", paymentRequired: true, ...validation }, 201);
+  const existing = await c.env.DB.prepare(`SELECT id, price_cents FROM licences
+    WHERE organization_id = ? AND asset_id = ? AND buyer_id = ? AND licence_type = ? AND territory = ? AND duration_days = ? AND status = 'pending'
+    ORDER BY created_at DESC LIMIT 1`).bind(user.organizationId, request.assetId, user.id, request.licenceType, request.territory, request.durationDays).first<{ id: string; price_cents: number }>();
+  if (existing) return c.json({ blocked: false, licenceId: existing.id, licenceType: request.licenceType, licence: archiveDomain.licenceDescription(request.licenceType), priceCents: Number(existing.price_cents), currency: "ZAR", paymentRequired: true, purchaseStatus: "not_charged_until_verified_checkout", existing: true, ...validation }, 200);
+  const preference = await c.env.DB.prepare(`SELECT id, enabled, terms_version, signed_at, signed_by
+    FROM buyer_licence_approval_preferences WHERE organization_id = ? AND buyer_id = ?`)
+    .bind(user.organizationId, user.id).first<{ id: string; enabled: number; terms_version: string; signed_at: string | null; signed_by: string | null }>();
+  const preferenceForDecision = preference ? {
+    enabled: Boolean(preference.enabled),
+    termsVersion: preference.terms_version,
+    signedAt: preference.signed_at,
+    signedBy: preference.signed_by,
+  } : null;
+  const autoApproved = autoApprovalIsActive(preferenceForDecision);
+  const approvalStatus = licenceApprovalStatus(autoApproved);
+  let approvalAuditEventId: string | null = null;
+  let approvalAuditSource: "signed_audit" | "operational_audit" | null = null;
+  if (autoApproved) {
+    try {
+      const audit = await appendAuditEvent(c.env, {
+        streamId: `org:${user.organizationId}:licence-approvals`,
+        actorId: user.id,
+        actorType: "user",
+        action: "buyer.licence_auto_approval.applied",
+        resourceType: "licence",
+        resourceId: licenceId,
+        data: { approvalStatus, preferenceId: preference?.id, paymentRequired: true, termsVersion: AUTO_APPROVAL_TERMS_VERSION },
+        residencyRegion: user.residencyRegion,
+        actorResidencyRegion: user.residencyRegion,
+        organizationId: user.organizationId,
+      });
+      approvalAuditEventId = audit.event.eventId;
+      approvalAuditSource = "signed_audit";
+    } catch (error) {
+      approvalAuditEventId = crypto.randomUUID();
+      try {
+        await c.env.DB.prepare("INSERT INTO ops_actions (id, organization_id, actor_id, action, resource_type, resource_id, status, details_json) VALUES (?, ?, ?, 'buyer.licence_auto_approval.applied', 'licence', ?, 'completed', ?)")
+          .bind(approvalAuditEventId, user.organizationId, user.id, licenceId, JSON.stringify({ approvalStatus, preferenceId: preference?.id, paymentRequired: true, termsVersion: AUTO_APPROVAL_TERMS_VERSION, auditFallback: true })).run();
+        approvalAuditSource = "operational_audit";
+        logEvent("warn", "buyer.licence_auto_approval_signed_audit_unavailable", c.get("trace"), { licenceId, preferenceId: preference?.id, error: error instanceof Error ? error.message : "unknown" });
+      } catch (fallbackError) {
+        logEvent("error", "buyer.licence_auto_approval_apply_failed", c.get("trace"), { licenceId, preferenceId: preference?.id, error: fallbackError instanceof Error ? fallbackError.message : "unknown" });
+        return c.json({ error: "Auto-approval could not be recorded. No licence request was created." }, 503);
+      }
+    }
+  }
+  await c.env.DB.prepare(`INSERT INTO licences
+      (id, organization_id, asset_id, buyer_id, licence_type, territory, duration_days, price_cents, approval_status, approval_method, approved_at, approved_by, auto_approval_preference_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .bind(licenceId, user.organizationId, request.assetId, user.id, request.licenceType, request.territory, request.durationDays, priceCents, approvalStatus, autoApproved ? "buyer_auto_approval" : null, autoApproved ? new Date().toISOString() : null, autoApproved ? user.id : null, autoApproved ? preference?.id ?? null : null).run();
+  return c.json({ blocked: false, licenceId, licenceType: request.licenceType, licence: archiveDomain.licenceDescription(request.licenceType), priceCents, currency: "ZAR", paymentRequired: true, purchaseStatus: "not_charged_until_verified_checkout", approvalStatus, approvalAuditEventId, approvalAuditSource, ...validation }, 201);
 });
 
 const paymentSessionSchema = z.object({
@@ -1358,14 +1573,14 @@ app.post("/api/payments/:licenceId/settled", async (c) => {
 app.get("/api/my/licences", async (c) => {
   const user = await requestUser(c);
   if (!user) return c.json({ error: "Authentication required" }, 401);
-  const rows = await c.env.DB.prepare(`SELECT l.id, l.licence_type, l.territory, l.duration_days, l.price_cents, l.status, l.created_at,
+  const rows = await c.env.DB.prepare(`SELECT l.id, l.licence_type, l.territory, l.duration_days, l.price_cents, l.status, l.approval_status, l.approval_method, l.approved_at, l.created_at,
       a.id AS asset_id, a.title AS asset_title, a.preview_key
     FROM licences l JOIN assets a ON a.id = l.asset_id
-    WHERE l.organization_id = ? AND l.buyer_id = ? ORDER BY l.created_at DESC LIMIT 100`).bind(user.organizationId, user.id).all<Record<string, unknown>>();
+    WHERE l.organization_id = ? AND l.buyer_id = ? ORDER BY l.created_at DESC`).bind(user.organizationId, user.id).all<Record<string, unknown>>();
   return c.json({ results: rows.results.map((row) => ({
     id: String(row.id), assetId: String(row.asset_id), assetTitle: String(row.asset_title),
-    licenceType: row.licence_type, territory: String(row.territory), durationDays: Number(row.duration_days),
-    priceCents: Number(row.price_cents), status: row.status, createdAt: String(row.created_at),
+    licenceType: row.licence_type, licence: archiveDomain.licenceDescription(String(row.licence_type) as LicenceRequest["licenceType"]), territory: String(row.territory), durationDays: Number(row.duration_days),
+    priceCents: Number(row.price_cents), status: row.status, approvalStatus: row.approval_status ?? "pending", approvalMethod: row.approval_method ?? null, approvedAt: row.approved_at ?? null, createdAt: String(row.created_at),
     previewUrl: row.preview_key ? `/api/assets/${encodeURIComponent(String(row.asset_id))}/preview` : null,
     originalUrl: row.status === "paid" ? `/api/assets/${encodeURIComponent(String(row.asset_id))}/original` : null,
   })) });

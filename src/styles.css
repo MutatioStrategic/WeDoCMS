@@ -560,10 +560,14 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .seller-performance-list > div { display: grid; gap: 4px; border-top: 1px solid #e3dfd6; padding-top: 9px; }
 .seller-performance-list strong { color: #273128; font-size: 12px; }
 .seller-performance-list span { color: #697269; font-size: 11px; }
+.buyer-pending-licences { max-width: 1190px; margin: 0 auto; padding: 10px 30px 25px; }
+.pending-licence-row { grid-template-columns: minmax(0, 1.5fr) auto auto auto; align-items: center; }
+.pending-licence-row .outline-button { min-height: 36px; }
 @media (max-width: 820px) { .revenue-detail-panel { padding: 15px 20px 80px; }.payout-policy-banner { grid-template-columns: 1fr 1fr; }.payout-policy-banner p { grid-column: 1 / -1; } }
 @media (max-width: 560px) { .payout-policy-banner { grid-template-columns: 1fr; }.payout-policy-banner p { grid-column: auto; } }
 @media (max-width: 820px) { .revenue-summary { grid-template-columns: 1fr 1fr; }.revenue-columns { grid-template-columns: 1fr; }.revenue-heading { display: block; } }
 @media (max-width: 560px) { .statement-export-actions { display: grid; margin-top: 18px; }.statement-export-actions button { width: 100%; } }
+@media (max-width: 820px) { .buyer-pending-licences { padding: 10px 20px 25px; }.pending-licence-row { grid-template-columns: 1fr 1fr; }.pending-licence-row .outline-button { grid-column: 1 / -1; width: 100%; } }
 @media (max-width: 560px) { .revenue-panel { padding: 25px 20px 12px; }.revenue-summary { grid-template-columns: 1fr; }.revenue-card strong { font-size: 21px; } }
 .analytics-page .workspace-intro { max-width: 640px; margin-bottom: 42px; }
 .analytics-page .workspace-intro h1 { margin: 14px 0 16px; font-size: clamp(46px, 6vw, 76px); line-height: .94; letter-spacing: -.07em; font-weight: 600; }
@@ -703,6 +707,29 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .buyer-finance-status .text-button { justify-self: start; padding: 0; }
 .buyer-finance-balance { display: flex; align-items: baseline; gap: 9px; margin-top: 15px; padding-top: 13px; border-top: 1px solid #e7e3da; }
 .buyer-finance-balance strong { color: #3f5f35; font-size: 24px; }
+.buyer-auto-approval { margin: 0 0 30px; padding: 24px; border: 1px solid #d7ddd1; background: #fffdf9; }
+.buyer-auto-approval .card-heading { margin-bottom: 10px; }
+.buyer-auto-approval-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: end; }
+.buyer-auto-approval-signoff { display: flex; gap: 10px; align-items: flex-start; max-width: 720px; padding: 13px; border: 1px solid #d9d6cd; background: #f7f9f4; color: #3e493f; font-size: 11px; line-height: 1.45; }
+.buyer-auto-approval-signoff input { width: 17px; height: 17px; margin: 1px 0 0; accent-color: #5f8157; }
+.buyer-auto-approval-signoff span { display: grid; gap: 5px; }
+.buyer-auto-approval-signoff small { color: #697269; font-size: 10px; }
+.buyer-auto-approval-enabled { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 14px; border-left: 3px solid #6b925c; background: #edf4e9; }
+.buyer-auto-approval-enabled div { display: grid; gap: 5px; }
+.buyer-auto-approval-enabled strong { color: #3f5f35; font: 12px 'DM Mono', monospace; text-transform: uppercase; }
+.buyer-auto-approval-enabled span { color: #536153; font-size: 11px; }
+.admin-licence-approvals { margin: 0 0 30px; padding: 24px; border: 1px solid #d7ddd1; background: #f7f9f4; }
+.admin-licence-approvals-copy { max-width: 760px; margin: 0 0 18px; color: #536153; font-size: 11px; line-height: 1.55; }
+.admin-licence-approval-metrics { margin: 0 0 12px; }
+.admin-licence-approval-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.admin-licence-preference-list, .admin-licence-request-list { display: grid; gap: 0; }
+.admin-licence-preference-row, .admin-licence-request-row { display: grid; grid-template-columns: minmax(0, 1.3fr) auto minmax(100px, .7fr) minmax(100px, .7fr); gap: 12px; align-items: center; padding: 12px 0; border-bottom: 1px solid #e7e3da; }
+.admin-licence-preference-row > div, .admin-licence-request-row > div { min-width: 0; }
+.admin-licence-preference-row strong, .admin-licence-request-row strong, .admin-licence-preference-row small, .admin-licence-request-row small { display: block; }
+.admin-licence-preference-row strong, .admin-licence-request-row strong { overflow: hidden; color: #263128; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.admin-licence-preference-row small, .admin-licence-request-row small { margin-top: 4px; color: #697269; font: 9px 'DM Mono', monospace; line-height: 1.4; }
+.admin-licence-preference-row > small:last-child { text-align: right; }
+.admin-licence-request-row b { color: #3f5f35; font: 10px 'DM Mono', monospace; white-space: nowrap; }
 .buyer-purchase-history { margin-top: 10px; }
 .purchase-history-list { display: grid; gap: 0; margin-top: 12px; border-top: 1px solid #e7e3da; }
 .purchase-history-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 14px; align-items: center; padding: 12px 0; border-bottom: 1px solid #e7e3da; }
@@ -735,6 +762,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .validation-result-heading > strong { color: #527345; font: 14px 'DM Mono', monospace; white-space: nowrap; }
 .validation-result.blocked .validation-result-heading > strong { color: #9c573f; }
 .validation-result > p { margin: 10px 0 15px; color: #536153; font-size: 11px; line-height: 1.5; }
+.purchase-description { display: grid; gap: 5px; margin: 0 0 14px; padding: 11px 13px; border-left: 3px solid #6b925c; background: #edf4e9; color: #536153; font-size: 10px; line-height: 1.45; }
+.purchase-description strong { color: #3f5f35; font: 10px 'DM Mono', monospace; text-transform: uppercase; }
+.purchase-description small { color: #697269; font-size: 9px; }
 .validation-checks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin-bottom: 16px; }
 .validation-checks > div { display: flex; align-items: start; gap: 8px; }
 .validation-checks > div > span:last-child { min-width: 0; }
@@ -747,7 +777,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .validation-error { margin-top: 16px; padding: 12px 14px; border-left: 3px solid #bd5e3f; color: #7e4434; background: #f8e9e1; font-size: 11px; line-height: 1.45; }
 
 @media (max-width: 900px) { .action-grid, .step-track { grid-template-columns: 1fr; } .dashboard-heading { display: block; } .dashboard-date { margin-top: 16px; text-align: left; } }
-@media (max-width: 900px) { .buyer-finance-columns { grid-template-columns: 1fr; } .buyer-finance-form { grid-template-columns: repeat(2, minmax(0, 1fr)); } .buyer-finance-form button { grid-column: 1 / -1; justify-self: start; } }
+@media (max-width: 900px) { .buyer-finance-columns { grid-template-columns: 1fr; } .buyer-finance-form { grid-template-columns: repeat(2, minmax(0, 1fr)); } .buyer-finance-form button { grid-column: 1 / -1; justify-self: start; } .buyer-auto-approval-form { grid-template-columns: 1fr; }.buyer-auto-approval-form button { justify-self: start; } }
+@media (max-width: 560px) { .buyer-auto-approval { padding: 20px; }.buyer-auto-approval-form button, .buyer-auto-approval-enabled .outline-button { width: 100%; }.buyer-auto-approval-enabled { display: grid; }.buyer-auto-approval-enabled .outline-button { justify-self: stretch; } }
+@media (max-width: 900px) { .admin-licence-approval-columns { grid-template-columns: 1fr; } }
+@media (max-width: 620px) { .admin-licence-approvals { padding: 20px; }.admin-licence-preference-row, .admin-licence-request-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }.admin-licence-preference-row > div:nth-of-type(2), .admin-licence-preference-row > small:last-child { grid-column: 1 / -1; text-align: left; }.admin-licence-request-row b { justify-self: end; } }
 @media (max-width: 560px) { .buyer-finance { padding: 20px; }.buyer-finance-form { grid-template-columns: 1fr; }.buyer-finance-form button { width: 100%; }.buyer-finance-total { min-height: 0; }.purchase-history-row { grid-template-columns: 1fr auto; gap: 8px; }.purchase-history-row > span { grid-column: 2; grid-row: 1; }.purchase-status { grid-column: 1; grid-row: 2; justify-self: start; } }
 .demand-pill { padding: 6px 8px; color: #5e7955; background: #e3eadf; font: 9px 'DM Mono', monospace; }
 .opportunity-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px; }

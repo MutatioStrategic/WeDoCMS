@@ -49,6 +49,24 @@ flowchart TD
    resolution desk. If all checks pass, creating a licence request records a
    pending request but does not charge payment.
 
+5. The Buyer workspace shows pending requests with a clear “Continue to
+   payment” action. Retrying the same request reuses the existing pending
+   request rather than creating a duplicate. If the payment provider is
+   unavailable, the request remains pending and the UI explains that no charge
+   was made.
+
+6. The buyer may enable Auto-approval for their own new requests by checking
+   the sign-off acknowledgement and saving it. Auto-approval applies only
+   after the same server-side rights and release checks pass; it does not
+   bypass pricing, payment, or original-file access. The setting is auditable
+   and can be revoked at any time.
+
+7. The buyer sees a purchase description for the selected licence type, the
+   territory and duration being priced, the amount or custom-quote path, and
+   the fact that a verified payment webhook is required before original access.
+   The CEO/admin ledger shows the buyer sign-off, terms version, revocation,
+   auto-approved requests, and paid versus unpaid status for the organisation.
+
 The unavailable-backend state explains that no licence or payment was created
 and offers a retry. A missing published-asset state sends the buyer back to
 approved archive search.

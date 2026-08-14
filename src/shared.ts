@@ -3,6 +3,12 @@ export type AssetStatus = "draft" | "processing" | "needs_review" | "published" 
 export type WorkflowStage = "ingestion" | "ai_tagging" | "curator_correction" | "approval";
 export type ReleaseStatus = "unknown" | "not_required" | "pending" | "verified";
 export type LicenceType = "editorial" | "commercial" | "advertising" | "social" | "broadcast" | "exclusive";
+export type LicenceDescription = {
+  label: string;
+  summary: string;
+  usage: string;
+  releaseNote: string;
+};
 export type MonetizationModel = "membership" | "individual_license" | "custom_quote";
 export type MetadataReviewStatus = "reviewed" | "needs_context" | "blocked";
 export type MetadataProvenance = "contributor" | "editor" | "ai_suggested";
@@ -508,6 +514,19 @@ const RELEASE_REQUIRED: Record<LicenceType, { model: boolean; property: boolean 
   exclusive: { model: true, property: true },
 };
 
+const LICENCE_DESCRIPTIONS: Record<LicenceType, LicenceDescription> = {
+  editorial: { label: "Editorial", summary: "Storytelling, news, documentary, and non-promotional publishing.", usage: "For editorial context rather than brand advertising or paid promotion.", releaseNote: "Model and property releases are not required by the standard editorial check." },
+  social: { label: "Social", summary: "Organic social posts and non-paid community or brand channels.", usage: "For unpaid social publishing; paid promotion may require Advertising instead.", releaseNote: "A model release is required; property release is not required by the standard check." },
+  commercial: { label: "Commercial", summary: "Brand, corporate, or promotional communications.", usage: "For commercial communications that are not classified as paid advertising.", releaseNote: "Model and property releases are required by the standard check." },
+  advertising: { label: "Advertising", summary: "Paid campaigns, boosted placements, and promotional media.", usage: "For media placed in paid advertising or promotional campaigns.", releaseNote: "Model and property releases are required by the standard check." },
+  broadcast: { label: "Broadcast", summary: "Television, streaming, cinema, or other broadcast distribution.", usage: "For scheduled or distributed audiovisual programming and broadcast channels.", releaseNote: "Model and property releases are required by the standard check." },
+  exclusive: { label: "Exclusive", summary: "Reserved use for the selected territory and duration.", usage: "For a separately confirmed exclusive arrangement; exclusivity terms must be honoured in the final licence.", releaseNote: "Model and property releases are required by the standard check." },
+};
+
+export function licenceDescription(licenceType: LicenceType): LicenceDescription {
+  return LICENCE_DESCRIPTIONS[licenceType];
+}
+
 function releasePasses(status: ReleaseStatus, required: boolean): boolean {
   return !required || status === "verified" || status === "not_required";
 }
@@ -582,6 +601,10 @@ export class ArchiveDomain {
 
   evaluateLicenceRequest(asset: Asset, request: LicenceRequest): LicenceValidation {
     return evaluateLicenceRequest(asset, request);
+  }
+
+  licenceDescription(licenceType: LicenceType): LicenceDescription {
+    return licenceDescription(licenceType);
   }
 }
 
