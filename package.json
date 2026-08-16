@@ -19,6 +19,7 @@
     "test:dr": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dr-restore-smoke.ps1",
     "test:local-smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-local-smoke.ps1",
     "seed:demo-media": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/seed-demo-media.ps1",
+    "seed:paystack-demo": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/seed-paystack-split-demo.ps1",
     "worker:dev": "wrangler dev",
     "worker:deploy": "npm run build && npm run release:check && node scripts/release-gate.mjs --production && wrangler deploy --env production",
     "worker:deploy:development": "wrangler deploy",
@@ -27,7 +28,9 @@
   },
   "dependencies": {
     "@auth0/auth0-react": "^2.24.0",
+    "@supabase/supabase-js": "^2.110.1",
     "hono": "^4.7.7",
+    "jose": "^6.2.9",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "zod": "^3.25.67"

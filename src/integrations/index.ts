@@ -2,6 +2,7 @@ export * from "./dam";
 export * from "./http";
 export * from "./payouts";
 export * from "./payments";
+export * from "./paystack-splits";
 
 import { PayFastPayoutAdapter, PayoutProviderRegistry, SouthAfricanBankPayoutAdapter, StripeConnectPayoutAdapter } from "./payouts";
 import { JsonPaymentAdapter, PaymentProviderRegistry, PaystackPaymentAdapter } from "./payments";

@@ -66,6 +66,10 @@ export const assetSchema = z.object({
   sourceUrl: z.string().nullable().optional(),
   sourceLicense: z.string().nullable().optional(),
   sourceAttribution: z.string().nullable().optional(),
+  artistLicenseKey: z.enum(["custom", "cc_by_4_0", "cc_by_sa_4_0", "mit", "other"]).optional(),
+  artistLicenseVersion: z.string().nullable().optional(),
+  artistLicenseUrl: z.string().url().nullable().optional(),
+  artistLicenseTerms: z.string().nullable().optional(),
   monetizationModel: z.enum(["membership", "individual_license", "custom_quote"]).optional(),
   licensePriceCents: z.number().int().nonnegative().nullable().optional(),
 }).passthrough();
@@ -95,6 +99,10 @@ export const assetCreateRequestSchema = z.object({
   propertyReleaseStatus: releaseStatusSchema.default("unknown"),
   monetizationModel: z.enum(["membership", "individual_license", "custom_quote"]).default("membership"),
   licensePriceCents: z.number().int().nonnegative().max(100_000_000).nullable().optional(),
+  artistLicenseKey: z.enum(["custom", "cc_by_4_0", "cc_by_sa_4_0", "mit", "other"]).default("custom"),
+  artistLicenseVersion: z.string().trim().max(80).optional(),
+  artistLicenseUrl: z.string().url().max(1000).optional().or(z.literal("")),
+  artistLicenseTerms: z.string().trim().max(20_000).optional(),
 });
 
 export const assetCreateResponseSchema = z.object({

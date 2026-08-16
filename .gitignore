@@ -10,3 +10,4 @@ worker-smoke-*.log
 .backups/
 *.sql.gz
 fixtures/demo-media/
+supabase/.temp/

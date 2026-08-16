@@ -64,6 +64,11 @@ export type Asset = {
   sourceUrl?: string | null;
   sourceLicense?: string | null;
   sourceAttribution?: string | null;
+  artistLicenseKey?: "custom" | "cc_by_4_0" | "cc_by_sa_4_0" | "mit" | "other";
+  artistLicenseVersion?: string | null;
+  artistLicenseUrl?: string | null;
+  artistLicenseTerms?: string | null;
+  artistLicenseSha256?: string | null;
   releases?: ContributorRelease[];
   monetizationModel?: MonetizationModel;
   licensePriceCents?: number | null;

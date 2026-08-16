@@ -21,6 +21,7 @@
 ## Licensing and analytics
 
 - Review `licence_products` terms and restrictions with counsel before activating a product. Each changed term version must create a new product version or immutable evidence snapshot.
+- Publish the reviewed `seller-marketplace-v1`, `buyer-marketplace-v1`, and `payment-split-v1` documents. Onboarding and checkout record the accepted version and SHA-256 snapshot in `marketplace_agreement_acceptances`.
 - Reconcile licence receipts, evidence hashes, downloads, and settlement events weekly. Contributor performance is event-led; anonymous discovery remains aggregated and does not retain IPs, user agents, cookies, or visitor identifiers.
 
 ## Paystack test checkout
@@ -28,3 +29,4 @@
 - Configure `PAYMENT_PROVIDER=paystack` and `PAYMENT_ENDPOINT=https://api.paystack.co/transaction/initialize`; store the test secret as both `PAYMENT_TOKEN` and `PAYMENT_WEBHOOK_SECRET` Worker secrets. The public key is not required for server-initialized hosted checkout.
 - In the Paystack test dashboard, set the webhook URL to `https://veld-archive-api-production.blewisorlando.workers.dev/api/webhooks/payments`. The Worker verifies `x-paystack-signature` with HMAC-SHA512 before accepting `charge.success` or `refund.processed` events.
 - Complete a test payment and a processed test refund, then reconcile the resulting licence, immutable receipt evidence, and balanced ledger entries before replacing the test key with a separately provisioned live key.
+- For each staged seller, verify the Paystack subaccount through provider evidence, test a Paystack percentage split (for example 60% artist / 40% WeDoCMS), and confirm the provider fee bearer, refund/chargeback behavior, tax treatment, reserves and marketplace/PASA obligations in writing.

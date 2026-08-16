@@ -25,7 +25,7 @@ import {
   type AuditBindings,
   type StoredAuditEvent,
 } from "./audit";
-import { IntegrationContainer } from "../integrations";
+import { calculateMarketplaceSplit, IntegrationContainer } from "../integrations";
 import { canonicalContract, ocrValidation, sanitizeOcrResult, sha256Hex } from "./seller-workflow";
 import {
   enqueuePhotoJob,
@@ -38,16 +38,18 @@ import {
 import {
   createSession,
   csrfValid,
+  enrichExternalIdentity,
   getRequestUser,
   applicationRoleFromClaims,
   responseWithSession,
   responseWithoutSession,
-  verifyExternalJwt,
+  verifyExternalJwtWithProvider,
   type RequestUser,
 } from "./auth";
 import { allowedOrigin, applySecurityHeaders, enforceRateLimit, scanMediaObject, type SecurityBindings } from "./security";
 import { discoveryTokens, isDemoAssetRow, normalizeSavedQuery, scoreRecommendation } from "./discovery";
 import { parseCampaignBrief, rankCampaignAssets, type BrandKit, type CampaignBrief, type CampaignStage } from "../campaign-intelligence";
+import { agreementText, buyerAgreement, getMarketplaceAgreement, paymentDisclosure, sellerAgreement } from "../legal/agreements";
 import {
   assetCreateRequestSchema as contractAssetCreateRequestSchema,
   assetCreateResponseSchema,
@@ -82,12 +84,21 @@ type SecretBindings = {
   AUDIT_ALLOWED_RESIDENCIES?: string;
   KYC_PROVIDER?: string;
   KYC_WEBHOOK_SECRET?: string;
+  DIDIT_API_KEY?: string;
+  DIDIT_WEBHOOK_SECRET?: string;
+  DIDIT_KYC_WORKFLOW_ID?: string;
+  DIDIT_KYB_WORKFLOW_ID?: string;
+  APP_PUBLIC_URL?: string;
+  CIPC_LOOKUP_URL?: string;
+  CIPC_LOOKUP_TOKEN?: string;
   STRIPE_SECRET_KEY?: string;
   PAYFAST_ENDPOINT?: string;
   PAYFAST_TOKEN?: string;
   ZA_BANK_ENDPOINT?: string;
   ZA_BANK_TOKEN?: string;
   PAYOUT_MIN_CENTS?: string;
+  DEFAULT_ARTIST_SHARE_PERCENTAGE?: string;
+  PAYSTACK_SPLIT_FEE_BEARER?: string;
   OCR_ENABLED?: string;
   OCR_MODEL?: string;
   PHOTO_VISION_MODEL?: string;
@@ -101,6 +112,14 @@ type SecretBindings = {
   AUTH_ISSUER?: string;
   AUTH_AUDIENCE?: string;
   AUTH_ROLES_CLAIM?: string;
+  AUTH_USERINFO_URL?: string;
+  AUTH_PROVIDER?: "auth0" | "supabase" | "both" | string;
+  SUPABASE_URL?: string;
+  SUPABASE_JWT_SECRET?: string;
+  SUPABASE_JWKS_URL?: string;
+  SUPABASE_ISSUER?: string;
+  SUPABASE_AUDIENCE?: string;
+  SUPABASE_ROLES_CLAIM?: string;
   AUTH_COOKIE_DOMAIN?: string;
   AUTH_ALLOW_ORG_PROVISIONING?: string;
   DEFAULT_ORGANIZATION_ID?: string;
@@ -119,6 +138,7 @@ type SecretBindings = {
   PAYMENT_TOKEN_STORE?: SecretStoreBinding;
   STREAM_ACCOUNT_ID?: string;
   STREAM_API_TOKEN?: string;
+  STREAM_API_TOKEN_STORE?: SecretStoreBinding;
   STREAM_ALLOWED_ORIGINS?: string;
   IMAGE_DELIVERY_URL?: string;
   AUTH_ACCOUNT_PORTAL_URL?: string;
@@ -230,8 +250,41 @@ app.use("/api/*", async (c, next) => {
   await next();
 });
 
+// Public, versioned copies are used by onboarding and checkout before a user
+// signs anything. The hash is generated again when an acceptance is recorded.
+app.get("/api/legal/agreements", (c) => {
+  const requested = c.req.query("type");
+  if (requested && !["seller", "buyer", "payment"].includes(requested)) return c.json({ error: "Unknown agreement type" }, 400);
+  const documents = requested
+    ? [getMarketplaceAgreement(requested as "seller" | "buyer" | "payment")]
+    : [sellerAgreement, buyerAgreement, paymentDisclosure];
+  return c.json({ documents });
+});
+
 const devLoginSchema = z.object({ role: z.enum(["buyer", "contributor", "admin"]) });
 const exchangeSchema = z.object({ organizationId: z.string().min(1).max(120).optional() });
+
+async function recordAuthSecurityEvent(
+  c: { env: Bindings; req: { raw: Request; header(name: string): string | undefined } },
+  eventType: string,
+  provider: "auth0" | "supabase" | "unknown",
+  fields: { subject?: string | null; organizationId?: string | null; metadata?: Record<string, unknown> } = {},
+): Promise<void> {
+  const trace = traceContext(c.req.raw);
+  const ip = c.req.header("CF-Connecting-IP") ?? "";
+  const ipHash = ip ? await sha256Hex(`auth:${ip}`) : null;
+  const metadata = JSON.stringify(fields.metadata ?? {});
+  try {
+    await c.env.DB.prepare(`INSERT INTO auth_security_events (id, provider, event_type, subject, organization_id, ip_hash, user_agent, metadata_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(crypto.randomUUID(), provider, eventType, fields.subject ?? null, fields.organizationId ?? null, ipHash, c.req.header("User-Agent")?.slice(0, 500) ?? null, metadata)
+      .run();
+  } catch (error) {
+    logEvent("error", "auth.security_event_persist_failed", trace, { eventType, provider, error: error instanceof Error ? error.message : "unknown" });
+  }
+  logEvent(eventType.includes("failed") ? "warn" : "info", `auth.${eventType}`, trace, { provider, subject: fields.subject ?? null, organizationId: fields.organizationId ?? null });
+  recordMetric(c.env, `auth_${eventType}`, trace, 1, [provider]);
+}
 
 async function sessionResponse(c: { env: Bindings; req: { raw: Request }; json: (data: unknown, status?: number) => Response }, userId: string, organizationId: string): Promise<Response> {
   const session = await createSession(c.env, userId, organizationId);
@@ -265,27 +318,46 @@ app.post("/api/auth/dev-login", async (c) => {
 app.post("/api/auth/exchange", async (c) => {
   const authorization = c.req.header("Authorization") ?? "";
   const token = authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
-  const claims = await verifyExternalJwt(c.env, token);
-  if (!claims) return c.json({ error: "Verified identity token required" }, 401);
+  const verifiedIdentity = await verifyExternalJwtWithProvider(c.env, token);
+  if (!verifiedIdentity) {
+    await recordAuthSecurityEvent(c, "exchange_failed", "unknown", { metadata: { reason: "invalid_or_unconfigured_token" } });
+    return c.json({ error: "Verified identity token required" }, 401);
+  }
+  const identity = await enrichExternalIdentity(c.env, token, verifiedIdentity);
+  if (!identity) {
+    await recordAuthSecurityEvent(c, "exchange_failed", verifiedIdentity.provider, { subject: verifiedIdentity.claims.sub, metadata: { reason: "userinfo_verification_failed" } });
+    return c.json({ error: "Auth0 user profile could not be verified" }, 401);
+  }
+  const { claims, provider } = identity;
   const requested = exchangeSchema.parse(await c.req.json().catch(() => ({})));
   if (requested.organizationId && claims.org_id && requested.organizationId !== claims.org_id) return c.json({ error: "Organization context does not match the identity token" }, 403);
-  if (c.env.AUTH_JWKS_URL && !claims.org_id) return c.json({ error: "An Auth0 Organization context is required" }, 422);
-  const organizationId = requested.organizationId ?? claims.org_id ?? c.env.DEFAULT_ORGANIZATION_ID;
+  if (!claims.org_id && requested.organizationId && requested.organizationId !== c.env.DEFAULT_ORGANIZATION_ID) return c.json({ error: "Organization context is not authorized by the identity token" }, 403);
+  const organizationId = claims.org_id ?? c.env.DEFAULT_ORGANIZATION_ID;
   if (!organizationId) return c.json({ error: "An organization context is required" }, 422);
   const applicationRole = applicationRoleFromClaims(claims, c.env);
-  let user = await c.env.DB.prepare("SELECT id, email FROM users WHERE auth_subject = ? AND status = 'active'").bind(claims.sub).first<{ id: string; email: string }>();
+  const subjectKey = provider === "supabase" ? `supabase:${claims.sub}` : claims.sub;
+  let user = await c.env.DB.prepare("SELECT id, email FROM users WHERE auth_subject = ? AND status = 'active'").bind(subjectKey).first<{ id: string; email: string }>();
   if (!user) {
     const organization = await c.env.DB.prepare("SELECT id, name FROM organizations WHERE id = ? AND status = 'active'").bind(organizationId).first<{ id: string; name: string }>();
     if (!organization && String(c.env.AUTH_ALLOW_ORG_PROVISIONING) !== "true") return c.json({ error: "Organization is not provisioned" }, 403);
     const userId = crypto.randomUUID();
-    await c.env.DB.prepare("INSERT INTO users (id, auth_subject, email, display_name, role, email_verified_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)")
-      .bind(userId, claims.sub, claims.email ?? `${claims.sub}@identity.invalid`, claims.name ?? claims.email ?? claims.sub, applicationRole).run();
+    try {
+      await c.env.DB.prepare("INSERT INTO users (id, auth_subject, email, display_name, role, email_verified_at) VALUES (?, ?, ?, ?, ?, CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END)")
+        .bind(userId, subjectKey, claims.email ?? `${subjectKey}@identity.invalid`, claims.name ?? claims.email ?? claims.sub, applicationRole, claims.email_verified === true).run();
+    } catch {
+      await recordAuthSecurityEvent(c, "exchange_failed", provider, { subject: claims.sub, organizationId, metadata: { reason: "identity_conflict" } });
+      return c.json({ error: "An account already exists under another identity provider" }, 409);
+    }
     if (!organization) await c.env.DB.prepare("INSERT INTO organizations (id, name, slug, created_by) VALUES (?, ?, ?, ?)").bind(organizationId, claims.org_name ?? "New organization", organizationId.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 60), userId).run();
     await c.env.DB.prepare("INSERT INTO organization_memberships (id, organization_id, user_id, role) VALUES (?, ?, ?, ?)").bind(crypto.randomUUID(), organizationId, userId, applicationRole).run();
-    user = { id: userId, email: claims.email ?? `${claims.sub}@identity.invalid` };
+    user = { id: userId, email: claims.email ?? `${subjectKey}@identity.invalid` };
   }
   const membership = await c.env.DB.prepare("SELECT organization_id FROM organization_memberships WHERE organization_id = ? AND user_id = ? AND status = 'active'").bind(organizationId, user.id).first<{ organization_id: string }>();
-  if (!membership) return c.json({ error: "User is not a member of the requested organization" }, 403);
+  if (!membership) {
+    await recordAuthSecurityEvent(c, "exchange_failed", provider, { subject: claims.sub, organizationId, metadata: { reason: "membership_denied" } });
+    return c.json({ error: "User is not a member of the requested organization" }, 403);
+  }
+  await recordAuthSecurityEvent(c, "exchange_succeeded", provider, { subject: claims.sub, organizationId });
   return sessionResponse(c, user.id, membership.organization_id);
 });
 
@@ -469,6 +541,11 @@ const assetRowToDomain = (row: Record<string, unknown>): Asset => ({
   sourceUrl: (row.source_url as string | null) ?? null,
   sourceLicense: (row.source_license as string | null) ?? null,
   sourceAttribution: (row.source_attribution as string | null) ?? null,
+  artistLicenseKey: (row.artist_license_key as Asset["artistLicenseKey"]) ?? "custom",
+  artistLicenseVersion: (row.artist_license_version as string | null) ?? null,
+  artistLicenseUrl: (row.artist_license_url as string | null) ?? null,
+  artistLicenseTerms: (row.artist_license_terms as string | null) ?? null,
+  artistLicenseSha256: (row.artist_license_sha256 as string | null) ?? null,
   monetizationModel: (row.monetization_model as MonetizationModel | undefined) ?? "membership",
   licensePriceCents: row.license_price_cents == null ? null : Number(row.license_price_cents),
   previewUrl: row.kind === "image" && row.original_key
@@ -687,12 +764,102 @@ app.put("/api/onboarding", async (c) => {
       VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(user_id) DO UPDATE SET contributor_type = excluded.contributor_type, location = excluded.location, equipment = excluded.equipment, portfolio_url = excluded.portfolio_url, terms_accepted_at = excluded.terms_accepted_at, updated_at = excluded.updated_at`)
       .bind(user.id, payload.contributorType, payload.location ?? null, payload.equipment, payload.portfolioUrl ?? null, payload.acceptTerms ? now : null, now),
+    ...(payload.acceptTerms ? [c.env.DB.prepare(`INSERT OR IGNORE INTO marketplace_agreement_acceptances
+      (id, organization_id, user_id, agreement_type, agreement_version, terms_sha256, context_type, context_id, accepted_at)
+      VALUES (?, ?, ?, 'seller', ?, ?, 'onboarding', ?, ?)`)
+      .bind(crypto.randomUUID(), user.organizationId, user.id, sellerAgreement.version, await sha256Hex(agreementText(sellerAgreement)), user.id, now)] : []),
   ]);
   return c.json({ ok: true, status: payload.acceptTerms ? "submitted" : "in_progress" });
 });
 
+const sellerOnboardingSchema = z.object({
+  sellerType: z.enum(["individual", "company"]),
+  legalName: z.string().trim().min(2).max(180),
+  phone: z.string().trim().regex(/^\+[1-9]\d{7,14}$/, "Use an international phone number, for example +27821234567"),
+  ageConfirmed: z.boolean(),
+  identityDocumentType: z.enum(["sa_id", "passport"]),
+  bankAccountName: z.string().trim().min(2).max(180),
+  copyrightDeclaration: z.boolean(),
+  taxResponsibilityDeclaration: z.boolean(),
+  contributorAgreement: z.boolean(),
+  registeredName: z.string().trim().max(180).optional(),
+  cipcRegistrationNumber: z.string().trim().max(40).optional(),
+  representativeName: z.string().trim().max(180).optional(),
+  representativeAuthority: z.boolean().default(false),
+  beneficialOwnerRequired: z.boolean().default(false),
+});
+
+function sameName(left: string, right: string): boolean {
+  return left.trim().toLocaleLowerCase().replace(/\s+/g, " ") === right.trim().toLocaleLowerCase().replace(/\s+/g, " ");
+}
+
+app.get("/api/onboarding/seller", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const seller = await c.env.DB.prepare("SELECT * FROM seller_onboarding_profiles WHERE contributor_id = ?").bind(user.id).first<Record<string, unknown>>();
+  return c.json({ seller: seller ?? null, emailVerified: Boolean((await c.env.DB.prepare("SELECT email_verified_at FROM users WHERE id = ?").bind(user.id).first<{ email_verified_at: string | null }>())?.email_verified_at) });
+});
+
+app.put("/api/onboarding/seller", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["contributor", "admin"])) return c.json({ error: "Contributor access required" }, 403);
+  const payload = sellerOnboardingSchema.parse(await c.req.json());
+  if (!payload.ageConfirmed) return c.json({ error: "The seller must confirm they are at least 18" }, 422);
+  const expectedBankName = payload.sellerType === "company" ? payload.registeredName : payload.legalName;
+  if (!expectedBankName || !sameName(expectedBankName, payload.bankAccountName)) return c.json({ error: "The payout account holder must match the seller legal name or registered business name" }, 422);
+  if (!payload.copyrightDeclaration || !payload.taxResponsibilityDeclaration || !payload.contributorAgreement) return c.json({ error: "Copyright, tax-responsibility, and contributor-agreement declarations are required" }, 422);
+  if (payload.sellerType === "company" && (!payload.registeredName || !payload.cipcRegistrationNumber || !payload.representativeName || !payload.representativeAuthority)) return c.json({ error: "Company sellers must provide registered name, CIPC number, and authorised representative details" }, 422);
+  if (payload.sellerType === "individual" && !payload.identityDocumentType) return c.json({ error: "An SA ID or passport is required" }, 422);
+  const now = new Date().toISOString();
+  await c.env.DB.prepare(`
+    INSERT INTO seller_onboarding_profiles (
+      contributor_id, seller_type, legal_name, phone_e164, age_confirmed_at, identity_document_type,
+      bank_account_name, copyright_declaration_at, tax_responsibility_declaration_at, contributor_agreement_at,
+      registered_name, cipc_registration_number, cipc_status, representative_name, representative_authority_at,
+      beneficial_owner_required, beneficial_owner_status, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(contributor_id) DO UPDATE SET
+      seller_type = excluded.seller_type, legal_name = excluded.legal_name, phone_e164 = excluded.phone_e164,
+      age_confirmed_at = excluded.age_confirmed_at, identity_document_type = excluded.identity_document_type,
+      bank_account_name = excluded.bank_account_name, copyright_declaration_at = excluded.copyright_declaration_at,
+      tax_responsibility_declaration_at = excluded.tax_responsibility_declaration_at, contributor_agreement_at = excluded.contributor_agreement_at,
+      registered_name = excluded.registered_name, cipc_registration_number = excluded.cipc_registration_number,
+      representative_name = excluded.representative_name, representative_authority_at = excluded.representative_authority_at,
+      beneficial_owner_required = excluded.beneficial_owner_required,
+      beneficial_owner_status = CASE WHEN excluded.beneficial_owner_required = 1 THEN seller_onboarding_profiles.beneficial_owner_status ELSE 'not_required' END,
+      updated_at = excluded.updated_at
+  `).bind(
+    user.id, payload.sellerType, payload.legalName, payload.phone, now, payload.identityDocumentType,
+    payload.bankAccountName, now, now, now, payload.registeredName ?? null, payload.cipcRegistrationNumber ?? null,
+    payload.sellerType === "company" ? "pending" : "not_checked", payload.representativeName ?? null,
+    payload.representativeAuthority ? now : null, payload.beneficialOwnerRequired ? 1 : 0,
+    payload.beneficialOwnerRequired ? "pending" : "not_required", now,
+  ).run();
+  return c.json({ ok: true, sellerType: payload.sellerType, status: "captured" });
+});
+
+const cipcLookupSchema = z.object({ registrationNumber: z.string().trim().min(3).max(40) });
+
+app.post("/api/onboarding/cipc/lookup", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["contributor", "admin"])) return c.json({ error: "Contributor access required" }, 403);
+  if (!c.env.CIPC_LOOKUP_URL) return c.json({ error: "CIPC lookup provider is not configured" }, 503);
+  const payload = cipcLookupSchema.parse(await c.req.json());
+  const response = await fetch(c.env.CIPC_LOOKUP_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(c.env.CIPC_LOOKUP_TOKEN ? { Authorization: `Bearer ${c.env.CIPC_LOOKUP_TOKEN}` } : {}) },
+    body: JSON.stringify({ registrationNumber: payload.registrationNumber }),
+  });
+  if (!response.ok) return c.json({ error: "CIPC lookup provider rejected the request" }, 502);
+  const result = await response.json() as { status?: string; registeredName?: string; registrationNumber?: string };
+  const status = result.status === "verified" || result.status === "active" ? "verified" : result.status === "rejected" || result.status === "deregistered" ? "rejected" : "pending";
+  await c.env.DB.prepare("UPDATE seller_onboarding_profiles SET cipc_registration_number = ?, registered_name = COALESCE(?, registered_name), cipc_status = ?, cipc_checked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE contributor_id = ?")
+    .bind(result.registrationNumber ?? payload.registrationNumber, result.registeredName ?? null, status, user.id).run();
+  return c.json({ registrationNumber: result.registrationNumber ?? payload.registrationNumber, registeredName: result.registeredName ?? null, status });
+});
+
 const contractSubmissionSchema = z.object({
-  termsVersion: z.string().trim().min(1).max(40).default("contributor-terms-v1"),
+  termsVersion: z.string().trim().min(1).max(40).default(sellerAgreement.version),
   signerName: z.string().trim().min(2).max(180),
   signatureMethod: z.enum(["firma", "manual"]).default("firma"),
   signatureReference: z.string().trim().min(8).max(240),
@@ -700,15 +867,16 @@ const contractSubmissionSchema = z.object({
 });
 
 const walletSchema = z.object({
-  provider: z.enum(["stripe_connect", "payfast", "za_bank"]),
+  provider: z.enum(["paystack", "stripe_connect", "payfast", "za_bank"]),
   providerAccountId: z.string().trim().max(240).optional(),
   accountHolderName: z.string().trim().min(2).max(180),
   accountLast4: z.string().regex(/^\d{4}$/).optional(),
   branchLast4: z.string().regex(/^\d{4}$/).optional(),
+  artistSharePercentage: z.number().int().min(1).max(99).optional(),
   currency: z.string().trim().length(3).transform((value) => value.toUpperCase()).default("ZAR"),
 });
 
-const contributorTerms = "Veld Archive Contributor Terms v1: the contributor grants the marketplace the rights necessary to host, review, market, license, and account for submitted media; confirms authority over submitted material; agrees to accurate identity and payout information; and accepts the published royalty schedule and dispute process. The complete legal terms must be versioned and reviewed before production launch.";
+const contributorTerms = agreementText(sellerAgreement);
 
 function verificationBucket(env: Bindings, region: "za" | "eu"): R2Bucket {
   return region === "eu" ? env.KYC_BUCKET_EU : env.KYC_BUCKET_ZA;
@@ -737,6 +905,66 @@ async function verifyFirmaSignature(env: Bindings, reference: string, signerEmai
   return result.verified === true && (!result.signerEmail || result.signerEmail.toLowerCase() === signerEmail.toLowerCase());
 }
 
+function diditCanonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(diditCanonical);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, item]) => [key, diditCanonical(item)]));
+  if (typeof value === "number" && Number.isInteger(value)) return value;
+  return value;
+}
+
+async function verifyDiditWebhook(secret: string, body: string, signature: string, timestamp: string): Promise<boolean> {
+  const parsedTimestamp = Number(timestamp);
+  if (!Number.isFinite(parsedTimestamp) || Math.abs(Math.floor(Date.now() / 1000) - parsedTimestamp) > 300) return false;
+  let parsed: unknown;
+  try { parsed = JSON.parse(body); } catch { return false; }
+  const canonical = JSON.stringify(diditCanonical(parsed));
+  const expected = hex(await hmac(utf8(secret), canonical));
+  return timingSafeEqual(expected, signature.trim());
+}
+
+const diditSessionResponse = z.object({ session_id: z.string().uuid(), session_kind: z.enum(["user", "business"]).optional(), url: z.string().url(), status: z.string(), vendor_data: z.string().optional() });
+
+app.post("/api/onboarding/didit/session", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["contributor", "admin"])) return c.json({ error: "Contributor access required" }, 403);
+  if (!c.env.DIDIT_API_KEY) return c.json({ error: "Didit is not configured" }, 503);
+  const seller = await c.env.DB.prepare("SELECT * FROM seller_onboarding_profiles WHERE contributor_id = ?").bind(user.id).first<Record<string, unknown>>();
+  if (!seller) return c.json({ error: "Save seller details before starting verification" }, 422);
+  const sellerType = String(seller.seller_type) as "individual" | "company";
+  if (sellerType === "company" && String(seller.cipc_status) !== "verified") return c.json({ error: "Complete a successful CIPC status lookup before company verification" }, 422);
+  if (String(seller.beneficial_owner_required) === "1" && String(seller.beneficial_owner_status) !== "verified") return c.json({ error: "Beneficial-owner verification is required by the selected payment/legal classification" }, 422);
+  const workflowId = sellerType === "company" ? c.env.DIDIT_KYB_WORKFLOW_ID : c.env.DIDIT_KYC_WORKFLOW_ID;
+  if (!workflowId) return c.json({ error: `${sellerType === "company" ? "DIDIT_KYB_WORKFLOW_ID" : "DIDIT_KYC_WORKFLOW_ID"} is not configured` }, 503);
+  const emailVerified = Boolean((await c.env.DB.prepare("SELECT email_verified_at FROM users WHERE id = ?").bind(user.id).first<{ email_verified_at: string | null }>())?.email_verified_at);
+  if (String(c.env.APP_ENV) === "production" && !emailVerified) return c.json({ error: "Verify your email before starting seller verification" }, 422);
+  const actor = await requestActor(c);
+  if (!actor) return c.json({ error: "Authentication required" }, 401);
+  const caseId = await ensureVerificationCase(c, user, actor.residencyRegion, sellerType === "company" ? "business" : "individual");
+  const callbackBase = (c.env.APP_PUBLIC_URL ?? new URL(c.req.url).origin).replace(/\/$/, "");
+  const names = String(seller.legal_name).trim().split(/\s+/);
+  const requestBody = {
+    workflow_id: workflowId,
+    vendor_data: user.id,
+    callback: `${callbackBase}/?didit=complete`,
+    callback_method: "both",
+    language: "en",
+    metadata: { sellerType, contributorId: user.id, verificationCaseId: caseId },
+    contact_details: { email: user.email, send_notification_emails: false, email_lang: "en", phone: String(seller.phone_e164) },
+    ...(sellerType === "individual" ? { expected_details: { first_name: names[0], last_name: names.slice(1).join(" ") || names[0], id_country: "ZAF", expected_document_types: [String(seller.identity_document_type) === "sa_id" ? "ID" : "P"] } } : { expected_details: { first_name: names[0], last_name: names.slice(1).join(" ") || names[0] } }),
+  };
+  const response = await fetch("https://verification.didit.me/v3/session/", { method: "POST", headers: { "Content-Type": "application/json", "x-api-key": c.env.DIDIT_API_KEY }, body: JSON.stringify(requestBody) });
+  const responseText = await response.text();
+  if (!response.ok) return c.json({ error: "Didit could not create a verification session", providerStatus: response.status }, 502);
+  let parsed: unknown;
+  try { parsed = JSON.parse(responseText); } catch { return c.json({ error: "Didit returned an invalid session response" }, 502); }
+  const session = diditSessionResponse.parse(parsed);
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE contributor_verification_cases SET provider = 'didit', provider_case_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(session.session_id, caseId),
+    c.env.DB.prepare("UPDATE seller_onboarding_profiles SET didit_session_id = ?, didit_session_kind = ?, didit_status = ?, didit_provider_reference = ?, updated_at = CURRENT_TIMESTAMP WHERE contributor_id = ?").bind(session.session_id, session.session_kind ?? (sellerType === "company" ? "business" : "user"), session.status, session.session_id, user.id),
+  ]);
+  return c.json({ caseId, sessionId: session.session_id, url: session.url, status: session.status, kind: session.session_kind ?? (sellerType === "company" ? "business" : "user") }, 201);
+});
+
 app.get("/api/onboarding/status", async (c) => {
   const user = await requestUser(c);
   if (!user) return c.json({ error: "Authentication required" }, 401);
@@ -744,12 +972,14 @@ app.get("/api/onboarding/status", async (c) => {
     SELECT p.*, t.id AS tender_id, t.status AS tender_status, t.review_notes,
       sc.id AS contract_id, sc.version AS contract_version, sc.content_sha256 AS contract_hash,
       sc.signed_at, w.id AS wallet_id, w.provider AS wallet_provider, w.status AS wallet_status,
-      vc.id AS verification_case_id, vc.status AS verification_status
+      vc.id AS verification_case_id, vc.status AS verification_status,
+      so.seller_type, so.legal_name AS seller_legal_name, so.registered_name, so.cipc_status, so.didit_status
     FROM contributor_profiles p
     LEFT JOIN onboarding_tenders t ON t.contributor_id = p.user_id AND t.organization_id = ? AND t.status IN ('pending', 'corrections_requested', 'approved')
     LEFT JOIN seller_contracts sc ON sc.id = t.contract_id
     LEFT JOIN payout_wallets w ON w.id = t.wallet_id
     LEFT JOIN contributor_verification_cases vc ON vc.id = t.verification_case_id
+    LEFT JOIN seller_onboarding_profiles so ON so.contributor_id = p.user_id
     WHERE p.user_id = ? ORDER BY t.created_at DESC LIMIT 1
   `).bind(user.organizationId, user.id).first<Record<string, unknown>>();
   return c.json({ user, workflow: result ?? null });
@@ -761,21 +991,29 @@ app.post("/api/onboarding/wallet", async (c) => {
   const payload = walletSchema.parse(await c.req.json());
   if (payload.provider === "stripe_connect" && !payload.providerAccountId) return c.json({ error: "Stripe connected account is required" }, 422);
   if (payload.provider === "payfast" && !payload.providerAccountId) return c.json({ error: "PayFast recipient reference is required" }, 422);
+  if (payload.provider === "paystack" && !payload.providerAccountId) return c.json({ error: "A verified Paystack subaccount code is required" }, 422);
+  const seller = await c.env.DB.prepare("SELECT seller_type, legal_name, registered_name, bank_account_name FROM seller_onboarding_profiles WHERE contributor_id = ?").bind(user.id).first<{ seller_type: string; legal_name: string; registered_name: string | null; bank_account_name: string }>();
+  if (seller) {
+    const expectedName = seller.seller_type === "company" ? seller.registered_name : seller.legal_name;
+    if (!expectedName || !sameName(expectedName, payload.accountHolderName) || !sameName(expectedName, seller.bank_account_name)) return c.json({ error: "The payout account must be in the verified seller or registered business name" }, 422);
+  }
+  const artistSharePercentage = payload.artistSharePercentage ?? Math.min(99, Math.max(1, Number(c.env.DEFAULT_ARTIST_SHARE_PERCENTAGE ?? 60)));
   const walletId = crypto.randomUUID();
   await c.env.DB.batch([
     c.env.DB.prepare("UPDATE payout_wallets SET status = 'disabled', updated_at = CURRENT_TIMESTAMP WHERE contributor_id = ? AND provider = ? AND status <> 'disabled'").bind(user.id, payload.provider),
-    c.env.DB.prepare(`INSERT INTO payout_wallets (id, contributor_id, provider, provider_account_id, account_holder_name, account_last4, branch_last4, currency, status, metadata_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', '{}')`).bind(walletId, user.id, payload.provider, payload.providerAccountId ?? null, payload.accountHolderName, payload.accountLast4 ?? null, payload.branchLast4 ?? null, payload.currency),
+    c.env.DB.prepare(`INSERT INTO payout_wallets (id, contributor_id, provider, provider_account_id, account_holder_name, account_last4, branch_last4, currency, artist_share_percentage, status, metadata_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', '{}')`).bind(walletId, user.id, payload.provider, payload.providerAccountId ?? null, payload.accountHolderName, payload.accountLast4 ?? null, payload.branchLast4 ?? null, payload.currency, artistSharePercentage),
     c.env.DB.prepare("UPDATE onboarding_tenders SET wallet_id = ?, updated_at = CURRENT_TIMESTAMP WHERE organization_id = ? AND contributor_id = ? AND status IN ('pending', 'corrections_requested')").bind(walletId, user.organizationId, user.id),
     c.env.DB.prepare("UPDATE contributor_profiles SET payout_provider = ?, payout_status = 'pending', updated_at = CURRENT_TIMESTAMP WHERE user_id = ?").bind(payload.provider, user.id),
   ]);
-  return c.json({ walletId, provider: payload.provider, status: "pending", message: "Wallet captured without storing raw banking credentials. Provider verification is required before tender approval." }, 201);
+  return c.json({ walletId, provider: payload.provider, artistSharePercentage, status: "pending", message: "Provider reference captured without storing raw banking credentials. Provider verification is required before tender approval." }, 201);
 });
 
 app.post("/api/onboarding/contract", async (c) => {
   const user = await requestUser(c);
   if (!user || !allowedRole(user, ["contributor", "admin"])) return c.json({ error: "Contributor access required" }, 403);
   const payload = contractSubmissionSchema.parse(await c.req.json());
+  if (payload.termsVersion !== sellerAgreement.version) return c.json({ error: "The seller agreement version is no longer current", currentVersion: sellerAgreement.version }, 409);
   if (String(c.env.APP_ENV) === "production" && payload.signatureMethod !== "firma") return c.json({ error: "Production contracts require a Firma signature" }, 422);
   if (!(await verifyFirmaSignature(c.env, payload.signatureReference, user.email))) return c.json({ error: "Firma signature could not be verified" }, 422);
   const turnstile = await verifyTurnstileToken(c.env, payload.turnstileToken, "contributor-contract", c.get("trace").traceparent);
@@ -809,6 +1047,10 @@ app.post("/api/onboarding/contract", async (c) => {
     c.env.DB.prepare("UPDATE seller_contracts SET status = 'superseded' WHERE organization_id = ? AND contributor_id = ? AND status = 'signed'").bind(user.organizationId, user.id),
     c.env.DB.prepare(`INSERT INTO seller_contracts (id, organization_id, contributor_id, version, terms_snapshot, signature_method, signer_name, signer_email, signed_at, content_sha256, object_key, audit_event_id)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(contractId, user.organizationId, user.id, payload.termsVersion, contributorTerms, payload.signatureMethod, payload.signerName, user.email, signedAt, contentSha256, objectKey, audit.event.eventId),
+    c.env.DB.prepare(`INSERT OR IGNORE INTO marketplace_agreement_acceptances
+      (id, organization_id, user_id, agreement_type, agreement_version, terms_sha256, context_type, context_id, accepted_at)
+      VALUES (?, ?, ?, 'seller', ?, ?, 'onboarding', ?, ?)`)
+      .bind(crypto.randomUUID(), user.organizationId, user.id, payload.termsVersion, contentSha256, contractId, signedAt),
     c.env.DB.prepare("UPDATE contributor_profiles SET terms_accepted_at = ?, contract_status = 'signed', identity_status = 'submitted', updated_at = CURRENT_TIMESTAMP WHERE user_id = ?").bind(signedAt, user.id),
     tenderWrite,
     c.env.DB.prepare("UPDATE users SET onboarding_status = 'submitted' WHERE id = ?").bind(user.id),
@@ -827,26 +1069,33 @@ app.get("/api/admin/onboarding/tenders", async (c) => {
       u.id AS contributor_id, u.display_name, u.email, u.onboarding_status,
       sc.id AS contract_id, sc.version AS contract_version, sc.content_sha256 AS contract_hash, sc.signed_at,
       vc.id AS verification_case_id, vc.status AS verification_status, vc.risk_level, vc.sanctions_status,
-      w.id AS wallet_id, w.provider AS wallet_provider, w.status AS wallet_status, w.account_holder_name, w.account_last4
+      w.id AS wallet_id, w.provider AS wallet_provider, w.status AS wallet_status, w.account_holder_name, w.account_last4,
+      so.seller_type, so.legal_name AS seller_legal_name, so.registered_name, so.cipc_status, so.didit_status,
+      so.copyright_declaration_at, so.tax_responsibility_declaration_at, so.contributor_agreement_at,
+      so.beneficial_owner_required, so.beneficial_owner_status
     FROM onboarding_tenders t JOIN users u ON u.id = t.contributor_id
       JOIN seller_contracts sc ON sc.id = t.contract_id
       LEFT JOIN contributor_verification_cases vc ON vc.id = t.verification_case_id
       LEFT JOIN payout_wallets w ON w.id = t.wallet_id
+      LEFT JOIN seller_onboarding_profiles so ON so.contributor_id = t.contributor_id
     WHERE t.organization_id = ? AND ${where} ORDER BY t.created_at ASC LIMIT 100
   `).bind(...(status === "all" ? [user.organizationId] : [user.organizationId, status])).all<Record<string, unknown>>();
   return c.json({ results: result.results });
 });
 
+const providerWalletVerificationSchema = z.object({ providerVerificationReference: z.string().trim().min(4).max(240) });
+
 app.post("/api/admin/onboarding/wallets/:walletId/verify", async (c) => {
   const admin = await requestUser(c);
   if (!admin || !allowedRole(admin, ["admin"])) return c.json({ error: "Admin access required" }, 403);
-  const wallet = await c.env.DB.prepare("SELECT w.id, w.contributor_id FROM payout_wallets w JOIN organization_memberships om ON om.user_id = w.contributor_id AND om.organization_id = ? AND om.status = 'active' WHERE w.id = ?").bind(admin.organizationId, c.req.param("walletId")).first<{ id: string; contributor_id: string }>();
+  const payload = providerWalletVerificationSchema.parse(await c.req.json());
+  const wallet = await c.env.DB.prepare("SELECT w.id, w.provider, w.contributor_id FROM payout_wallets w JOIN organization_memberships om ON om.user_id = w.contributor_id AND om.organization_id = ? AND om.status = 'active' WHERE w.id = ?").bind(admin.organizationId, c.req.param("walletId")).first<{ id: string; provider: string; contributor_id: string }>();
   if (!wallet) return c.json({ error: "Wallet not found" }, 404);
   await c.env.DB.batch([
-    c.env.DB.prepare("UPDATE payout_wallets SET status = 'verified', verified_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(wallet.id),
+    c.env.DB.prepare("UPDATE payout_wallets SET status = 'verified', verified_at = CURRENT_TIMESTAMP, provider_verification_reference = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(payload.providerVerificationReference, wallet.id),
     c.env.DB.prepare("UPDATE contributor_profiles SET payout_status = 'verified', updated_at = CURRENT_TIMESTAMP WHERE user_id = ?").bind(wallet.contributor_id),
   ]);
-  return c.json({ walletId: wallet.id, status: "verified" });
+  return c.json({ walletId: wallet.id, provider: wallet.provider, status: "verified", providerVerificationReference: payload.providerVerificationReference });
 });
 
 const tenderDecisionSchema = z.object({ decision: z.enum(["approved", "rejected", "corrections_requested"]), notes: z.string().trim().max(2000).default("") });
@@ -858,10 +1107,12 @@ app.post("/api/admin/onboarding/tenders/:id/decision", async (c) => {
   const tender = await c.env.DB.prepare(`SELECT t.*, sc.status AS contract_status, vc.status AS verification_status, w.status AS wallet_status, u.email
     FROM onboarding_tenders t JOIN seller_contracts sc ON sc.id = t.contract_id JOIN users u ON u.id = t.contributor_id
     LEFT JOIN contributor_verification_cases vc ON vc.id = t.verification_case_id LEFT JOIN payout_wallets w ON w.id = t.wallet_id
+    LEFT JOIN seller_onboarding_profiles so ON so.contributor_id = t.contributor_id
     WHERE t.id = ? AND t.organization_id = ?`).bind(c.req.param("id"), admin.organizationId).first<Record<string, unknown>>();
   if (!tender) return c.json({ error: "Tender not found" }, 404);
-  if (payload.decision === "approved" && (tender.contract_status !== "signed" || tender.verification_status !== "verified" || tender.wallet_status !== "verified")) {
-    return c.json({ error: "Tender cannot be approved until the contract, KYC case, and payout wallet are verified", requirements: { contract: tender.contract_status, verification: tender.verification_status, wallet: tender.wallet_status } }, 422);
+  const sellerRequirementsReady = tender.seller_type && tender.copyright_declaration_at && tender.tax_responsibility_declaration_at && tender.contributor_agreement_at && tender.didit_status === "Approved" && (tender.seller_type !== "company" || tender.cipc_status === "verified") && (Number(tender.beneficial_owner_required) !== 1 || tender.beneficial_owner_status === "verified");
+  if (payload.decision === "approved" && (tender.contract_status !== "signed" || tender.verification_status !== "verified" || tender.wallet_status !== "verified" || !sellerRequirementsReady)) {
+    return c.json({ error: "Tender cannot be approved until seller declarations, Didit, contract, and payout wallet are verified", requirements: { seller: sellerRequirementsReady ? "ready" : "incomplete", contract: tender.contract_status, verification: tender.verification_status, wallet: tender.wallet_status } }, 422);
   }
   const nextStatus = payload.decision;
   const now = new Date().toISOString();
@@ -1072,10 +1323,14 @@ app.post("/api/assets", async (c) => {
   if (payload.monetizationModel === "individual_license" && (!payload.licensePriceCents || payload.licensePriceCents < 100)) {
     return c.json({ error: "Individual licences must have a price of at least ZAR 1.00" }, 422);
   }
+  if ((payload.artistLicenseKey === "custom" || payload.artistLicenseKey === "other") && !payload.artistLicenseTerms?.trim()) return c.json({ error: "Custom or other artist licences must include the licence terms" }, 422);
+  if (payload.artistLicenseKey !== "custom" && !payload.artistLicenseUrl) return c.json({ error: "A proof URL is required for the selected artist licence" }, 422);
+  const artistLicenseTerms = payload.artistLicenseTerms?.trim() || `${payload.artistLicenseKey} ${payload.artistLicenseVersion ?? ""}`.trim();
+  const artistLicenseSha256 = await sha256Hex(JSON.stringify({ key: payload.artistLicenseKey, version: payload.artistLicenseVersion ?? null, url: payload.artistLicenseUrl ?? null, terms: artistLicenseTerms }));
   const id = crypto.randomUUID();
-  await c.env.DB.prepare(`INSERT INTO assets (id, organization_id, owner_id, kind, status, title, description, caption, province, city, locality, landmark, subject_tags, cultural_tags, rights_status, model_release_status, property_release_status, monetization_model, license_price_cents, workflow_stage)
-    VALUES (?, ?, ?, ?, 'needs_review', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'curator_correction')`)
-    .bind(id, user.organizationId, user.id, payload.kind, payload.title, payload.description, payload.caption, payload.province ?? null, payload.city ?? null, payload.locality ?? null, payload.landmark ?? null, JSON.stringify(payload.subjectTags), JSON.stringify(payload.culturalTags), payload.rightsStatus, payload.modelReleaseStatus, payload.propertyReleaseStatus, payload.monetizationModel, payload.monetizationModel === "individual_license" ? payload.licensePriceCents : null).run();
+  await c.env.DB.prepare(`INSERT INTO assets (id, organization_id, owner_id, kind, status, title, description, caption, province, city, locality, landmark, subject_tags, cultural_tags, rights_status, model_release_status, property_release_status, monetization_model, license_price_cents, artist_license_key, artist_license_version, artist_license_url, artist_license_terms, artist_license_sha256, artist_license_accepted_at, workflow_stage)
+    VALUES (?, ?, ?, ?, 'needs_review', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'curator_correction')`)
+    .bind(id, user.organizationId, user.id, payload.kind, payload.title, payload.description, payload.caption, payload.province ?? null, payload.city ?? null, payload.locality ?? null, payload.landmark ?? null, JSON.stringify(payload.subjectTags), JSON.stringify(payload.culturalTags), payload.rightsStatus, payload.modelReleaseStatus, payload.propertyReleaseStatus, payload.monetizationModel, payload.monetizationModel === "individual_license" ? payload.licensePriceCents : null, payload.artistLicenseKey, payload.artistLicenseVersion ?? null, payload.artistLicenseUrl || null, artistLicenseTerms, artistLicenseSha256, new Date().toISOString()).run();
   return c.json(validateContractResponse("POST /api/assets 201", assetCreateResponseSchema, { id, status: "needs_review" }), 201);
 });
 
@@ -1092,14 +1347,22 @@ app.patch("/api/assets/:id", async (c) => {
     ...payload,
     monetizationModel: payload.monetizationModel ?? (current.monetization_model as MonetizationModel | undefined) ?? "membership",
     licensePriceCents: payload.licensePriceCents !== undefined ? payload.licensePriceCents : (current.license_price_cents == null ? null : Number(current.license_price_cents)),
+    artistLicenseKey: payload.artistLicenseKey ?? (current.artist_license_key as string | undefined) ?? "custom",
+    artistLicenseVersion: payload.artistLicenseVersion !== undefined ? payload.artistLicenseVersion : (current.artist_license_version as string | undefined),
+    artistLicenseUrl: payload.artistLicenseUrl !== undefined ? payload.artistLicenseUrl : (current.artist_license_url as string | undefined),
+    artistLicenseTerms: payload.artistLicenseTerms !== undefined ? payload.artistLicenseTerms : (current.artist_license_terms as string | undefined),
   };
   if (next.monetizationModel === "individual_license" && (!next.licensePriceCents || next.licensePriceCents < 100)) {
     return c.json({ error: "Individual licences must have a price of at least ZAR 1.00" }, 422);
   }
+  if ((next.artistLicenseKey === "custom" || next.artistLicenseKey === "other") && !String(next.artistLicenseTerms ?? "").trim()) return c.json({ error: "Custom or other artist licences must include the licence terms" }, 422);
+  if (next.artistLicenseKey !== "custom" && !next.artistLicenseUrl) return c.json({ error: "A proof URL is required for the selected artist licence" }, 422);
+  const artistLicenseTerms = String(next.artistLicenseTerms ?? `${next.artistLicenseKey} ${next.artistLicenseVersion ?? ""}`).trim();
+  const artistLicenseSha256 = await sha256Hex(JSON.stringify({ key: next.artistLicenseKey, version: next.artistLicenseVersion ?? null, url: next.artistLicenseUrl || null, terms: artistLicenseTerms }));
   const safetyIssue = metadataSafetyIssue((next.culturalTags ?? []) as string[]);
   if (safetyIssue) return c.json({ error: safetyIssue, code: "metadata_context_required" }, 422);
-  await c.env.DB.prepare(`UPDATE assets SET kind = ?, title = ?, description = ?, caption = ?, province = ?, city = ?, locality = ?, landmark = ?, subject_tags = ?, cultural_tags = ?, rights_status = ?, model_release_status = ?, property_release_status = ?, monetization_model = ?, license_price_cents = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?`)
-    .bind(next.kind, next.title, next.description ?? "", next.caption ?? "", next.province ?? null, next.city ?? null, next.locality ?? null, next.landmark ?? null, JSON.stringify(next.subjectTags ?? []), JSON.stringify(next.culturalTags ?? []), next.rightsStatus ?? "pending", next.modelReleaseStatus ?? "unknown", next.propertyReleaseStatus ?? "unknown", next.monetizationModel ?? "membership", next.monetizationModel === "individual_license" ? next.licensePriceCents : null, id, user.organizationId).run();
+  await c.env.DB.prepare(`UPDATE assets SET kind = ?, title = ?, description = ?, caption = ?, province = ?, city = ?, locality = ?, landmark = ?, subject_tags = ?, cultural_tags = ?, rights_status = ?, model_release_status = ?, property_release_status = ?, monetization_model = ?, license_price_cents = ?, artist_license_key = ?, artist_license_version = ?, artist_license_url = ?, artist_license_terms = ?, artist_license_sha256 = ?, artist_license_accepted_at = COALESCE(artist_license_accepted_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?`)
+    .bind(next.kind, next.title, next.description ?? "", next.caption ?? "", next.province ?? null, next.city ?? null, next.locality ?? null, next.landmark ?? null, JSON.stringify(next.subjectTags ?? []), JSON.stringify(next.culturalTags ?? []), next.rightsStatus ?? "pending", next.modelReleaseStatus ?? "unknown", next.propertyReleaseStatus ?? "unknown", next.monetizationModel ?? "membership", next.monetizationModel === "individual_license" ? next.licensePriceCents : null, next.artistLicenseKey, next.artistLicenseVersion ?? null, next.artistLicenseUrl || null, artistLicenseTerms, artistLicenseSha256, id, user.organizationId).run();
   return c.json({ ok: true, id });
 });
 
@@ -1132,6 +1395,10 @@ app.post("/api/admin/assets/:id/review", async (c) => {
 });
 
 const licenceRequestSchema: z.ZodType<LicenceRequest> = contractLicenceRequestSchema;
+const checkoutRequestSchema = contractLicenceRequestSchema.extend({
+  buyerAgreementVersion: z.string().trim().min(1).max(40),
+  acceptBuyerTerms: z.literal(true),
+});
 
 async function governanceAsset(c: { env: Bindings }, assetId: string, organizationId?: string): Promise<Asset | null> {
   const row = organizationId
@@ -1164,7 +1431,8 @@ app.post("/api/checkout/validate", async (c) => {
 app.post("/api/checkout", async (c) => {
   const user = await requestUser(c);
   if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, 401);
-  const request = licenceRequestSchema.parse(await c.req.json());
+  const request = checkoutRequestSchema.parse(await c.req.json());
+  if (request.buyerAgreementVersion !== buyerAgreement.version) return c.json({ error: "The buyer agreement version is no longer current", currentVersion: buyerAgreement.version }, 409);
   const asset = await governanceAsset(c, request.assetId, user.organizationId);
   if (!asset) return c.json({ error: "Asset not found" }, 404);
   const validation = archiveDomain.evaluateLicenceRequest(asset, request);
@@ -1179,6 +1447,14 @@ app.post("/api/checkout", async (c) => {
   if (request.productCode && !product) return c.json({ error: "Licence product is unavailable" }, 422);
   await c.env.DB.batch([
     c.env.DB.prepare("INSERT INTO licences (id, organization_id, asset_id, buyer_id, licence_type, product_code, territory, duration_days, price_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(licenceId, user.organizationId, request.assetId, user.id, request.licenceType, request.productCode ?? null, request.territory, request.durationDays, priceCents),
+    c.env.DB.prepare(`INSERT INTO marketplace_agreement_acceptances
+      (id, organization_id, user_id, agreement_type, agreement_version, terms_sha256, context_type, context_id, accepted_at)
+      VALUES (?, ?, ?, 'buyer', ?, ?, 'checkout', ?, ?)`)
+      .bind(crypto.randomUUID(), user.organizationId, user.id, request.buyerAgreementVersion, await sha256Hex(agreementText(buyerAgreement)), "pending:" + licenceId, new Date().toISOString()),
+    c.env.DB.prepare(`INSERT INTO marketplace_agreement_acceptances
+      (id, organization_id, user_id, agreement_type, agreement_version, terms_sha256, context_type, context_id, accepted_at)
+      VALUES (?, ?, ?, 'payment', ?, ?, 'checkout', ?, ?)`)
+      .bind(crypto.randomUUID(), user.organizationId, user.id, paymentDisclosure.version, await sha256Hex(agreementText(paymentDisclosure)), "pending:" + licenceId, new Date().toISOString()),
     ...(product ? [c.env.DB.prepare("INSERT INTO licence_evidence (id, licence_id, event_type, payload_json, payload_sha256) VALUES (?, ?, 'issued', ?, ?)").bind(crypto.randomUUID(), licenceId, JSON.stringify({ productCode: product.code, termsVersion: product.terms_version, restrictions: JSON.parse(String(product.restrictions_json)), status: "pending_payment" }), await sha256Hex(`${licenceId}:${product.code}:${product.terms_version}:${product.restrictions_json}`))] : []),
   ]);
   return c.json({ blocked: false, licenceId, priceCents, currency: "ZAR", paymentRequired: true, ...validation }, 201);
@@ -1196,12 +1472,22 @@ app.post("/api/payments/:licenceId/session", async (c) => {
   if (!c.env.PAYMENT_PROVIDER || !c.env.PAYMENT_ENDPOINT || !paymentToken) return c.json({ error: "Payment provider is not configured" }, 503);
   const payload = paymentSessionSchema.parse(await c.req.json());
   const licence = await c.env.DB.prepare(`
-    SELECT l.id, l.price_cents, l.status, l.payment_reference, u.email
-    FROM licences l JOIN users u ON u.id = l.buyer_id
+    SELECT l.id, l.price_cents, l.status, l.payment_reference, l.asset_id, a.owner_id,
+      u.email, w.provider AS wallet_provider, w.provider_account_id, w.status AS wallet_status,
+      w.artist_share_percentage
+    FROM licences l JOIN users u ON u.id = l.buyer_id JOIN assets a ON a.id = l.asset_id
+      LEFT JOIN payout_wallets w ON w.contributor_id = a.owner_id AND w.provider = 'paystack' AND w.status <> 'disabled'
     WHERE l.id = ? AND l.organization_id = ? AND l.buyer_id = ?
-  `).bind(c.req.param("licenceId"), user.organizationId, user.id).first<{ id: string; price_cents: number; status: string; payment_reference: string | null; email: string }>();
+  `).bind(c.req.param("licenceId"), user.organizationId, user.id).first<{ id: string; price_cents: number; status: string; payment_reference: string | null; asset_id: string; owner_id: string; email: string; wallet_provider: string | null; provider_account_id: string | null; wallet_status: string | null; artist_share_percentage: number | null }>();
   if (!licence) return c.json({ error: "Licence not found" }, 404);
   if (licence.status !== "pending") return c.json({ error: `Licence cannot be paid from status ${licence.status}` }, 409);
+  if (String(c.env.PAYMENT_PROVIDER).toLowerCase() === "paystack" && (licence.wallet_provider !== "paystack" || licence.wallet_status !== "verified" || !licence.provider_account_id)) {
+    return c.json({ error: "The artist does not yet have a verified Paystack subaccount; payment is unavailable" }, 422);
+  }
+  const artistSharePercentage = Math.min(99, Math.max(1, Number(licence.artist_share_percentage ?? c.env.DEFAULT_ARTIST_SHARE_PERCENTAGE ?? 60)));
+  const allocation = calculateMarketplaceSplit(Number(licence.price_cents), artistSharePercentage);
+  const artistAmountCents = allocation.artistAmountCents;
+  const platformAmountCents = allocation.platformAmountCents;
   const integrations = new IntegrationContainer({ ...c.env, PAYMENT_TOKEN: paymentToken });
   try {
     const session = await integrations.payments.get(c.env.PAYMENT_PROVIDER).createCheckoutSession({
@@ -1213,10 +1499,19 @@ app.post("/api/payments/:licenceId/session", async (c) => {
       successUrl: payload.successUrl,
       cancelUrl: payload.cancelUrl,
       metadata: { organizationId: user.organizationId, userId: user.id },
+      split: c.env.PAYMENT_PROVIDER.toLowerCase() === "paystack" ? {
+        type: "percentage",
+        bearerType: String(c.env.PAYSTACK_SPLIT_FEE_BEARER) === "subaccount" ? "subaccount" : "account",
+        subaccounts: [{ subaccount: String(licence.provider_account_id), share: artistSharePercentage }],
+      } : undefined,
     });
+    await c.env.DB.prepare(`INSERT OR REPLACE INTO payment_split_allocations
+      (id, licence_id, provider, provider_reference, contributor_id, provider_account_id, artist_share_percentage, artist_amount_cents, platform_amount_cents, currency, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ZAR', 'configured')`)
+      .bind(crypto.randomUUID(), licence.id, session.provider, session.providerReference ?? session.id, licence.owner_id, licence.provider_account_id ?? "", artistSharePercentage, artistAmountCents, platformAmountCents).run();
     await c.env.DB.prepare("UPDATE licences SET payment_provider = ?, payment_reference = COALESCE(payment_reference, ?) WHERE id = ? AND organization_id = ? AND status = 'pending'")
       .bind(c.env.PAYMENT_PROVIDER, session.providerReference ?? session.id, licence.id, user.organizationId).run();
-    return c.json({ licenceId: licence.id, provider: session.provider, checkoutUrl: session.checkoutUrl, status: session.status }, 201);
+    return c.json({ licenceId: licence.id, provider: session.provider, checkoutUrl: session.checkoutUrl, status: session.status, paymentFlow: { artistSharePercentage, artistAmountCents, platformAmountCents, currency: "ZAR", settlement: "Paystack split at checkout" } }, 201);
   } catch (error) {
     logEvent("error", "payment.checkout_session_failed", c.get("trace"), { licenceId: licence.id, provider: c.env.PAYMENT_PROVIDER, error: error instanceof Error ? error.message : "unknown" });
     return c.json({ error: "Payment provider could not create a checkout session" }, 503);
@@ -1243,8 +1538,9 @@ async function postSaleSettlement(env: Bindings, licenceId: string, payload: z.i
   if (!licence) throw new Error("Licence not found");
   if (licence.status !== "pending") throw new Error(`Licence cannot be settled from status ${licence.status}`);
   if (Number(licence.price_cents) !== payload.amountCents) throw new Error("Settlement amount does not match the licence price");
-  const fee = payload.platformFeeCents ?? Math.floor(payload.amountCents * 0.2);
-  const royalty = payload.royaltyCents ?? payload.amountCents - fee - payload.taxCents;
+  const split = await env.DB.prepare("SELECT artist_amount_cents, platform_amount_cents FROM payment_split_allocations WHERE licence_id = ?").bind(licenceId).first<{ artist_amount_cents: number; platform_amount_cents: number }>();
+  const fee = payload.platformFeeCents ?? (split ? Number(split.platform_amount_cents) : Math.floor(payload.amountCents * 0.2));
+  const royalty = payload.royaltyCents ?? (split ? Number(split.artist_amount_cents) : payload.amountCents - fee - payload.taxCents);
   if (fee + royalty + payload.taxCents !== payload.amountCents || royalty < 0) throw new Error("Sale postings must balance to the settled amount");
   const transactionId = crypto.randomUUID();
   const receiptPayload = JSON.stringify({ licenceId, assetId: licence.asset_id, buyerId: licence.buyer_id, licenceType: licence.licence_type, territory: licence.territory, durationDays: licence.duration_days, amountCents: payload.amountCents, currency: payload.currency.toUpperCase(), issuedAt: new Date().toISOString() });
@@ -1358,9 +1654,11 @@ app.post("/api/webhooks/payments", async (c) => {
       } else {
       transactionId = (await postSaleSettlement(c.env, payload.licenceId, { amountCents: payload.amountCents, currency: payload.currency, taxCents: 0, idempotencyKey: `${payload.provider}:${payload.eventId}` })).transactionId;
       await c.env.DB.prepare("UPDATE licences SET payment_provider = ?, payment_reference = ?, paid_at = CURRENT_TIMESTAMP, status = 'paid', price_cents = ? WHERE id = ? AND status = 'pending'").bind(payload.provider, payload.paymentReference ?? payload.eventId, payload.amountCents, payload.licenceId).run();
+      await c.env.DB.prepare("UPDATE payment_split_allocations SET status = 'settled', provider_reference = COALESCE(?, provider_reference), updated_at = CURRENT_TIMESTAMP WHERE licence_id = ?").bind(payload.paymentReference ?? payload.eventId, payload.licenceId).run();
       }
     } else if (payload.type === "refund" || payload.type === "chargeback") {
       transactionId = await postPaymentReversal(c.env, payload.licenceId, { amountCents: payload.amountCents, currency: payload.currency, idempotencyKey: `${payload.provider}:${payload.eventId}`, type: payload.type });
+      await c.env.DB.prepare("UPDATE payment_split_allocations SET status = 'reversed', updated_at = CURRENT_TIMESTAMP WHERE licence_id = ?").bind(payload.licenceId).run();
     }
     await c.env.DB.prepare("UPDATE payment_webhook_events SET status = 'processed', processed_at = CURRENT_TIMESTAMP WHERE id = ?").bind(eventId).run();
     return c.json({ accepted: true, eventId, transactionId, type: payload.type });
@@ -1430,7 +1728,7 @@ app.post("/api/admin/payout-batches", async (c) => {
     SELECT p.contributor_id, SUM(p.credit_cents - p.debit_cents) AS balance_cents,
       w.id AS wallet_id, sc.id AS contract_id, w.currency
     FROM ledger_postings p JOIN ledger_transactions t ON t.id = p.transaction_id
-      JOIN payout_wallets w ON w.contributor_id = p.contributor_id AND w.status = 'verified'
+      JOIN payout_wallets w ON w.contributor_id = p.contributor_id AND w.status = 'verified' AND w.provider <> 'paystack'
       JOIN onboarding_tenders ot ON ot.contributor_id = p.contributor_id AND ot.organization_id = ? AND ot.status = 'approved'
       JOIN seller_contracts sc ON sc.id = ot.contract_id AND sc.status = 'signed'
     WHERE p.account_code = 'contributor_payable' AND t.created_at < datetime(?, '+1 day')
@@ -1537,13 +1835,17 @@ app.get("/api/ops/readiness", async (c) => {
     const age = Date.now() - timestamp;
     return Number.isFinite(timestamp) && age >= 0 && age <= days * 86_400_000;
   };
+  const auth0Ready = [c.env.AUTH_JWKS_URL, c.env.AUTH_ISSUER, c.env.AUTH_AUDIENCE].every((value) => configured(value));
+  const supabaseReady = [c.env.SUPABASE_URL, c.env.SUPABASE_ISSUER || (c.env.SUPABASE_URL ? `${c.env.SUPABASE_URL}/auth/v1` : undefined), c.env.SUPABASE_JWT_SECRET || c.env.SUPABASE_JWKS_URL].every((value) => configured(value));
+  const providerMode = String(c.env.AUTH_PROVIDER ?? "both").toLowerCase();
+  const identityProviderReady = providerMode === "auth0" ? auth0Ready : providerMode === "supabase" ? supabaseReady : auth0Ready || supabaseReady;
   const checks: Array<{ id: string; ready: boolean; detail: string }> = [
     { id: "production-environment", ready: String(c.env.APP_ENV) === "production", detail: "APP_ENV must be production." },
-    { id: "identity", ready: [c.env.SESSION_SECRET, c.env.AUTH_JWKS_URL, c.env.AUTH_ISSUER, c.env.AUTH_AUDIENCE, c.env.AUTH_COOKIE_DOMAIN].every((value) => configured(value)), detail: "Session, JWKS, issuer, audience, and secure-cookie domain are required." },
+    { id: "identity", ready: Boolean(configured(c.env.SESSION_SECRET) && configured(c.env.AUTH_COOKIE_DOMAIN) && identityProviderReady), detail: "Session, secure-cookie domain, and at least one explicitly configured identity provider are required." },
     { id: "tenant", ready: c.env.AUTH_ALLOW_ORG_PROVISIONING === "false" && configured(c.env.DEFAULT_ORGANIZATION_ID), detail: "Automatic organisation provisioning must be disabled and the default demo tenant removed." },
     { id: "origins", ready: Boolean(c.env.ALLOWED_ORIGINS?.split(",").every((origin) => /^https:\/\//.test(origin.trim()))), detail: "Only explicit HTTPS browser origins are allowed." },
     { id: "r2-upload-and-scan", ready: [c.env.R2_ACCOUNT_ID, c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, c.env.MEDIA_SCANNER_URL, c.env.MEDIA_SCANNER_SECRET].every((value) => configured(value)), detail: "Private upload credentials and the production malware scanner are required." },
-    { id: "stream", ready: [c.env.STREAM_ACCOUNT_ID, c.env.STREAM_API_TOKEN, c.env.STREAM_WEBHOOK_SECRET || c.env.STREAM_WEBHOOK_SECRET_STORE, c.env.STREAM_ALLOWED_ORIGINS].every((value) => configured(value)), detail: "Stream upload, playback-origin, and webhook configuration are required." },
+    { id: "stream", ready: [c.env.STREAM_ACCOUNT_ID, c.env.STREAM_API_TOKEN || c.env.STREAM_API_TOKEN_STORE, c.env.STREAM_WEBHOOK_SECRET || c.env.STREAM_WEBHOOK_SECRET_STORE, c.env.STREAM_ALLOWED_ORIGINS].every((value) => configured(value)), detail: "Stream upload, playback-origin, and webhook configuration are required." },
     { id: "payments", ready: [c.env.PAYMENT_PROVIDER, c.env.PAYMENT_ENDPOINT, c.env.PAYMENT_TOKEN || c.env.PAYMENT_TOKEN_STORE, c.env.PAYMENT_WEBHOOK_SECRET || c.env.PAYMENT_WEBHOOK_SECRET_STORE].every((value) => configured(value)), detail: "A live payment adapter and signed webhook are required." },
     { id: "kyc", ready: [c.env.KYC_PROVIDER, c.env.KYC_WEBHOOK_SECRET].every((value) => configured(value)), detail: "A named KYC provider and signed webhook are required." },
     { id: "audit-keys", ready: [c.env.AUDIT_SIGNING_PRIVATE_JWK, c.env.AUDIT_SIGNING_PUBLIC_JWK].every((value) => configured(value)), detail: "Ed25519 audit signing keys are required." },
@@ -1839,6 +2141,50 @@ const kycWebhookSchema = z.object({
     providerReference: z.string().max(160).optional(),
     checkedAt: z.string().datetime().optional(),
   })).max(20).default([]),
+});
+
+const diditWebhookSchema = z.object({
+  event_id: z.string().min(1).max(180),
+  webhook_type: z.string().min(1).max(80).default("status.updated"),
+  session_id: z.string().uuid().optional(),
+  status: z.string().min(1).max(40),
+  vendor_data: z.string().max(180).optional(),
+  metadata: z.record(z.unknown()).optional(),
+});
+
+app.post("/api/webhooks/didit", async (c) => {
+  if (!c.env.DIDIT_WEBHOOK_SECRET) return c.json({ error: "Didit webhook secret is not configured" }, 503);
+  const body = await c.req.text();
+  const signature = c.req.header("X-Signature-V2") ?? "";
+  const timestamp = c.req.header("X-Timestamp") ?? "";
+  if (!(await verifyDiditWebhook(c.env.DIDIT_WEBHOOK_SECRET, body, signature, timestamp))) return c.json({ error: "Invalid Didit webhook signature" }, 401);
+  const payload = diditWebhookSchema.parse(JSON.parse(body));
+  const inserted = await c.env.DB.prepare("INSERT OR IGNORE INTO didit_webhook_events (event_id, session_id, webhook_type, status) VALUES (?, ?, ?, ?)").bind(payload.event_id, payload.session_id ?? null, payload.webhook_type, payload.status).run();
+  if (!inserted.meta.changes) return c.json({ received: true, duplicate: true });
+  const sessionId = payload.session_id ?? null;
+  const contributorId = payload.vendor_data ?? (sessionId ? (await c.env.DB.prepare("SELECT contributor_id FROM contributor_verification_cases WHERE provider = 'didit' AND provider_case_id = ?").bind(sessionId).first<{ contributor_id: string }>())?.contributor_id : null);
+  if (!contributorId) return c.json({ received: true, ignored: true });
+  const caseRow = await c.env.DB.prepare("SELECT id, residency_region FROM contributor_verification_cases WHERE contributor_id = ? AND provider = 'didit' AND (? IS NULL OR provider_case_id = ?) ORDER BY updated_at DESC LIMIT 1").bind(contributorId, sessionId, sessionId).first<{ id: string; residency_region: "za" | "eu" }>();
+  if (!caseRow) return c.json({ received: true, ignored: true });
+  const normalized = payload.status.toLowerCase();
+  const caseStatus = normalized === "approved" ? "verified" : ["declined", "expired", "kyc expired", "abandoned"].includes(normalized) ? "rejected" : normalized === "in review" ? "in_review" : "pending";
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE contributor_verification_cases SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(caseStatus, caseRow.id),
+    c.env.DB.prepare("UPDATE seller_onboarding_profiles SET didit_status = ?, didit_provider_reference = COALESCE(?, didit_provider_reference), beneficial_owner_status = CASE WHEN beneficial_owner_required = 1 AND ? = 'verified' THEN 'verified' ELSE beneficial_owner_status END, updated_at = CURRENT_TIMESTAMP WHERE contributor_id = ?").bind(payload.status, sessionId, caseStatus, contributorId),
+    c.env.DB.prepare("UPDATE contributor_profiles SET identity_status = CASE WHEN ? = 'verified' THEN 'verified' WHEN ? = 'rejected' THEN 'rejected' ELSE 'submitted' END, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?").bind(caseStatus, caseStatus, contributorId),
+  ]);
+  const audit = await appendAuditEvent(c.env, {
+    streamId: `contributor:${contributorId}`,
+    actorId: "didit",
+    actorType: "service",
+    action: "verification.didit.updated",
+    resourceType: "verification_case",
+    resourceId: caseRow.id,
+    data: { eventId: payload.event_id, webhookType: payload.webhook_type, status: payload.status, sessionId },
+    residencyRegion: caseRow.residency_region,
+    actorResidencyRegion: caseRow.residency_region,
+  });
+  return c.json({ received: true, caseId: caseRow.id, status: caseStatus, auditEventId: audit.event.eventId });
 });
 
 async function verifyKycWebhook(secret: string, signature: string, body: string): Promise<boolean> {
@@ -2715,10 +3061,11 @@ const videoUploadSchema = z.object({ filename: z.string().trim().min(1).max(180)
 app.post("/api/video-uploads", async (c) => {
   const user = await requestUser(c);
   if (!user || !allowedRole(user, ["contributor", "editor", "admin"])) return c.json({ error: "Contributor authentication required" }, 401);
-  if (!c.env.STREAM_ACCOUNT_ID || !c.env.STREAM_API_TOKEN) return c.json({ error: "Cloudflare Stream direct upload is not configured" }, 503);
+  const streamApiToken = await resolveSecret(c.env.STREAM_API_TOKEN, c.env.STREAM_API_TOKEN_STORE);
+  if (!c.env.STREAM_ACCOUNT_ID || !streamApiToken) return c.json({ error: "Cloudflare Stream direct upload is not configured" }, 503);
   const payload = videoUploadSchema.parse(await c.req.json());
   const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${c.env.STREAM_ACCOUNT_ID}/stream/direct_upload`, {
-    method: "POST", headers: { Authorization: `Bearer ${c.env.STREAM_API_TOKEN}`, "Content-Type": "application/json" },
+    method: "POST", headers: { Authorization: `Bearer ${streamApiToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({ maxDurationSeconds: 3600, requireSignedURLs: true, allowedOrigins: (c.env.STREAM_ALLOWED_ORIGINS ?? "").split(",").map((origin) => origin.trim()).filter(Boolean), meta: { name: payload.filename, creatorId: user.id, organizationId: user.organizationId } }),
   });
   if (!response.ok) { logEvent("error", "stream.direct_upload_failed", c.get("trace"), { status: response.status }); return c.json({ error: "Stream could not create a direct upload" }, 503); }

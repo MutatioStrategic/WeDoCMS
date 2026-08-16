@@ -20,9 +20,10 @@ Veld Archive is a Cloudflare-native foundation for a trusted South African photo
 - Tenant-scoped saved searches with daily/weekly in-app alerts, privacy-thresholded trending searches, and explainable recommendations derived only from explicit saved searches and lightboxes.
 - Curator metadata governance pipeline: ingestion → AI tagging → curator correction → approval, with auditable metadata events.
 - Pre-checkout licence rules that cross-check approval, rights scope, and contributor model/property releases; invalid transactions return HTTP 422.
+- Seller listings capture an explicit artist licence (custom terms or an established licence with proof URL/version); the seller remains responsible for rights and enforcement.
 - Explainable search results showing match evidence, metadata fields used, separate confidence signals, and human verification status.
 - Confidence-prioritized editorial review queue with server-side metadata safety checks that reject stereotype or identity-inference labels.
-- Vendor-neutral payout and DAM integration layer with Stripe Connect, South African bank, mobile-money, SEPA, Adobe Experience Manager, and Bynder adapters.
+- Paystack marketplace-split settlement for approved artists (with legacy payout adapters retained behind explicit provider configuration). The artist keeps copyright; WeDoCMS is the listing and checkout intermediary.
 - Optional verification-document OCR using Cloudflare Workers AI's `@cf/moondream/moondream3.1-9B-A2B`; OCR output is assistive, masks full identity/bank numbers, and always requires human/KYC-provider review.
 - Photo AI pipeline: image upload → queued Workers AI visual metadata/OCR → seller/editor correction and approval → one-time embedding → Vectorize upsert. Buyer searches query the stored vectors and never OCR-scan the repository.
 - Idempotent `photo_ai_jobs` records, queue retries/dead-letter handling, scheduled recovery, vector deletion for rejected photos, and an admin re-index endpoint (`POST /api/admin/photo-index/rebuild`).
@@ -50,11 +51,13 @@ npm run worker:dev
 
 `npm run worker:deploy` is production-only and refuses to deploy the root development bindings. It runs the production bundle gate and requires a dedicated `env.production` block with `APP_ENV=production` and no demo, localhost, or placeholder values. Use `npm run worker:deploy:development` only for an intentional non-production Worker.
 
-### Auth0 Organizations
+### Auth0 and Supabase identity
 
-Auth0 is the recommended production identity provider for this marketplace. Configure an Auth0 SPA application with Authorization Code + PKCE, enable Organizations, and configure the API to issue RS256 access tokens. Set `VITE_AUTH0_DOMAIN`, `VITE_AUTH0_CLIENT_ID`, `VITE_AUTH0_AUDIENCE`, and the optional `VITE_AUTH0_ORGANIZATION` for the frontend. Set `AUTH_JWKS_URL`, `AUTH_ISSUER`, `AUTH_AUDIENCE`, and `AUTH_ROLES_CLAIM` as Worker variables. Register the deployed app URL as an allowed callback, logout, and web-origin URL in Auth0.
+Auth0 and Supabase can run together. Configure an Auth0 SPA application with Authorization Code + PKCE and a custom API that issues RS256 access tokens. Set `VITE_AUTH0_DOMAIN`, `VITE_AUTH0_CLIENT_ID`, `VITE_AUTH0_AUDIENCE`, and the optional `VITE_AUTH0_ORGANIZATION` for the frontend. Set `AUTH_JWKS_URL`, `AUTH_ISSUER`, `AUTH_AUDIENCE`, and `AUTH_ROLES_CLAIM` as Worker variables. The tenant Management API (`https://<tenant>/api/v2/`) is not the application API audience and must not be requested by the SPA. Register the deployed app URL as an allowed callback, logout, and web-origin URL in Auth0.
 
-The Worker verifies the Auth0 token against the tenant JWKS and creates the existing HttpOnly session. Pre-provision each Auth0 Organization ID in D1 before allowing membership exchange; keep `AUTH_ALLOW_ORG_PROVISIONING=false` in production. Auth0 owns identity, organisation membership, and sign-in roles. D1 remains the source of truth for credits, licence ownership, ledger entries, and payment state.
+For Supabase, set `VITE_SUPABASE_URL` and the public `VITE_SUPABASE_ANON_KEY` in the SPA environment, then set `SUPABASE_URL`, `AUTH_PROVIDER=both`, and either an explicit `SUPABASE_JWKS_URL` for asymmetric signing or the `SUPABASE_JWT_SECRET` Wrangler secret for this project’s current legacy HS256 signing. Supabase email/password signup, email confirmation, login, and session refresh are handled by the Supabase client; the Worker verifies the Supabase JWT and exchanges it for the same application session. The anon key is safe for browser use; never put a Supabase service-role key in the client or Worker.
+
+The Worker verifies external tokens against the configured issuer/JWKS, retrieves the Auth0 `openid profile email` UserInfo profile when configured, and creates the existing HttpOnly session. Supabase identities are namespaced in `auth_subject` to prevent cross-provider collisions. For a single-organisation deployment, pre-provision `DEFAULT_ORGANIZATION_ID`; a browser-supplied organization ID is accepted only when it matches a signed claim or that configured default. Keep `AUTH_ALLOW_ORG_PROVISIONING=false` in production. The identity provider owns sign-in; D1 remains the source of truth for application roles, organization memberships, credits, licence ownership, ledger entries, and payment state. D1 `auth_security_events` records provider, outcome, subject hash context, and bounded request metadata; high-risk events are also emitted to Worker Logs and Analytics Engine.
 
 Apply the initial database migration with Wrangler after replacing the D1 ID in `wrangler.jsonc`:
 
@@ -93,6 +96,7 @@ Apply subsequent migrations in order as well; `0004_explainability_safety.sql` a
 2. Create the R2 bucket `veld-archive-media`.
 3. Create `veld-archive-audit-za` and `veld-archive-kyc-za` under the approved South African residency policy. Create `veld-archive-audit-eu` and `veld-archive-kyc-eu` with the `eu` R2 jurisdiction for EU subjects. R2 jurisdiction is immutable after bucket creation; confirm the account's data-location controls before production.
 4. Generate an Ed25519 signing keypair and store the private/public JWKs as Worker secrets: `wrangler secret put AUDIT_SIGNING_PRIVATE_JWK`, `wrangler secret put AUDIT_SIGNING_PUBLIC_JWK`, and `wrangler secret put KYC_WEBHOOK_SECRET`.
+5. For seller onboarding, create one Didit KYC workflow (individual/sole proprietor) and one KYB workflow (registered company), configure phone/email, ID/passport, liveness and any risk checks required by your payment/legal classification, then store `DIDIT_API_KEY`, `DIDIT_WEBHOOK_SECRET`, `DIDIT_KYC_WORKFLOW_ID`, and `DIDIT_KYB_WORKFLOW_ID`. Register `POST /api/webhooks/didit` as the Didit webhook destination. Didit returns a hosted URL; the Worker stores only the session ID, status, and provider reference.
 5. Create a Turnstile widget for the development and production hostnames.
 6. Store the Turnstile secret with `wrangler secret put TURNSTILE_SECRET`.
 7. Replace the development `TURNSTILE_HOSTNAMES` value for production.
@@ -124,7 +128,7 @@ The code is deployable as a staged foundation, but these external controls must 
 - Configure Cloudflare Stream direct creator uploads, signed playback, and provider status mapping. Webhook verification is implemented; provider provisioning is not.
 - Optionally provision the Workers AI binding, the `veld-archive-photo-index` Vectorize index, and both photo queues. Search remains deterministic without AI; when enabled, it embeds only the buyer's query and retrieves approved photo IDs from Vectorize, while image OCR/vision runs only from upload/approval jobs.
 - OCR is separately opt-in. It stays unavailable with a `503` response until both `OCR_ENABLED=true` and an `AI` binding are configured. The model is pinned by `OCR_MODEL`; callers cannot select arbitrary models.
-- Register a payment provider and payout rail, then connect checkout state transitions to verified webhooks and the double-entry ledger. Adapter contracts and tests are present; no fake payment is treated as paid.
+- Configure Paystack checkout and a verified artist subaccount. The payment session sends the agreed percentage split to Paystack, records the allocation, and only activates a licence after the signed webhook is reconciled. See `docs/marketplace-terms.md` and `IMPORTANT.md`; no fake payment is treated as paid.
 - Configure Turnstile, audit signing keys, KYC provider secrets, WAF/rate limits, CSP, and production environment-specific bindings.
 - As an admin, call `GET /api/ops/readiness` after provisioning. Do not promote the release until every check reports `ready: true`; WAF, key rotation, and restore drills require dated attestations after live verification.
 

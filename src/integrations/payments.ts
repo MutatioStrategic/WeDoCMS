@@ -9,6 +9,11 @@ export type PaymentSessionRequest = {
   successUrl: string;
   cancelUrl: string;
   metadata?: Record<string, string>;
+  split?: {
+    type: "percentage";
+    bearerType: "account" | "subaccount";
+    subaccounts: Array<{ subaccount: string; share: number }>;
+  };
 };
 
 export type PaymentSession = {
@@ -75,6 +80,11 @@ export class JsonPaymentAdapter implements PaymentProvider {
         successUrl: request.successUrl,
         cancelUrl: request.cancelUrl,
         metadata: request.metadata,
+        split: request.split ? {
+          type: request.split.type,
+          bearer_type: request.split.bearerType,
+          subaccounts: request.split.subaccounts,
+        } : undefined,
       }),
     });
     const value = await readJson<JsonPaymentResponse>(response, this.provider);
@@ -120,6 +130,11 @@ export class PaystackPaymentAdapter implements PaymentProvider {
           buyerId: request.buyer.id,
           cancel_action: request.cancelUrl,
         },
+        split: request.split ? {
+          type: request.split.type,
+          bearer_type: request.split.bearerType,
+          subaccounts: request.split.subaccounts,
+        } : undefined,
       }),
     });
     const value = await readJson<PaystackInitializeResponse>(response, this.provider);

@@ -95,4 +95,24 @@ describe("PaystackPaymentAdapter", () => {
       cancelUrl: "https://app.example/cancel",
     })).rejects.toThrow("authorization URL");
   });
+
+  it("sends the configured artist percentage as a Paystack split", async () => {
+    let request: Request | undefined;
+    const adapter = new PaystackPaymentAdapter({
+      endpoint: "https://api.paystack.co/transaction/initialize",
+      secretKey: "test-secret",
+      fetcher: async (input, init) => { request = new Request(input, init); return new Response(JSON.stringify({ status: true, data: { authorization_url: "https://checkout.paystack.com/access", reference: "licence-2" } })); },
+    });
+    await adapter.createCheckoutSession({
+      idempotencyKey: "licence:12345678",
+      licenceId: "licence-2",
+      amountCents: 10000,
+      currency: "ZAR",
+      buyer: { id: "buyer-1", email: "buyer@example.com" },
+      successUrl: "https://app.example/success",
+      cancelUrl: "https://app.example/cancel",
+      split: { type: "percentage", bearerType: "account", subaccounts: [{ subaccount: "ACCT_artist", share: 60 }] },
+    });
+    expect(await request?.json()).toMatchObject({ split: { type: "percentage", bearer_type: "account", subaccounts: [{ subaccount: "ACCT_artist", share: 60 }] } });
+  });
 });

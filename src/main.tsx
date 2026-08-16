@@ -1,10 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Auth0Provider, useAuth0, type Auth0ContextInterface } from "@auth0/auth0-react";
+import { createClient, type Session as SupabaseSession, type SupabaseClient } from "@supabase/supabase-js";
 import { archiveDomain, type AccountLifecycle, type Asset, type BuyerAnalytics, type CommunityOverview, type ContributorAnalytics, type ContributorPerformance, type CreatorProfile, type DiscoveryResponse, type LicenceProduct, type LicenceType, type MonetizationModel, type PortfolioCollection, type SavedSearch, type SearchResponse, type TakedownReason, type UserLightbox, type WorkflowStage } from "./shared";
 import "./styles.css";
 import { CommunityWorkspace } from "./community";
 import { StudioWorkspace } from "./studio";
+import { RightsGuide } from "./rights-guide";
 import type { BrandKit, CampaignBrief, CampaignPlatform, CampaignRecommendation, CampaignStage } from "./campaign-intelligence";
 import { cropPresets, defaultEditRecipe, derivativeForPreset, fitCrop, safeZonePercent, type CropPreset, type EditRecipe } from "./campaign-editor";
 
@@ -25,7 +27,7 @@ function TurnstileChallenge({ onToken }: { onToken: (token: string) => void }) {
   return <div ref={ref} aria-label="Bot protection challenge" />;
 }
 
-type View = "explore" | "campaigns" | "contributors" | "contributor" | "buyer" | "review" | "governance" | "community" | "account" | "studio";
+type View = "explore" | "campaigns" | "contributors" | "contributor" | "buyer" | "review" | "governance" | "community" | "account" | "studio" | "rights";
 type SessionUser = { id: string; email: string; displayName: string; role: string; organizationId: string; organizationName: string };
 type AppNotification = { id: string; type: string; title: string; body: string; resource_type?: string | null; resource_id?: string | null; read_at?: string | null; created_at: string };
 type Auth0Bridge = Pick<Auth0ContextInterface, "isAuthenticated" | "isLoading" | "getAccessTokenSilently" | "loginWithRedirect" | "logout">;
@@ -35,6 +37,11 @@ const auth0ClientId = (import.meta.env.VITE_AUTH0_CLIENT_ID as string | undefine
 const auth0Audience = (import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined)?.trim();
 const auth0Organization = (import.meta.env.VITE_AUTH0_ORGANIZATION as string | undefined)?.trim();
 const auth0Configured = Boolean(auth0Domain && auth0ClientId);
+const auth0Scopes = "openid profile email";
+const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.trim();
+const supabaseAnonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
+const supabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey && !supabaseUrl.startsWith("replace-") && !supabaseAnonKey.startsWith("replace-"));
+const supabaseClient: SupabaseClient | undefined = supabaseConfigured ? createClient(supabaseUrl!, supabaseAnonKey!, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } }) : undefined;
 const emptyDiscovery: DiscoveryResponse = { trending: [], savedSearches: [], recommendations: [], personalized: false };
 
 const demoAssets: Asset[] = [
@@ -53,7 +60,7 @@ function filterDemoAssets(query: string, kind: "all" | "image" | "video"): Asset
   });
 }
 
-function App({ auth0 }: { auth0?: Auth0Bridge }) {
+function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClient }) {
   const [view, setView] = useState<View>("explore");
   const [query, setQuery] = useState("");
   const [activeQuery, setActiveQuery] = useState("");
@@ -71,7 +78,13 @@ function App({ auth0 }: { auth0?: Auth0Bridge }) {
   const [discovery, setDiscovery] = useState<DiscoveryResponse>(emptyDiscovery);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [devRole, setDevRole] = useState<"contributor" | "admin">("contributor");
+  const [supabaseAuthOpen, setSupabaseAuthOpen] = useState(false);
+  const [supabaseAuthMode, setSupabaseAuthMode] = useState<"signin" | "signup">("signin");
+  const [supabaseEmail, setSupabaseEmail] = useState("");
+  const [supabasePassword, setSupabasePassword] = useState("");
+  const [supabaseAuthBusy, setSupabaseAuthBusy] = useState(false);
   const authExchangeAttempted = React.useRef(false);
+  const supabaseExchangeAttempted = React.useRef(false);
 
   const api = useCallback((path: string, init: RequestInit = {}) => fetch(path, { ...init, credentials: "include", headers: { ...(init.body ? { "Content-Type": "application/json" } : {}), ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}), ...(init.headers ?? {}) } }), [csrfToken]);
 
@@ -92,7 +105,7 @@ function App({ auth0 }: { auth0?: Auth0Bridge }) {
     if (authExchangeAttempted.current) return undefined;
     authExchangeAttempted.current = true;
     let active = true;
-    void auth0.getAccessTokenSilently({ authorizationParams: auth0Audience ? { audience: auth0Audience } : undefined })
+    void auth0.getAccessTokenSilently({ authorizationParams: { scope: auth0Scopes, ...(auth0Audience ? { audience: auth0Audience } : {}) } })
       .then((token) => fetch("/api/auth/exchange", {
         method: "POST",
         credentials: "include",
@@ -115,6 +128,50 @@ function App({ auth0 }: { auth0?: Auth0Bridge }) {
       });
     return () => { active = false; };
   }, [auth0?.getAccessTokenSilently, auth0?.isAuthenticated, auth0?.isLoading]);
+
+  const exchangeSupabaseSession = useCallback(async (session: SupabaseSession | null): Promise<void> => {
+    if (!session?.access_token || supabaseExchangeAttempted.current) return;
+    supabaseExchangeAttempted.current = true;
+    try {
+      const response = await fetch("/api/auth/exchange", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` }, body: "{}" });
+      if (!response.ok) throw new Error("Identity exchange failed");
+      const data = await response.json() as { user: SessionUser; csrfToken: string };
+      setSessionUser(data.user);
+      setCsrfToken(data.csrfToken);
+      setSupabaseAuthOpen(false);
+      setSupabasePassword("");
+      setNotice(`Signed in to ${data.user.organizationName} with Supabase.`);
+    } catch {
+      supabaseExchangeAttempted.current = false;
+      setNotice("Supabase sign-in succeeded, but this account is not connected to a provisioned organisation.");
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!supabase) return undefined;
+    let active = true;
+    void supabase.auth.getSession().then(({ data }) => { if (active) void exchangeSupabaseSession(data.session); });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => { if (active) void exchangeSupabaseSession(session); });
+    return () => { active = false; listener.subscription.unsubscribe(); };
+  }, [exchangeSupabaseSession, supabase]);
+
+  async function submitSupabaseAuth(event: React.FormEvent): Promise<void> {
+    event.preventDefault();
+    if (!supabase) return;
+    setSupabaseAuthBusy(true);
+    try {
+      const result = supabaseAuthMode === "signup"
+        ? await supabase.auth.signUp({ email: supabaseEmail.trim(), password: supabasePassword, options: { emailRedirectTo: window.location.origin, data: { display_name: supabaseEmail.trim().split("@")[0] } } })
+        : await supabase.auth.signInWithPassword({ email: supabaseEmail.trim(), password: supabasePassword });
+      if (result.error) throw result.error;
+      if (result.data.session) await exchangeSupabaseSession(result.data.session);
+      else setNotice("Check your email to confirm the Supabase account, then sign in here.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Supabase authentication failed.");
+    } finally {
+      setSupabaseAuthBusy(false);
+    }
+  }
 
   useEffect(() => {
     if (!sessionUser) { setLightboxes([]); return; }
@@ -254,24 +311,26 @@ function App({ auth0 }: { auth0?: Auth0Bridge }) {
   return <div className="app-shell">
     <header className="topbar">
       <button className="wordmark wordmark-button" onClick={() => navigate("explore")} aria-label="Veld Archive home"><span className="mark">V</span><span>veld<span className="muted">archive</span></span></button>
-      <nav className="nav-links" aria-label="Primary navigation"><button onClick={() => navigate("explore")}>Explore</button><button className="campaign-nav" onClick={() => navigate("campaigns")}>Campaigns <span>3A</span></button><button onClick={() => navigate("contributors")}>Creators</button><button onClick={() => navigate("community")}>Community & collections</button><button className="studio-nav-link" onClick={() => navigate("studio")}>Media studio <span>NEW</span></button><button onClick={() => navigate("contributor")}>Contributor insights</button><button onClick={() => navigate("buyer")}>Buyer ROI</button><button onClick={() => navigate("review")}>Editorial review</button><button className="governance-link" onClick={() => navigate("governance")}>Governance <span>NEW</span></button></nav>
-      <div className="top-actions">{import.meta.env.DEV && !auth0 && <label className="role-switcher">Local role <select value={devRole} onChange={(event) => setDevRole(event.target.value as "contributor" | "admin")}><option value="contributor">Contributor</option><option value="admin">Admin</option></select></label>}<button className="ghost-button" onClick={async () => { if (auth0) { await auth0.loginWithRedirect({ authorizationParams: { ...(auth0Audience ? { audience: auth0Audience } : {}), ...(auth0Organization ? { organization: auth0Organization } : {}) } }); return; } if (!import.meta.env.DEV) { setNotice("Auth0 is not configured for this deployment."); return; } const response = await fetch("/api/auth/dev-login", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role: devRole }) }); if (!response.ok) { setNotice("Local authentication is unavailable; apply the identity migration first."); return; } const data = await response.json() as { user: SessionUser; csrfToken: string }; setSessionUser(data.user); setCsrfToken(data.csrfToken); setNotice(`Signed in to ${data.user.organizationName}.`); }}>{auth0 ? "Sign in with Auth0" : "Sign in"}</button>{sessionUser && <><button className="ghost-button" onClick={() => navigate("account")}>Account</button><button className="ghost-button" onClick={() => { void api("/api/auth/logout", { method: "POST" }).then(() => { setSessionUser(null); setCsrfToken(""); setNotice("Signed out."); if (auth0) auth0.logout({ logoutParams: { returnTo: window.location.origin } }); }); }}>Sign out</button></>}</div>
+      <nav className="nav-links" aria-label="Primary navigation"><button onClick={() => navigate("explore")}>Explore</button><button className="rights-nav-link" onClick={() => navigate("rights")}>Rights guide <span>NEW</span></button><button className="campaign-nav" onClick={() => navigate("campaigns")}>Campaigns <span>3A</span></button><button onClick={() => navigate("contributors")}>Creators</button><button onClick={() => navigate("community")}>Community & collections</button><button className="studio-nav-link" onClick={() => navigate("studio")}>Media studio <span>NEW</span></button><button onClick={() => navigate("contributor")}>Contributor insights</button><button onClick={() => navigate("buyer")}>Buyer ROI</button><button onClick={() => navigate("review")}>Editorial review</button><button className="governance-link" onClick={() => navigate("governance")}>Governance <span>NEW</span></button></nav>
+      <div className="top-actions">{import.meta.env.DEV && !auth0 && !supabase && <label className="role-switcher">Local role <select value={devRole} onChange={(event) => setDevRole(event.target.value as "contributor" | "admin")}><option value="contributor">Contributor</option><option value="admin">Admin</option></select></label>}<button className="ghost-button" onClick={async () => { if (auth0) { await auth0.loginWithRedirect({ authorizationParams: { ...(auth0Audience ? { audience: auth0Audience } : {}), ...(auth0Organization ? { organization: auth0Organization } : {}) } }); return; } if (supabase) { setSupabaseAuthOpen(true); return; } if (!import.meta.env.DEV) { setNotice("An external identity provider is not configured for this deployment."); return; } const response = await fetch("/api/auth/dev-login", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role: devRole }) }); if (!response.ok) { setNotice("Local authentication is unavailable; apply the identity migration first."); return; } const data = await response.json() as { user: SessionUser; csrfToken: string }; setSessionUser(data.user); setCsrfToken(data.csrfToken); setNotice(`Signed in to ${data.user.organizationName}.`); }}>{auth0 ? "Sign in with Auth0" : supabase ? "Sign in with Supabase" : "Sign in"}</button>{sessionUser && <><button className="ghost-button" onClick={() => navigate("account")}>Account</button><button className="ghost-button" onClick={() => { void api("/api/auth/logout", { method: "POST" }).then(() => { setSessionUser(null); setCsrfToken(""); setNotice("Signed out."); if (auth0) auth0.logout({ logoutParams: { returnTo: window.location.origin } }); if (supabase) void supabase.auth.signOut(); }); }}>Sign out</button></>}</div>
     </header>
+    {supabase && supabaseAuthOpen && !sessionUser && <section className="auth-panel" aria-label="Supabase authentication"><div><span className="section-kicker">SUPABASE AUTH</span><h2>{supabaseAuthMode === "signup" ? "Create your archive account." : "Welcome back."}</h2><p>Email/password authentication is handled by Supabase; Veld receives only the verified access token.</p></div><form onSubmit={(event) => void submitSupabaseAuth(event)}><label>Email<input type="email" autoComplete="email" required value={supabaseEmail} onChange={(event) => setSupabaseEmail(event.target.value)} /></label><label>Password<input type="password" autoComplete={supabaseAuthMode === "signup" ? "new-password" : "current-password"} minLength={8} required value={supabasePassword} onChange={(event) => setSupabasePassword(event.target.value)} /></label><div className="modal-actions"><button type="submit" className="dark-button" disabled={supabaseAuthBusy}>{supabaseAuthBusy ? "Working…" : supabaseAuthMode === "signup" ? "Create account" : "Sign in"}</button><button type="button" className="ghost-button" onClick={() => setSupabaseAuthMode((mode) => mode === "signup" ? "signin" : "signup")}>{supabaseAuthMode === "signup" ? "Use existing account" : "Create an account"}</button><button type="button" className="ghost-button" onClick={() => setSupabaseAuthOpen(false)}>Close</button></div></form></section>}
     {sessionUser && <details className="notification-center"><summary>Alerts {notifications.some((item) => !item.read_at) && <span>{notifications.filter((item) => !item.read_at).length}</span>}</summary><div><strong>In-app alerts</strong>{notifications.length ? notifications.slice(0, 8).map((item) => <article className={item.read_at ? "read" : ""} key={item.id}><h3>{item.title}</h3><p>{item.body}</p><small>{new Date(item.created_at).toLocaleDateString("en-ZA")}</small>{!item.read_at && <button type="button" onClick={() => void markNotificationRead(item.id)}>Mark read</button>}</article>) : <p>No alerts yet. Saved-search matches will appear here.</p>}</div></details>}
     {!analyticsConsent && <button className="privacy-consent" onClick={() => setAnalyticsConsent(true)}>Allow anonymous demand insights</button>}
 
     {view === "explore" && <ExploreView query={query} setQuery={setQuery} runSearch={runSearch} assets={assets} filter={filter} setFilter={setFilter} sort={sort} setSort={setSort} orientation={orientation} setOrientation={setOrientation} verifiedCount={verifiedCount} notice={notice} onOpen={openAsset} authenticated={Boolean(sessionUser)} discovery={discovery} onUseQuery={useDiscoveryQuery} onSaveSearch={saveCurrentSearch} onDeleteSearch={deleteSavedSearch} />}
     {view === "campaigns" && <CampaignWorkspace api={api} onNotice={setNotice} onOpen={openAsset} />}
     {view === "contributors" && <CreatorMarketplace onOpen={openAsset} />}
-    {view === "contributor" && <><AnalyticsDashboard role="contributor" /><ContributorWorkspace api={api} onNotice={setNotice} /></>}
+     {view === "contributor" && <><AnalyticsDashboard role="contributor" /><MarketplaceLegalDocuments api={api} /><SellerVerificationPanel api={api} onNotice={setNotice} /><ContributorWorkspace api={api} onNotice={setNotice} /></>}
     {view === "buyer" && <AnalyticsDashboard role="buyer" />}
     {view === "review" && <ReviewWorkspace items={reviewItems} api={api} onNotice={setNotice} onReload={loadReviewQueue} />}
-    {view === "governance" && <GovernanceWorkspace api={api} onNotice={setNotice} />}
+    {view === "governance" && <><MarketplaceLegalDocuments api={api} /><GovernanceWorkspace api={api} onNotice={setNotice} /></>}
     {view === "community" && <CommunityWorkspace api={api} onNotice={setNotice} />}
     {view === "account" && <AccountWorkspace api={api} auth0={auth0} onNotice={setNotice} />}
     {view === "studio" && <StudioWorkspace assets={assets} onNotice={setNotice} />}
+    {view === "rights" && <RightsGuide />}
 
-    <footer><button className="wordmark wordmark-button" onClick={() => navigate("explore")}><span className="mark">V</span><span>veld<span className="muted">archive</span></span></button><span>© 2026 Veld Archive · South Africa</span><span>Context before category.</span></footer>
+    <footer><button className="wordmark wordmark-button" onClick={() => navigate("explore")}><span className="mark">V</span><span>veld<span className="muted">archive</span></span></button><button className="footer-guide-link" onClick={() => navigate("rights")}>Rights guide ↗</button><span>© 2026 Veld Archive · South Africa</span><span>Context before category.</span></footer>
     {selectedAsset && <AssetModal asset={selectedAsset} onClose={() => setSelectedAsset(null)} onNotice={setNotice} authenticated={Boolean(sessionUser)} lightboxes={lightboxes} onCreateLightbox={createLightbox} onSaveToLightbox={saveToLightbox} />}
   </div>;
 }
@@ -708,6 +767,7 @@ function GovernanceWorkspace({ api, onNotice }: { api: (path: string, init?: Req
   const [selectedId, setSelectedId] = useState("");
   const [stage, setStage] = useState<WorkflowStage | "all">("all");
   const [licenceType, setLicenceType] = useState<LicenceType>("commercial");
+  const [buyerTermsAccepted, setBuyerTermsAccepted] = useState(false);
   const selected = items.find((item) => item.id === selectedId) ?? items[0];
   const visible = stage === "all" ? items : items.filter((item) => item.workflowStage === stage);
   const validation = selected ? archiveDomain.evaluateLicenceRequest(selected, { assetId: selected.id, licenceType, territory: "Worldwide", durationDays: 365 }) : null;
@@ -737,14 +797,17 @@ function GovernanceWorkspace({ api, onNotice }: { api: (path: string, init?: Req
   async function checkout() {
     if (!selected || !validation) return;
     if (selected.monetizationModel === "custom_quote") { onNotice("Custom quote selected. No payment was created; contact the contributor for pricing."); return; }
-    try { const response = await api("/api/checkout", { method: "POST", body: JSON.stringify({ assetId: selected.id, licenceType, territory: "Worldwide", durationDays: 365 }) }); if (!response.ok) throw new Error(); onNotice("Checkout opened: all release rules passed."); }
+    const accepted = buyerTermsAccepted || window.confirm("Please read the Buyer Licence and Payment Terms shown on this page. Continue only if you accept the selected licence, Paystack payment split disclosure, and limited rights-enforcement disclosure.");
+    if (!accepted) return;
+    setBuyerTermsAccepted(true);
+    try { const response = await api("/api/checkout", { method: "POST", body: JSON.stringify({ assetId: selected.id, licenceType, territory: "Worldwide", durationDays: 365, buyerAgreementVersion: "buyer-marketplace-v1", acceptBuyerTerms: accepted }) }); if (!response.ok) throw new Error(); onNotice("Licence created. Paystack will process the buyer payment and split the agreed seller percentage at checkout."); }
     catch { onNotice(validation.allowed ? "Checkout could not be opened. Payment was not created." : `Checkout blocked: ${validation.blockingReasons[0]}`); }
   }
 
-  return <main className="governance-page"><div className="governance-intro"><div><span className="section-kicker">CURATOR OPERATIONS / METADATA GOVERNANCE</span><h1>Review what the model <em>cannot know.</em></h1><p>Assets move from source file to licensable record through an explicit, auditable chain.</p></div><div className="governance-summary"><strong>{items.filter((item) => item.workflowStage !== "approval").length}</strong><span>assets need human attention</span></div></div><div className="governance-pipeline"><button className={stage === "all" ? "active" : ""} onClick={() => setStage("all")}><b>00</b><span>All assets<small>Full pipeline</small></span><strong>{items.length}</strong></button>{(["ingestion", "ai_tagging", "curator_correction", "approval"] as WorkflowStage[]).map((value, index) => <React.Fragment key={value}><i>→</i><button className={stage === value ? "active" : ""} onClick={() => setStage(value)}><b>0{index + 1}</b><span>{value === "ai_tagging" ? "AI tagging" : value === "curator_correction" ? "Curator correction" : value[0].toUpperCase() + value.slice(1)}<small>{items.filter((item) => item.workflowStage === value).length} records</small></span><strong>{items.filter((item) => item.workflowStage === value).length}</strong></button></React.Fragment>)}</div><div className="governance-grid"><div className="governance-queue"><div className="governance-queue-heading"><span className="section-kicker">REVIEW QUEUE</span><span>{visible.length} records</span></div>{visible.map((item) => <button key={item.id} className={`governance-item ${item.id === selected?.id ? "selected" : ""}`} onClick={() => setSelectedId(item.id)}><div className={`governance-thumb ${item.kind}`}><span>{item.kind === "video" ? "▶" : "V"}</span></div><div><small>{item.workflowStage === "curator_correction" ? "Needs correction" : item.workflowStage === "ai_tagging" ? "AI tagging" : item.workflowStage === "approval" ? "Approved" : "Ingestion"}</small><strong>{item.title}</strong><span>{item.contributor} · {item.city ?? item.country}</span></div><i className={item.humanVerified ? "verified" : ""}></i></button>)}</div>{selected && <GovernanceDetail asset={selected} licenceType={licenceType} setLicenceType={setLicenceType} validation={validation!} onAction={action} onCheckout={checkout} />}</div></main>;
+  return <main className="governance-page"><div className="governance-intro"><div><span className="section-kicker">CURATOR OPERATIONS / METADATA GOVERNANCE</span><h1>Review what the model <em>cannot know.</em></h1><p>Assets move from source file to licensable record through an explicit, auditable chain.</p></div><div className="governance-summary"><strong>{items.filter((item) => item.workflowStage !== "approval").length}</strong><span>assets need human attention</span></div></div><div className="governance-pipeline"><button className={stage === "all" ? "active" : ""} onClick={() => setStage("all")}><b>00</b><span>All assets<small>Full pipeline</small></span><strong>{items.length}</strong></button>{(["ingestion", "ai_tagging", "curator_correction", "approval"] as WorkflowStage[]).map((value, index) => <React.Fragment key={value}><i>→</i><button className={stage === value ? "active" : ""} onClick={() => setStage(value)}><b>0{index + 1}</b><span>{value === "ai_tagging" ? "AI tagging" : value === "curator_correction" ? "Curator correction" : value[0].toUpperCase() + value.slice(1)}<small>{items.filter((item) => item.workflowStage === value).length} records</small></span><strong>{items.filter((item) => item.workflowStage === value).length}</strong></button></React.Fragment>)}</div><div className="governance-grid"><div className="governance-queue"><div className="governance-queue-heading"><span className="section-kicker">REVIEW QUEUE</span><span>{visible.length} records</span></div>{visible.map((item) => <button key={item.id} className={`governance-item ${item.id === selected?.id ? "selected" : ""}`} onClick={() => setSelectedId(item.id)}><div className={`governance-thumb ${item.kind}`}><span>{item.kind === "video" ? "▶" : "V"}</span></div><div><small>{item.workflowStage === "curator_correction" ? "Needs correction" : item.workflowStage === "ai_tagging" ? "AI tagging" : item.workflowStage === "approval" ? "Approved" : "Ingestion"}</small><strong>{item.title}</strong><span>{item.contributor} · {item.city ?? item.country}</span></div><i className={item.humanVerified ? "verified" : ""}></i></button>)}</div>{selected && <GovernanceDetail asset={selected} licenceType={licenceType} setLicenceType={setLicenceType} validation={validation!} onAction={action} onCheckout={checkout} buyerTermsAccepted={buyerTermsAccepted} setBuyerTermsAccepted={setBuyerTermsAccepted} />}</div></main>;
 }
 
-function GovernanceDetail({ asset, licenceType, setLicenceType, validation, onAction, onCheckout }: { asset: Asset; licenceType: LicenceType; setLicenceType: (value: LicenceType) => void; validation: ReturnType<typeof archiveDomain.evaluateLicenceRequest>; onAction: (name: "run_ai_tagging" | "save_correction" | "approve", updates?: Partial<Asset>) => void; onCheckout: () => void }) {
+function GovernanceDetail({ asset, licenceType, setLicenceType, validation, onAction, onCheckout, buyerTermsAccepted, setBuyerTermsAccepted }: { asset: Asset; licenceType: LicenceType; setLicenceType: (value: LicenceType) => void; validation: ReturnType<typeof archiveDomain.evaluateLicenceRequest>; onAction: (name: "run_ai_tagging" | "save_correction" | "approve", updates?: Partial<Asset>) => void; onCheckout: () => void; buyerTermsAccepted: boolean; setBuyerTermsAccepted: (value: boolean) => void }) {
   const [title, setTitle] = useState(asset.title);
   const [caption, setCaption] = useState(asset.caption);
   const [notes, setNotes] = useState(asset.curatorNotes);
@@ -775,16 +838,51 @@ function GovernanceDetail({ asset, licenceType, setLicenceType, validation, onAc
 
 function Evidence({ label, status }: { label: string; status: Asset["modelReleaseStatus"] }) { return <div className="evidence-row"><span className={`evidence-icon ${status}`}>{status === "verified" ? "✓" : status === "pending" ? "!" : "—"}</span><span><strong>{label}</strong><small>{status === "verified" ? "Document verified" : status === "not_required" ? "Not required" : status === "pending" ? "Evidence needs review" : "No document attached"}</small></span><b>{status.replace("_", " ")}</b></div>; }
 
-function AssetPricingFields({ asset, setAsset }: { asset: { monetizationModel: MonetizationModel; licensePriceZar: string }; setAsset: (asset: any) => void }) {
-  return <div className="asset-pricing-fields"><label>How should this asset be sold?<select value={asset.monetizationModel} onChange={(event) => setAsset({ ...asset, monetizationModel: event.target.value as MonetizationModel })}><option value="membership">Membership access</option><option value="individual_license">Sell an individual licence</option><option value="custom_quote">Custom quote for premium work</option></select></label>{asset.monetizationModel === "individual_license" && <label>Annual licence price (ZAR)<input required min="1" step="0.01" type="number" value={asset.licensePriceZar} onChange={(event) => setAsset({ ...asset, licensePriceZar: event.target.value })} placeholder="e.g. 2500" /><small className="field-help">Your price is used for a standard one-year licence. Rights and releases still need editorial approval.</small></label>}{asset.monetizationModel === "custom_quote" && <small className="field-help">Buyers will be asked to contact you for a bespoke price instead of checking out immediately.</small>}</div>;
+function AssetPricingFields({ asset, setAsset }: { asset: { monetizationModel: MonetizationModel; licensePriceZar: string; artistLicenseKey: string; artistLicenseUrl: string; artistLicenseTerms: string }; setAsset: (asset: any) => void }) {
+  return <div className="asset-pricing-fields"><label>How should this asset be sold?<select value={asset.monetizationModel} onChange={(event) => setAsset({ ...asset, monetizationModel: event.target.value as MonetizationModel })}><option value="membership">Membership access</option><option value="individual_license">Sell an individual licence</option><option value="custom_quote">Custom quote for premium work</option></select></label>{asset.monetizationModel === "individual_license" && <label>Annual licence price (ZAR)<input required min="1" step="0.01" type="number" value={asset.licensePriceZar} onChange={(event) => setAsset({ ...asset, licensePriceZar: event.target.value })} placeholder="e.g. 2500" /><small className="field-help">Your price is used for a standard one-year licence. Rights and releases still need editorial approval.</small></label>}<label>Artist licence<select value={asset.artistLicenseKey} onChange={(event) => setAsset({ ...asset, artistLicenseKey: event.target.value })}><option value="custom">Custom image licence</option><option value="cc_by_4_0">Creative Commons BY 4.0</option><option value="cc_by_sa_4_0">Creative Commons BY-SA 4.0</option><option value="mit">MIT (only if intentionally chosen)</option><option value="other">Other established licence</option></select></label>{asset.artistLicenseKey !== "custom" && <label>Licence proof URL<input required type="url" value={asset.artistLicenseUrl} onChange={(event) => setAsset({ ...asset, artistLicenseUrl: event.target.value })} placeholder="https://..." /></label>}<label>Licence version / terms<textarea required={asset.artistLicenseKey === "custom" || asset.artistLicenseKey === "other"} value={asset.artistLicenseTerms} onChange={(event) => setAsset({ ...asset, artistLicenseTerms: event.target.value })} placeholder="State the exact permission, restrictions, attribution and enforcement terms." /></label>{asset.monetizationModel === "custom_quote" && <small className="field-help">Buyers will be asked to contact you for a bespoke price instead of checking out immediately.</small>}</div>;
+}
+
+function MarketplaceLegalDocuments({ api }: { api: (path: string, init?: RequestInit) => Promise<Response> }) {
+  const [documents, setDocuments] = useState<Array<{ type: string; version: string; title: string; sections: Array<{ heading: string; body: string }> }>>([]);
+  useEffect(() => { void api("/api/legal/agreements").then(async (response) => { if (response.ok) setDocuments((await response.json() as { documents: typeof documents }).documents); }).catch(() => undefined); }, [api]);
+  return <section className="workspace-card legal-documents" aria-label="Marketplace legal documents"><div className="card-heading"><span className="section-kicker">LEGAL TERMS</span><span className="status-pill">Versioned</span></div><h2>Read before listing or buying</h2><p className="dialog-intro">The artist keeps copyright. Paystack processes buyer payments and, for approved sellers, splits the agreed percentage directly to the seller subaccount. Your acceptance is recorded with the version and hash.</p>{documents.map((document) => <details key={document.type}><summary>{document.title} · {document.version}</summary>{document.sections.map((section) => <section key={section.heading}><h4>{section.heading}</h4><p>{section.body}</p></section>)}</details>)}</section>;
+}
+
+function SellerVerificationPanel({ api, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
+  const [seller, setSeller] = useState({ sellerType: "individual", legalName: "", phone: "", ageConfirmed: false, identityDocumentType: "sa_id", bankAccountName: "", registeredName: "", cipcRegistrationNumber: "", representativeName: "", representativeAuthority: false, beneficialOwnerRequired: false, copyrightDeclaration: false, taxResponsibilityDeclaration: false, contributorAgreement: false, signerName: "", signatureReference: "", provider: "paystack", providerAccountId: "", accountHolderName: "", accountLast4: "", branchLast4: "" });
+  const [diditUrl, setDiditUrl] = useState("");
+  const [turnstileToken, setTurnstileToken] = useState("");
+  const [saving, setSaving] = useState(false);
+  const update = (key: string, value: string | boolean) => setSeller((current) => ({ ...current, [key]: value }));
+  async function submit(event: React.FormEvent) {
+    event.preventDefault(); setSaving(true);
+    try {
+      const sellerResponse = await api("/api/onboarding/seller", { method: "PUT", body: JSON.stringify({ ...seller, sellerType: seller.sellerType === "company" ? "company" : "individual", registeredName: seller.sellerType === "company" ? seller.registeredName : undefined, cipcRegistrationNumber: seller.sellerType === "company" ? seller.cipcRegistrationNumber : undefined, representativeName: seller.sellerType === "company" ? seller.representativeName : undefined, representativeAuthority: seller.sellerType === "company" ? seller.representativeAuthority : false, beneficialOwnerRequired: seller.sellerType === "company" && seller.beneficialOwnerRequired }) });
+      if (!sellerResponse.ok) throw new Error("seller");
+      if (seller.sellerType === "company") {
+        const cipc = await api("/api/onboarding/cipc/lookup", { method: "POST", body: JSON.stringify({ registrationNumber: seller.cipcRegistrationNumber }) });
+        if (!cipc.ok) throw new Error("cipc");
+      }
+      const diditResponse = await api("/api/onboarding/didit/session", { method: "POST", body: "{}" });
+      if (!diditResponse.ok) throw new Error("didit");
+      const didit = await diditResponse.json() as { url: string }; setDiditUrl(didit.url);
+      const walletResponse = await api("/api/onboarding/wallet", { method: "POST", body: JSON.stringify({ provider: seller.provider, providerAccountId: seller.providerAccountId || undefined, accountHolderName: seller.accountHolderName, accountLast4: seller.accountLast4 || undefined, branchLast4: seller.branchLast4 || undefined, currency: "ZAR" }) });
+      if (!walletResponse.ok) throw new Error("wallet");
+      const contractResponse = await api("/api/onboarding/contract", { method: "POST", body: JSON.stringify({ signerName: seller.signerName, signatureMethod: "firma", signatureReference: seller.signatureReference, turnstileToken: turnstileToken || undefined }) });
+      if (!contractResponse.ok) throw new Error("contract");
+      onNotice("Seller details saved. Open Didit to finish identity verification; approval remains blocked until its signed result returns.");
+    } catch (error) { onNotice(error instanceof Error && error.message === "didit" ? "Didit is not ready yet. Check the API key and KYC/KYB workflow ID." : "Seller onboarding could not be submitted. Complete every field and configure the required provider."); } finally { setSaving(false); }
+  }
+  return <form className="workspace-card seller-verification-panel" onSubmit={submit}><div className="card-heading"><span className="section-kicker">02 · SELLER SETUP</span><span className="status-pill warm">Pending verification</span></div><h2>Verify your seller identity</h2><p className="dialog-intro">Individuals and sole proprietors can onboard without a company. Didit verifies the ID/passport, liveness, and phone in a hosted flow; WeDoCMS stores only the decision and provider reference.</p><label>Seller type<select value={seller.sellerType} onChange={(event) => update("sellerType", event.target.value)}><option value="individual">Individual / sole proprietor</option><option value="company">Registered company</option></select></label><div className="two-fields"><label>Legal name<input required value={seller.legalName} onChange={(event) => update("legalName", event.target.value)} /></label><label>Verified phone<input required type="tel" placeholder="+27821234567" value={seller.phone} onChange={(event) => update("phone", event.target.value)} /></label></div><div className="two-fields"><label>ID or passport<select value={seller.identityDocumentType} onChange={(event) => update("identityDocumentType", event.target.value)}><option value="sa_id">South African ID</option><option value="passport">Passport</option></select></label><label className="checkbox-row"><input type="checkbox" checked={seller.ageConfirmed} onChange={(event) => update("ageConfirmed", event.target.checked)} /> I confirm I am at least 18</label></div>{seller.sellerType === "company" && <><label>Registered company name<input required value={seller.registeredName} onChange={(event) => update("registeredName", event.target.value)} /></label><div className="two-fields"><label>CIPC registration number<input required value={seller.cipcRegistrationNumber} onChange={(event) => update("cipcRegistrationNumber", event.target.value)} /></label><label>Director / authorised representative<input required value={seller.representativeName} onChange={(event) => update("representativeName", event.target.value)} /></label></div><label className="checkbox-row"><input type="checkbox" checked={seller.representativeAuthority} onChange={(event) => update("representativeAuthority", event.target.checked)} /> I confirm I am authorised to act for this company</label><label className="checkbox-row"><input type="checkbox" checked={seller.beneficialOwnerRequired} onChange={(event) => update("beneficialOwnerRequired", event.target.checked)} /> Beneficial-owner information is required by our payment provider / legal classification</label><small className="field-help">A configured CIPC lookup runs before the company Didit session.</small></>}<label>Bank account name<input required value={seller.bankAccountName} onChange={(event) => update("bankAccountName", event.target.value)} /><small className="field-help">Must match the legal name (or registered company name). Never enter the account number here.</small></label><label className="checkbox-row"><input type="checkbox" checked={seller.copyrightDeclaration} onChange={(event) => update("copyrightDeclaration", event.target.checked)} /> I own/control the copyright and required releases for my work.</label><label className="checkbox-row"><input type="checkbox" checked={seller.taxResponsibilityDeclaration} onChange={(event) => update("taxResponsibilityDeclaration", event.target.checked)} /> I accept responsibility for my tax affairs and declarations.</label><label className="checkbox-row"><input type="checkbox" checked={seller.contributorAgreement} onChange={(event) => update("contributorAgreement", event.target.checked)} /> I accept the current contributor agreement and licensing terms.</label>{diditUrl && <p className="dialog-intro"><strong>Didit is ready.</strong> <a href={diditUrl} target="_blank" rel="noreferrer">Open the secure verification flow ↗</a></p>}<label>Signer name<input required value={seller.signerName} onChange={(event) => update("signerName", event.target.value)} /></label><label>Firma signature reference<input required minLength={8} value={seller.signatureReference} onChange={(event) => update("signatureReference", event.target.value)} placeholder="Reference returned by Firma" /></label><div className="two-fields"><label>Payout rail<select value={seller.provider} onChange={(event) => update("provider", event.target.value)}><option value="paystack">Paystack marketplace split</option></select></label><label>Paystack subaccount code<input required value={seller.providerAccountId} onChange={(event) => update("providerAccountId", event.target.value)} placeholder="ACCT_... from Paystack" /></label></div><label>Account holder<input required value={seller.accountHolderName} onChange={(event) => update("accountHolderName", event.target.value)} /></label><div className="two-fields"><label>Account last 4<input inputMode="numeric" pattern="\d{4}" value={seller.accountLast4} onChange={(event) => update("accountLast4", event.target.value)} /></label><label>Branch last 4<input inputMode="numeric" pattern="\d{4}" value={seller.branchLast4} onChange={(event) => update("branchLast4", event.target.value)} /></label></div><TurnstileChallenge onToken={setTurnstileToken} /><label className="checkbox-row"><input type="checkbox" required /> I agree to the current Contributor Terms of Service and authorise this digital signature record.</label><button className="dark-button" disabled={saving}>{saving ? "Saving seller details…" : "Save & start Didit verification ↗"}</button></form>;
 }
 
 function ContributorWorkspace({ api, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
   const [form, setForm] = useState({ bio: "", organisationName: "", location: "", contributorType: "individual", equipment: "", portfolioUrl: "", acceptTerms: false });
-  const [asset, setAsset] = useState({ kind: "image", title: "", description: "", caption: "", city: "", province: "", locality: "", landmark: "", subjectTags: "", culturalTags: "", rightsStatus: "pending", modelReleaseStatus: "unknown", propertyReleaseStatus: "unknown", monetizationModel: "membership" as MonetizationModel, licensePriceZar: "" });
+  const [asset, setAsset] = useState({ kind: "image", title: "", description: "", caption: "", city: "", province: "", locality: "", landmark: "", subjectTags: "", culturalTags: "", rightsStatus: "pending", modelReleaseStatus: "unknown", propertyReleaseStatus: "unknown", monetizationModel: "membership" as MonetizationModel, licensePriceZar: "", artistLicenseKey: "custom", artistLicenseVersion: "", artistLicenseUrl: "", artistLicenseTerms: "" });
   const [file, setFile] = useState<File | null>(null);
-  const [seller, setSeller] = useState({ signerName: "", signatureReference: "", provider: "stripe_connect", providerAccountId: "", accountHolderName: "", accountLast4: "", branchLast4: "" });
+  const [seller, setSeller] = useState({ sellerType: "individual", legalName: "", phone: "", ageConfirmed: false, identityDocumentType: "sa_id", bankAccountName: "", registeredName: "", cipcRegistrationNumber: "", representativeName: "", representativeAuthority: false, beneficialOwnerRequired: false, copyrightDeclaration: false, taxResponsibilityDeclaration: false, contributorAgreement: false, signerName: "", signatureReference: "", provider: "paystack", providerAccountId: "", accountHolderName: "", accountLast4: "", branchLast4: "" });
   const [turnstileToken, setTurnstileToken] = useState("");
+  const [diditUrl, setDiditUrl] = useState("");
   const [saving, setSaving] = useState(false);
 
   async function saveOnboarding(event: React.FormEvent) {
@@ -814,6 +912,10 @@ function ContributorWorkspace({ api, onNotice }: { api: (path: string, init?: Re
   async function submitSellerWorkflow(event: React.FormEvent) {
     event.preventDefault(); setSaving(true);
     try {
+      const sellerResponse = await api("/api/onboarding/seller", { method: "PUT", body: JSON.stringify({ sellerType: seller.sellerType, legalName: seller.legalName, phone: seller.phone, ageConfirmed: seller.ageConfirmed, identityDocumentType: seller.identityDocumentType, bankAccountName: seller.bankAccountName, registeredName: seller.sellerType === "company" ? seller.registeredName : undefined, cipcRegistrationNumber: seller.sellerType === "company" ? seller.cipcRegistrationNumber : undefined, representativeName: seller.sellerType === "company" ? seller.representativeName : undefined, representativeAuthority: seller.sellerType === "company" ? seller.representativeAuthority : false, beneficialOwnerRequired: seller.sellerType === "company" && seller.beneficialOwnerRequired, copyrightDeclaration: seller.copyrightDeclaration, taxResponsibilityDeclaration: seller.taxResponsibilityDeclaration, contributorAgreement: seller.contributorAgreement }) });
+      if (!sellerResponse.ok) throw new Error("seller");
+      const diditResponse = await api("/api/onboarding/didit/session", { method: "POST", body: "{}" });
+      if (diditResponse.ok) { const didit = await diditResponse.json() as { url?: string }; if (didit.url) setDiditUrl(didit.url); }
       const walletResponse = await api("/api/onboarding/wallet", { method: "POST", body: JSON.stringify({ provider: seller.provider, providerAccountId: seller.providerAccountId || undefined, accountHolderName: seller.accountHolderName, accountLast4: seller.accountLast4 || undefined, branchLast4: seller.branchLast4 || undefined, currency: "ZAR" }) });
       if (!walletResponse.ok) throw new Error("wallet");
       const contractResponse = await api("/api/onboarding/contract", { method: "POST", body: JSON.stringify({ signerName: seller.signerName, signatureMethod: "firma", signatureReference: seller.signatureReference, turnstileToken: turnstileToken || undefined }) });
@@ -834,7 +936,7 @@ function ReviewWorkspace({ items, api, onNotice, onReload }: { items: Asset[]; a
   useEffect(() => { void api("/api/admin/onboarding/tenders").then(async (response) => { if (response.ok) setTenders((await response.json() as { results: TenderRecord[] }).results); }).catch(() => undefined); }, [api]);
   async function decide(asset: Asset, decision: "approved" | "rejected" | "needs_changes") { try { const response = await api(`/api/admin/assets/${asset.id}/review`, { method: "POST", body: JSON.stringify({ decision, notes: decision === "approved" ? "Location and rights context reviewed." : "Please add evidence for location and release status." }) }); if (!response.ok) throw new Error(); onNotice(`${asset.title} marked ${decision}.`); await onReload(); } catch { onNotice("Review action is available once the D1 database is migrated and an editor identity is configured."); } }
   async function decideTender(tender: Record<string, unknown>, decision: "approved" | "rejected" | "corrections_requested") { try { const response = await api(`/api/admin/onboarding/tenders/${String(tender.id)}/decision`, { method: "POST", body: JSON.stringify({ decision, notes: decision === "approved" ? "Contract, KYC, and payout wallet verified." : "Please complete the missing seller verification requirement." }) }); if (!response.ok) throw new Error(); onNotice(`${String(tender.display_name)} tender marked ${decision}.`); setTenders((current) => current.filter((item) => item.id !== tender.id)); } catch { onNotice("Tender decision was blocked. Verify the contract, KYC status, wallet status, and 0005 migration."); } }
-  async function verifyWallet(tender: Record<string, unknown>) { try { const response = await api(`/api/admin/onboarding/wallets/${String(tender.wallet_id)}/verify`, { method: "POST", body: "{}" }); if (!response.ok) throw new Error(); setTenders((current) => current.map((item) => item.id === tender.id ? { ...item, wallet_status: "verified" } : item)); onNotice("Payout wallet marked verified; tender can now be accepted after KYC clears."); } catch { onNotice("Wallet verification failed."); } }
+  async function verifyWallet(tender: Record<string, unknown>) { const providerVerificationReference = window.prompt("Enter the Paystack provider verification reference (not a bank account number):", ""); if (!providerVerificationReference) return; try { const response = await api(`/api/admin/onboarding/wallets/${String(tender.wallet_id)}/verify`, { method: "POST", body: JSON.stringify({ providerVerificationReference }) }); if (!response.ok) throw new Error(); setTenders((current) => current.map((item) => item.id === tender.id ? { ...item, wallet_status: "verified" } : item)); onNotice("Paystack wallet evidence recorded; tender can now be accepted after KYC clears."); } catch { onNotice("Wallet verification failed."); } }
   return <main className="workspace-page"><div className="workspace-intro"><span className="section-kicker">EDITORIAL GOVERNANCE</span><h1>Review what is <em>real.</em></h1><p>Publish only what has evidence for place, context, rights, consent, and seller identity.</p></div><section className="review-queue"><div className="card-heading"><span className="section-kicker">PENDING TENDERS</span><span>{tenders.length} seller submissions</span></div>{tenders.length ? tenders.map((tender) => <article className="review-item" key={String(tender.id)}><div className="review-copy"><div className="card-heading"><span className="section-kicker">{String(tender.id).slice(0, 8)} · {String(tender.created_at ?? "")}</span><span className="status-pill warm">{String(tender.status)}</span></div><h2>{String(tender.display_name)}</h2><p>{String(tender.email)} · contract {String(tender.contract_version)} · hash {String(tender.contract_hash).slice(0, 16)}…</p><div className="review-evidence"><span>KYC {String(tender.verification_status ?? "missing")}</span><span>Wallet {String(tender.wallet_provider ?? "missing")} / {String(tender.wallet_status ?? "missing")}</span><span>Risk {String(tender.risk_level ?? "unknown")}</span></div><div className="review-actions">{tender.wallet_id && tender.wallet_status !== "verified" && <button className="outline-button" onClick={() => verifyWallet(tender)}>Verify wallet</button>}<button className="dark-button" onClick={() => decideTender(tender, "approved")}>Accept tender</button><button className="ghost-button" onClick={() => decideTender(tender, "corrections_requested")}>Request corrections</button><button className="ghost-button danger-button" onClick={() => decideTender(tender, "rejected")}>Reject</button></div></div></article>) : <div className="empty-state">No seller tenders are waiting for review.</div>}</section><div className="review-queue">{items.length ? items.map((asset) => <article className="review-item" key={asset.id}><div className={`review-visual ${asset.kind}`}><span>{asset.kind === "video" ? "▶" : "V"}</span></div><div className="review-copy"><div className="card-heading"><span className="section-kicker">{asset.city}, {asset.province}</span><span className={`status-pill ${asset.humanVerified ? "cool" : "warm"}`}>{asset.humanVerified ? "Verified" : "Needs review"}</span></div><h2>{asset.title}</h2><p>{asset.caption || asset.description}</p><div className="review-tags">{asset.culturalTags.map((tag) => <span key={tag}>{tag}</span>)}</div><div className="review-evidence"><span>Authenticity {archiveDomain.percent(asset.authenticityConfidence)}%</span><span>Rights {asset.rightsStatus}</span><span>Model release {asset.modelReleaseStatus}</span></div><div className="review-actions"><button className="dark-button" onClick={() => decide(asset, "approved")}>Approve</button><button className="ghost-button" onClick={() => decide(asset, "needs_changes")}>Request changes</button><button className="ghost-button danger-button" onClick={() => decide(asset, "rejected")}>Reject</button></div></div></article>) : <div className="empty-state">No records are waiting for editorial review.</div>}</div></main>;
 }
 
@@ -881,16 +983,16 @@ function AssetModal({ asset, onClose, onNotice, authenticated, lightboxes, onCre
 }
 
 function AuthenticatedApp() {
-  return <App auth0={useAuth0()} />;
+  return <App auth0={useAuth0()} supabase={supabaseClient} />;
 }
 
 function Root() {
-  if (!auth0Configured) return <App />;
+  if (!auth0Configured) return <App supabase={supabaseClient} />;
   return <Auth0Provider
     domain={auth0Domain!}
     clientId={auth0ClientId!}
     cacheLocation="memory"
-    authorizationParams={{ redirect_uri: window.location.origin, ...(auth0Audience ? { audience: auth0Audience } : {}), ...(auth0Organization ? { organization: auth0Organization } : {}) }}
+    authorizationParams={{ redirect_uri: window.location.origin, scope: auth0Scopes, ...(auth0Audience ? { audience: auth0Audience } : {}), ...(auth0Organization ? { organization: auth0Organization } : {}) }}
   >
     <AuthenticatedApp />
   </Auth0Provider>;

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { applicationRoleFromClaims, verifyExternalJwt } from "./auth";
+import { applicationRoleFromClaims, enrichExternalIdentity, verifyExternalJwt, verifyExternalJwtWithProvider } from "./auth";
 
 function encode(value: unknown): string {
   const bytes = new TextEncoder().encode(JSON.stringify(value));
@@ -42,10 +42,26 @@ describe("verified identity exchange", () => {
     for (const byte of signature) binary += String.fromCharCode(byte);
     const encodedSignature = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ keys: [{ ...publicJwk, kid: "auth0-key-1" }] }), { status: 200, headers: { "Content-Type": "application/json" } })));
+    await expect(verifyExternalJwt({ AUTH_JWKS_URL: "https://tenant.example/.well-known/jwks.json", AUTH_ISSUER: "https://tenant.example/" } as never, `${signingInput}.${encodedSignature}`)).resolves.toBeNull();
     await expect(verifyExternalJwt({ AUTH_JWKS_URL: "https://tenant.example/.well-known/jwks.json", AUTH_ISSUER: "https://tenant.example/", AUTH_AUDIENCE: "https://api.example" } as never, `${signingInput}.${encodedSignature}`)).resolves.toMatchObject({ sub: "auth0|user-1", org_id: "org_auth0" });
     const claims = await verifyExternalJwt({ AUTH_JWKS_URL: "https://tenant.example/.well-known/jwks.json", AUTH_ISSUER: "https://tenant.example/", AUTH_AUDIENCE: "https://api.example" } as never, `${signingInput}.${encodedSignature}`);
     expect(claims).not.toBeNull();
     expect(applicationRoleFromClaims(claims!, {} as never)).toBe("editor");
+    const supabaseIdentity = await verifyExternalJwtWithProvider({ AUTH_PROVIDER: "supabase", SUPABASE_JWKS_URL: "https://supabase.example/auth/v1/.well-known/jwks.json", SUPABASE_ISSUER: "https://tenant.example/", SUPABASE_AUDIENCE: "https://api.example" } as never, `${signingInput}.${encodedSignature}`);
+    expect(supabaseIdentity?.provider).toBe("supabase");
+    vi.unstubAllGlobals();
+  });
+
+  it("resolves Auth0 profile and verified-email claims through UserInfo", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ sub: "auth0|user-1", email: "person@example.com", email_verified: true, name: "Example Person" }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const identity = await enrichExternalIdentity(
+      { AUTH_ISSUER: "https://tenant.example/" } as never,
+      "access-token",
+      { provider: "auth0", claims: { sub: "auth0|user-1" } },
+    );
+    expect(identity?.claims).toMatchObject({ email: "person@example.com", email_verified: true, name: "Example Person" });
+    expect(fetchMock).toHaveBeenCalledWith("https://tenant.example/userinfo", expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer access-token" }) }));
     vi.unstubAllGlobals();
   });
 });
