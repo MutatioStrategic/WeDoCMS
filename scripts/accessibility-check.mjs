@@ -46,6 +46,9 @@ try {
   const scan = () => new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"]).analyze();
   const initial = await scan();
   const initialPassed = report("archive landing page", initial);
+  await page.locator("button.stakeholder-nav-link").click();
+  const stakeholderOverview = await scan();
+  const stakeholderOverviewPassed = report("stakeholder system overview", stakeholderOverview);
   await page.getByRole("button", { name: /Media studio/ }).click();
   const studio = await scan();
   const studioPassed = report("media formatting studio", studio);
@@ -55,7 +58,7 @@ try {
   const resolutionPassed = report("community and resolution workspace", resolution);
   await context.close();
   await browser.close();
-  if (!initialPassed || !studioPassed || !resolutionPassed) process.exitCode = 1;
+  if (!initialPassed || !stakeholderOverviewPassed || !studioPassed || !resolutionPassed) process.exitCode = 1;
 } finally {
   server.kill();
 }

@@ -79,9 +79,22 @@ assert(personalizedDiscovery.ok && personalizedBody.savedSearches.some((item) =>
 const deletedSearch = await call(`/api/saved-searches/${savedSearch.id}`, { method: "DELETE", headers: { "X-CSRF-Token": loginBody.csrfToken } });
 assert(deletedSearch.ok, `saved search deletion failed: ${deletedSearch.status}`);
 
+const campaignName = `Integrated campaign ${Date.now()}`;
+const createdCampaign = await call("/api/campaigns", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": loginBody.csrfToken }, body: JSON.stringify({ name: campaignName, brief: "Cape Town travel campaign for social and web use with commercial rights", platforms: ["instagram", "website"] }) });
+assert(createdCampaign.status === 201, `campaign creation failed: ${createdCampaign.status}`);
+const campaign = await createdCampaign.json();
+const stagedAsset = await call(`/api/campaigns/${campaign.id}/assets`, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": loginBody.csrfToken }, body: JSON.stringify({ assetId: "asset-table-mountain", stage: "approved", note: "Approved by the integrated smoke path" }) });
+assert(stagedAsset.ok, `campaign asset staging failed: ${stagedAsset.status}`);
+const campaignDetail = await call(`/api/campaigns/${campaign.id}`);
+const campaignDetailBody = await campaignDetail.json();
+assert(campaignDetail.ok && Array.isArray(campaignDetailBody.assets) && Array.isArray(campaignDetailBody.recommendations) && campaignDetailBody.assets.some((asset) => asset.id === "asset-table-mountain" && asset.campaignStage === "approved"), "consolidated campaign detail did not expose CMS assets and recommendations");
+const campaignManifest = await call(`/api/campaigns/${campaign.id}/manifest`);
+const manifestBody = await campaignManifest.json();
+assert(campaignManifest.ok && manifestBody.manifestVersion === "3A" && manifestBody.auditTrail?.approvedCount === 1, "campaign manifest did not include the approved asset and audit summary");
+
 const logout = await call("/api/auth/logout", { method: "POST", headers: { "X-CSRF-Token": loginBody.csrfToken } });
 assert(logout.ok, "logout failed");
 const afterLogout = await call("/api/me");
 assert(afterLogout.ok && (await afterLogout.json()).authenticated === false, "revoked session remained active");
 
-console.log(JSON.stringify({ ok: true, baseUrl, checks: ["session", "header-spoofing", "org-rbac", "cors", "upload-auth", "csrf", "rights", "lightboxes", "lightbox-sharing", "discovery", "saved-searches", "logout"] }, null, 2));
+console.log(JSON.stringify({ ok: true, baseUrl, checks: ["session", "header-spoofing", "org-rbac", "cors", "upload-auth", "csrf", "rights", "lightboxes", "lightbox-sharing", "discovery", "saved-searches", "campaign-cms", "campaign-manifest", "logout"] }, null, 2));

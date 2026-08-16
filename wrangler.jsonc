@@ -265,6 +265,21 @@
             "queue": "veld-archive-photo-enrichment",
             "binding": "PHOTO_ENRICHMENT_QUEUE"
           }
+        ],
+        "consumers": [
+          {
+            "queue": "veld-archive-r2-events",
+            "max_batch_size": 100,
+            "max_batch_timeout": 5,
+            "max_retries": 5
+          },
+          {
+            "queue": "veld-archive-photo-enrichment",
+            "max_batch_size": 10,
+            "max_batch_timeout": 5,
+            "max_retries": 5,
+            "dead_letter_queue": "veld-archive-photo-enrichment-dlq"
+          }
         ]
       },
       "triggers": {

@@ -1140,12 +1140,34 @@ app.post("/api/admin/onboarding/tenders/:id/decision", async (c) => {
 
 const assetCreateSchema = contractAssetCreateRequestSchema;
 
+const campaignPlatformInputSchema = z.enum(["instagram", "facebook", "tiktok", "linkedin", "web", "print", "billboard", "email", "ads"]);
+const campaignBriefFieldsInputSchema = z.object({
+  audience: z.string().trim().max(500).optional(),
+  platforms: z.array(campaignPlatformInputSchema).max(9).optional(),
+  locations: z.array(z.string().trim().max(120)).max(30).optional(),
+  tone: z.array(z.string().trim().max(80)).max(20).optional(),
+  industry: z.string().trim().max(160).optional(),
+  productService: z.string().trim().max(500).optional(),
+  usageRights: z.enum(["editorial", "commercial", "advertising", "social", "broadcast", "exclusive"]).optional(),
+  licenceType: z.string().trim().max(80).optional(),
+  modelReleaseRequired: z.boolean().optional(),
+  formatNeeded: z.array(z.string().trim().max(80)).max(20).optional(),
+  keywords: z.array(z.string().trim().max(80)).max(40).optional(),
+}).strict();
+const campaignBrandKitInputSchema = z.object({
+  colours: z.array(z.string().trim().max(40)).max(12).default([]),
+  logoNotes: z.string().trim().max(500).default(""),
+  tone: z.string().trim().max(160).default(""),
+  industry: z.string().trim().max(160).default(""),
+  forbiddenStyles: z.array(z.string().trim().max(80)).max(20).default([]),
+  preferredVisuals: z.string().trim().max(1000).default(""),
+}).strict();
 const campaignInputSchema = z.object({
   name: z.string().trim().min(2).max(180),
   briefText: z.string().trim().max(8000).optional(),
-  brief: z.union([z.record(z.unknown()), z.string().trim().max(8000)]).default({}),
+  brief: z.union([campaignBriefFieldsInputSchema, z.string().trim().max(8000)]).default({}),
   platforms: z.array(z.string().trim().max(40)).max(8).default([]),
-  brandKit: z.record(z.unknown()).default({}),
+  brandKit: campaignBrandKitInputSchema.default({}),
   status: z.enum(["draft", "active", "archived"]).default("draft"),
 });
 const campaignAssetSchema = z.object({ assetId: z.string().min(1).max(120), stage: z.enum(["shortlisted", "rejected", "approved", "needs_review"]).default("shortlisted"), note: z.string().trim().max(1000).default("") });
@@ -1192,9 +1214,12 @@ app.post("/api/campaigns", async (c) => {
   const user = await requestUser(c); if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Campaign workspace access required" }, 403);
   const payload = campaignInputSchema.parse(await c.req.json()); const id = crypto.randomUUID();
   const briefText = payload.briefText ?? (typeof payload.brief === "string" ? payload.brief : "");
-  const briefFields = briefText ? parseCampaignBrief(briefText, payload.platforms) : payload.brief;
-  await c.env.DB.prepare("INSERT INTO campaigns (id, organization_id, owner_id, name, brief_text, brief_json, brand_kit_json, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(id, user.organizationId, user.id, payload.name, briefText, JSON.stringify(briefFields), JSON.stringify(payload.brandKit), payload.status).run();
-  await c.env.DB.prepare("INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, metadata_json) VALUES (?, ?, 'campaign_created', 'campaign', ?, ?)").bind(crypto.randomUUID(), user.id, id, JSON.stringify({ name: payload.name })).run();
+  const parsedBrief = parseCampaignBrief(briefText, payload.platforms);
+  const briefFields: CampaignBrief = typeof payload.brief === "string" ? parsedBrief : { ...parsedBrief, ...payload.brief };
+  await c.env.DB.batch([
+    c.env.DB.prepare("INSERT INTO campaigns (id, organization_id, owner_id, name, brief_text, brief_json, brand_kit_json, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(id, user.organizationId, user.id, payload.name, briefText, JSON.stringify(briefFields), JSON.stringify(payload.brandKit), payload.status),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, metadata_json) VALUES (?, ?, 'campaign_created', 'campaign', ?, ?)").bind(crypto.randomUUID(), user.id, id, JSON.stringify({ name: payload.name, platforms: briefFields.platforms ?? [], usageRights: briefFields.usageRights ?? null })),
+  ]);
   return c.json({ id, name: payload.name, brief: briefText, briefFields, brandKit: payload.brandKit, status: payload.status, assetCounts: { shortlisted: 0, approved: 0, needsReview: 0, rejected: 0 } }, 201);
 });
 
@@ -1219,7 +1244,11 @@ app.post("/api/campaigns/:id/assets", async (c) => {
   const user = await requestUser(c); if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Campaign workspace access required" }, 403); const payload = campaignAssetSchema.parse(await c.req.json()); const campaignId = c.req.param("id");
   const campaign = await c.env.DB.prepare("SELECT id FROM campaigns WHERE id = ? AND organization_id = ?").bind(campaignId, user.organizationId).first(); if (!campaign) return c.json({ error: "Campaign not found" }, 404);
   const asset = await c.env.DB.prepare("SELECT id FROM assets WHERE id = ? AND organization_id = ? AND status = 'published'").bind(payload.assetId, user.organizationId).first(); if (!asset) return c.json({ error: "Published asset not found" }, 404);
-  await c.env.DB.prepare("INSERT INTO campaign_assets (campaign_id, asset_id, stage, note, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(campaign_id, asset_id) DO UPDATE SET stage = excluded.stage, note = excluded.note, updated_at = CURRENT_TIMESTAMP").bind(campaignId, payload.assetId, payload.stage, payload.note).run();
+  await c.env.DB.batch([
+    c.env.DB.prepare("INSERT INTO campaign_assets (campaign_id, asset_id, stage, note, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(campaign_id, asset_id) DO UPDATE SET stage = excluded.stage, note = excluded.note, updated_at = CURRENT_TIMESTAMP").bind(campaignId, payload.assetId, payload.stage, payload.note),
+    c.env.DB.prepare("UPDATE campaigns SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(campaignId),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, metadata_json) VALUES (?, ?, 'campaign_asset_stage_changed', 'campaign', ?, ?)").bind(crypto.randomUUID(), user.id, campaignId, JSON.stringify({ assetId: payload.assetId, stage: payload.stage })),
+  ]);
   return c.json({ campaignId, assetId: payload.assetId, stage: payload.stage, note: payload.note });
 });
 
@@ -2773,95 +2802,14 @@ app.delete("/api/saved-searches/:id", async (c) => {
   return c.json({ ok: true, savedSearchId: existing.id });
 });
 
-const campaignBriefSchema = z.object({
-  name: z.string().trim().min(1).max(160),
-  brief: z.string().trim().min(20).max(5000),
-  platforms: z.array(z.string().trim().max(40)).max(8).default([]),
-  brandKit: z.object({
-    colours: z.array(z.string().trim().max(40)).max(12).default([]),
-    logoNotes: z.string().trim().max(500).default(""),
-    tone: z.string().trim().max(160).default(""),
-    industry: z.string().trim().max(160).default(""),
-    forbiddenStyles: z.array(z.string().trim().max(80)).max(20).default([]),
-    preferredVisuals: z.string().trim().max(1000).default(""),
-  }).default({}),
-});
-
-const campaignStageSchema = z.enum(["shortlisted", "rejected", "approved", "needs_review"]);
-
 function jsonObject<T>(value: unknown, fallback: T): T {
   try { return JSON.parse(String(value ?? "")) as T; } catch { return fallback; }
-}
-
-function campaignListRow(row: Record<string, unknown>) {
-  return {
-    id: String(row.id), name: String(row.name), brief: String(row.brief_text),
-    briefFields: jsonObject<CampaignBrief>(row.brief_json, parseCampaignBrief(String(row.brief_text))),
-    brandKit: jsonObject<BrandKit>(row.brand_kit_json, { colours: [], logoNotes: "", tone: "", industry: "", forbiddenStyles: [], preferredVisuals: "" }),
-    status: String(row.status), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
-    assetCounts: { shortlisted: Number(row.shortlisted_count ?? 0), approved: Number(row.approved_count ?? 0), needsReview: Number(row.needs_review_count ?? 0), rejected: Number(row.rejected_count ?? 0) },
-  };
 }
 
 async function campaignForUser(c: any, id: string, user: RequestUser): Promise<Record<string, unknown> | null> {
   const row = await c.env.DB.prepare("SELECT * FROM campaigns WHERE id = ? AND organization_id = ?").bind(id, user.organizationId).first() as Record<string, unknown> | null;
   return row;
 }
-
-app.get("/api/campaigns", async (c) => {
-  const user = await requestUser(c);
-  if (!user) return c.json({ error: "Authentication required" }, 401);
-  const rows = await c.env.DB.prepare(`SELECT c.*, SUM(CASE WHEN ca.stage = 'shortlisted' THEN 1 ELSE 0 END) AS shortlisted_count,
-    SUM(CASE WHEN ca.stage = 'approved' THEN 1 ELSE 0 END) AS approved_count,
-    SUM(CASE WHEN ca.stage = 'needs_review' THEN 1 ELSE 0 END) AS needs_review_count,
-    SUM(CASE WHEN ca.stage = 'rejected' THEN 1 ELSE 0 END) AS rejected_count
-    FROM campaigns c LEFT JOIN campaign_assets ca ON ca.campaign_id = c.id
-    WHERE c.organization_id = ? AND c.owner_id = ? GROUP BY c.id ORDER BY c.updated_at DESC`).bind(user.organizationId, user.id).all<Record<string, unknown>>();
-  return c.json({ results: rows.results.map(campaignListRow) });
-});
-
-app.post("/api/campaigns", async (c) => {
-  const user = await requestUser(c);
-  if (!user) return c.json({ error: "Authentication required" }, 401);
-  const payload = campaignBriefSchema.parse(await c.req.json());
-  const id = crypto.randomUUID();
-  const briefFields = parseCampaignBrief(payload.brief, payload.platforms);
-  await c.env.DB.batch([
-    c.env.DB.prepare("INSERT INTO campaigns (id, organization_id, owner_id, name, brief_text, brief_json, brand_kit_json, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'active')").bind(id, user.organizationId, user.id, payload.name, payload.brief, JSON.stringify(briefFields), JSON.stringify(payload.brandKit)),
-    c.env.DB.prepare("INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, metadata_json) VALUES (?, ?, 'campaign_created', 'campaign', ?, ?)").bind(crypto.randomUUID(), user.id, id, JSON.stringify({ platforms: briefFields.platforms, usageRights: briefFields.usageRights })),
-  ]);
-  return c.json({ id, name: payload.name, brief: payload.brief, briefFields, brandKit: payload.brandKit, status: "active", assetCounts: { shortlisted: 0, approved: 0, needsReview: 0, rejected: 0 } }, 201);
-});
-
-app.get("/api/campaigns/:id", async (c) => {
-  const user = await requestUser(c);
-  if (!user) return c.json({ error: "Authentication required" }, 401);
-  const campaign = await campaignForUser(c, c.req.param("id"), user);
-  if (!campaign) return c.json({ error: "Campaign not found" }, 404);
-  const briefFields = jsonObject<CampaignBrief>(campaign.brief_json, parseCampaignBrief(String(campaign.brief_text)));
-  const brandKit = jsonObject<BrandKit>(campaign.brand_kit_json, { colours: [], logoNotes: "", tone: "", industry: "", forbiddenStyles: [], preferredVisuals: "" });
-  const assets = await c.env.DB.prepare("SELECT a.* FROM assets a WHERE a.organization_id = ? AND a.status = 'published' ORDER BY a.updated_at DESC LIMIT 150").bind(user.organizationId).all<Record<string, unknown>>();
-  const links = await c.env.DB.prepare("SELECT asset_id, stage, note FROM campaign_assets WHERE campaign_id = ?").bind(campaign.id).all<Record<string, unknown>>();
-  const stages = new Map(links.results.map((row) => [String(row.asset_id), { stage: String(row.stage) as CampaignStage, note: String(row.note ?? "") }]));
-  const recommendations = rankCampaignAssets(assets.results.map(assetRowToDomain), briefFields, brandKit).map((item) => ({ ...item, stage: stages.get(item.asset.id)?.stage ?? null, note: stages.get(item.asset.id)?.note ?? "" }));
-  return c.json({ campaign: { ...campaignListRow(campaign), briefFields, brandKit }, recommendations });
-});
-
-app.post("/api/campaigns/:id/assets", async (c) => {
-  const user = await requestUser(c);
-  if (!user) return c.json({ error: "Authentication required" }, 401);
-  const campaign = await campaignForUser(c, c.req.param("id"), user);
-  if (!campaign) return c.json({ error: "Campaign not found" }, 404);
-  const payload = z.object({ assetId: z.string().trim().min(1).max(120), stage: campaignStageSchema, note: z.string().trim().max(1000).default("") }).parse(await c.req.json());
-  const asset = await c.env.DB.prepare("SELECT id FROM assets WHERE id = ? AND organization_id = ? AND status = 'published'").bind(payload.assetId, user.organizationId).first<{ id: string }>();
-  if (!asset) return c.json({ error: "Published asset not found" }, 404);
-  await c.env.DB.batch([
-    c.env.DB.prepare("INSERT INTO campaign_assets (campaign_id, asset_id, stage, note, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(campaign_id, asset_id) DO UPDATE SET stage = excluded.stage, note = excluded.note, updated_at = CURRENT_TIMESTAMP").bind(campaign.id, payload.assetId, payload.stage, payload.note),
-    c.env.DB.prepare("UPDATE campaigns SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(campaign.id),
-    c.env.DB.prepare("INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, metadata_json) VALUES (?, ?, 'campaign_asset_stage_changed', 'campaign', ?, ?)").bind(crypto.randomUUID(), user.id, campaign.id, JSON.stringify({ assetId: payload.assetId, stage: payload.stage })),
-  ]);
-  return c.json({ ok: true, campaignId: campaign.id, assetId: payload.assetId, stage: payload.stage });
-});
 
 app.get("/api/campaigns/:id/manifest", async (c) => {
   const user = await requestUser(c);
