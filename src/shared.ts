@@ -307,6 +307,20 @@ export type AccountLifecycle = {
   deletionStatus: "none" | "requested" | "cancelled" | "scheduled" | "completed";
 };
 
+export type SubscriptionStatus = {
+  provider: "paystack" | null;
+  planCode: string | null;
+  status: "none" | "active" | "non-renewing" | "attention" | "completed" | "cancelled" | "pending";
+  subscribed: boolean;
+  hasAccess: boolean;
+  amountCents: number | null;
+  currency: string;
+  nextPaymentAt: string | null;
+  lastPaidAt: string | null;
+  cancelAtPeriodEnd: boolean;
+  manageAvailable: boolean;
+};
+
 export type UserLightbox = {
   id: string;
   name: string;

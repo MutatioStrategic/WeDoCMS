@@ -3,12 +3,14 @@ import { bearerHeaders, idempotencyHeaders, IntegrationError, readJson, type Htt
 export type PaymentSessionRequest = {
   idempotencyKey: string;
   licenceId: string;
+  reference?: string;
   amountCents: number;
   currency: string;
   buyer: { id: string; email: string };
   successUrl: string;
   cancelUrl: string;
   metadata?: Record<string, string>;
+  planCode?: string;
   split?: {
     type: "percentage";
     bearerType: "account" | "subaccount";
@@ -60,7 +62,7 @@ export class JsonPaymentAdapter implements PaymentProvider {
 
   constructor(private readonly config: { provider: string; endpoint: string; token: string; fetcher?: HttpClient; headers?: Record<string, string> }) {
     this.provider = config.provider;
-    this.fetcher = config.fetcher ?? fetch;
+    this.fetcher = config.fetcher ?? ((input, init) => globalThis.fetch(input, init));
   }
 
   async createCheckoutSession(request: PaymentSessionRequest): Promise<PaymentSession> {
@@ -73,7 +75,7 @@ export class JsonPaymentAdapter implements PaymentProvider {
         ...idempotencyHeaders(request.idempotencyKey),
       },
       body: JSON.stringify({
-        reference: request.licenceId,
+        reference: request.reference ?? request.licenceId,
         amount: request.amountCents,
         currency: request.currency.toUpperCase(),
         buyer: request.buyer,
@@ -107,7 +109,7 @@ export class PaystackPaymentAdapter implements PaymentProvider {
   private readonly fetcher: HttpClient;
 
   constructor(private readonly config: { endpoint: string; secretKey: string; fetcher?: HttpClient }) {
-    this.fetcher = config.fetcher ?? fetch;
+    this.fetcher = config.fetcher ?? ((input, init) => globalThis.fetch(input, init));
   }
 
   async createCheckoutSession(request: PaymentSessionRequest): Promise<PaymentSession> {
@@ -122,13 +124,15 @@ export class PaystackPaymentAdapter implements PaymentProvider {
         email: request.buyer.email,
         amount: String(request.amountCents),
         currency: request.currency.toUpperCase(),
-        reference: request.licenceId,
+        reference: request.reference ?? request.licenceId,
+        ...(request.planCode ? { plan: request.planCode } : {}),
         callback_url: request.successUrl,
         metadata: {
           ...request.metadata,
           licenceId: request.licenceId,
           buyerId: request.buyer.id,
           cancel_action: request.cancelUrl,
+          ...(request.planCode ? { subscriptionPlanCode: request.planCode } : {}),
         },
         split: request.split ? {
           type: request.split.type,

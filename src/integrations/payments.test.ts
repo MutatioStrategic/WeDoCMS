@@ -47,6 +47,30 @@ describe("JsonPaymentAdapter", () => {
 });
 
 describe("PaystackPaymentAdapter", () => {
+  it("invokes the Worker global fetch with a valid receiver", async () => {
+    const originalFetch = globalThis.fetch;
+    let called = false;
+    globalThis.fetch = async () => {
+      called = true;
+      return new Response(JSON.stringify({ status: true, data: { authorization_url: "https://checkout.paystack.com/access", reference: "licence-fetch" } }));
+    };
+    try {
+      const adapter = new PaystackPaymentAdapter({ endpoint: "https://api.paystack.co/transaction/initialize", secretKey: "test-secret" });
+      await adapter.createCheckoutSession({
+        idempotencyKey: "licence:12345678",
+        licenceId: "licence-fetch",
+        amountCents: 10000,
+        currency: "ZAR",
+        buyer: { id: "buyer-1", email: "buyer@example.com" },
+        successUrl: "https://app.example/success",
+        cancelUrl: "https://app.example/cancel",
+      });
+      expect(called).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("initializes server-side hosted checkout with licence metadata", async () => {
     let request: Request | undefined;
     const adapter = new PaystackPaymentAdapter({
@@ -114,5 +138,27 @@ describe("PaystackPaymentAdapter", () => {
       split: { type: "percentage", bearerType: "account", subaccounts: [{ subaccount: "ACCT_artist", share: 60 }] },
     });
     expect(await request?.json()).toMatchObject({ split: { type: "percentage", bearer_type: "account", subaccounts: [{ subaccount: "ACCT_artist", share: 60 }] } });
+  });
+
+  it("initializes a recurring Paystack plan without exposing the secret key", async () => {
+    let request: Request | undefined;
+    const adapter = new PaystackPaymentAdapter({
+      endpoint: "https://api.paystack.co/transaction/initialize",
+      secretKey: "test-secret",
+      fetcher: async (input, init) => { request = new Request(input, init); return new Response(JSON.stringify({ status: true, data: { authorization_url: "https://checkout.paystack.com/subscription", reference: "sub-ref" } })); },
+    });
+    await adapter.createCheckoutSession({
+      idempotencyKey: "subscription:12345678",
+      licenceId: "subscription-1",
+      reference: "sub_subscription-1",
+      amountCents: 120000,
+      currency: "ZAR",
+      buyer: { id: "buyer-1", email: "buyer@example.com" },
+      successUrl: "https://app.example/account?subscription=complete",
+      cancelUrl: "https://app.example/account?subscription=cancelled",
+      planCode: "PLN_monthly",
+      metadata: { subscriptionId: "subscription-1" },
+    });
+    expect(await request?.json()).toMatchObject({ reference: "sub_subscription-1", plan: "PLN_monthly", metadata: { subscriptionId: "subscription-1", subscriptionPlanCode: "PLN_monthly" } });
   });
 });

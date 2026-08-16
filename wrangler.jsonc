@@ -32,16 +32,6 @@
       "binding": "STREAM_API_TOKEN_STORE",
       "store_id": "80f201935679435385f2b6f33d8504a6",
       "secret_name": "STREAM_API_TOKEN"
-    },
-    {
-      "binding": "PAYMENT_TOKEN_STORE",
-      "store_id": "80f201935679435385f2b6f33d8504a6",
-      "secret_name": "PAYSTACK_TEST_SECRET_V1"
-    },
-    {
-      "binding": "PAYMENT_WEBHOOK_SECRET_STORE",
-      "store_id": "80f201935679435385f2b6f33d8504a6",
-      "secret_name": "PAYSTACK_TEST_SECRET_V1"
     }
   ],
   "d1_databases": [
@@ -156,6 +146,9 @@
     "PAYOUT_MIN_CENTS": "10000",
     "DEFAULT_ARTIST_SHARE_PERCENTAGE": "60",
     "PAYSTACK_SPLIT_FEE_BEARER": "account",
+    "PAYSTACK_SUBSCRIPTION_PLAN_CODE": "PLN_aoo1xazr02olbru",
+    "BUYER_SUBSCRIPTION_AMOUNT_CENTS": "120000",
+    "BUYER_SUBSCRIPTION_INTERVAL": "monthly",
     "PAYMENT_PROVIDER": "paystack",
     "PAYMENT_ENDPOINT": "https://api.paystack.co/transaction/initialize",
     "STREAM_ACCOUNT_ID": "37e92dc58245d6eab6517a916bd4d9d6",
@@ -195,16 +188,6 @@
           "binding": "STREAM_API_TOKEN_STORE",
           "store_id": "80f201935679435385f2b6f33d8504a6",
           "secret_name": "STREAM_API_TOKEN"
-        },
-        {
-          "binding": "PAYMENT_TOKEN_STORE",
-          "store_id": "80f201935679435385f2b6f33d8504a6",
-          "secret_name": "PAYSTACK_TEST_SECRET_V1"
-        },
-        {
-          "binding": "PAYMENT_WEBHOOK_SECRET_STORE",
-          "store_id": "80f201935679435385f2b6f33d8504a6",
-          "secret_name": "PAYSTACK_TEST_SECRET_V1"
         }
       ],
       "d1_databases": [
@@ -324,6 +307,9 @@
       "PAYOUT_MIN_CENTS": "10000",
       "DEFAULT_ARTIST_SHARE_PERCENTAGE": "60",
       "PAYSTACK_SPLIT_FEE_BEARER": "account",
+      "PAYSTACK_SUBSCRIPTION_PLAN_CODE": "PLN_aoo1xazr02olbru",
+      "BUYER_SUBSCRIPTION_AMOUNT_CENTS": "120000",
+      "BUYER_SUBSCRIPTION_INTERVAL": "monthly",
       "PAYMENT_PROVIDER": "paystack",
         "PAYMENT_ENDPOINT": "https://api.paystack.co/transaction/initialize",
         "STREAM_ACCOUNT_ID": "37e92dc58245d6eab6517a916bd4d9d6",

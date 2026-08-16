@@ -25,7 +25,7 @@ import {
   type AuditBindings,
   type StoredAuditEvent,
 } from "./audit";
-import { calculateMarketplaceSplit, IntegrationContainer } from "../integrations";
+import { calculateMarketplaceSplit, IntegrationContainer, PaystackPaymentAdapter } from "../integrations";
 import { canonicalContract, ocrValidation, sanitizeOcrResult, sha256Hex } from "./seller-workflow";
 import {
   enqueuePhotoJob,
@@ -99,6 +99,9 @@ type SecretBindings = {
   PAYOUT_MIN_CENTS?: string;
   DEFAULT_ARTIST_SHARE_PERCENTAGE?: string;
   PAYSTACK_SPLIT_FEE_BEARER?: string;
+  PAYSTACK_SUBSCRIPTION_PLAN_CODE?: string;
+  BUYER_SUBSCRIPTION_AMOUNT_CENTS?: string;
+  BUYER_SUBSCRIPTION_INTERVAL?: string;
   OCR_ENABLED?: string;
   OCR_MODEL?: string;
   PHOTO_VISION_MODEL?: string;
@@ -357,6 +360,7 @@ app.post("/api/auth/exchange", async (c) => {
     await recordAuthSecurityEvent(c, "exchange_failed", provider, { subject: claims.sub, organizationId, metadata: { reason: "membership_denied" } });
     return c.json({ error: "User is not a member of the requested organization" }, 403);
   }
+  await claimPendingBuyerSubscription(c.env, user.id, membership.organization_id, user.email);
   await recordAuthSecurityEvent(c, "exchange_succeeded", provider, { subject: claims.sub, organizationId });
   return sessionResponse(c, user.id, membership.organization_id);
 });
@@ -582,7 +586,8 @@ function savedSearchAssetFilter(query: string, kind: "all" | "image" | "video", 
 }
 
 async function generateSavedSearchAlerts(env: Bindings): Promise<void> {
-  const due = await env.DB.prepare(`SELECT id, organization_id, owner_id, name, query, media_kind, alert_frequency, last_checked_at
+  const due = await env.DB.prepare(`SELECT id, organization_id, owner_id, name, query, media_kind, alert_frequency,
+      COALESCE(updated_at, created_at, CURRENT_TIMESTAMP) AS last_checked_at
     FROM saved_searches
     WHERE alert_frequency IN ('daily', 'weekly') AND next_alert_at <= CURRENT_TIMESTAMP
     ORDER BY next_alert_at ASC LIMIT 100`).all<Record<string, unknown>>();
@@ -594,7 +599,7 @@ async function generateSavedSearchAlerts(env: Bindings): Promise<void> {
     const count = Number(match?.count ?? 0);
     const nextAlert = new Date(Date.now() + (row.alert_frequency === "daily" ? 1 : 7) * 86_400_000).toISOString();
     const statements = [
-      env.DB.prepare("UPDATE saved_searches SET last_checked_at = CURRENT_TIMESTAMP, next_alert_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+      env.DB.prepare("UPDATE saved_searches SET next_alert_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
         .bind(nextAlert, String(row.id)),
     ];
     if (count > 0) {
@@ -1547,6 +1552,145 @@ app.post("/api/payments/:licenceId/session", async (c) => {
   }
 });
 
+const subscriptionSessionSchema = z.object({
+  successUrl: z.string().url().max(2048),
+  cancelUrl: z.string().url().max(2048),
+});
+
+function buyerSubscriptionConfig(env: Bindings): { planCode: string; amountCents: number; interval: string } | null {
+  const planCode = String(env.PAYSTACK_SUBSCRIPTION_PLAN_CODE ?? "").trim();
+  const amountCents = Number(env.BUYER_SUBSCRIPTION_AMOUNT_CENTS ?? "0");
+  const interval = String(env.BUYER_SUBSCRIPTION_INTERVAL ?? "monthly").trim() || "monthly";
+  if (!planCode || !Number.isInteger(amountCents) || amountCents <= 0) return null;
+  return { planCode, amountCents, interval };
+}
+
+async function claimPendingBuyerSubscription(env: Bindings, buyerId: string, organizationId: string, email: string): Promise<void> {
+  const normalizedEmail = email.trim().toLowerCase();
+  if (!normalizedEmail) return;
+  const claims = await env.DB.prepare(`SELECT * FROM buyer_subscription_claims
+    WHERE lower(email) = ? AND status <> 'claimed' ORDER BY created_at ASC LIMIT 10`).bind(normalizedEmail).all<Record<string, unknown>>();
+  if (!claims.results.length) return;
+  const statements: D1PreparedStatement[] = [];
+  for (const claim of claims.results) {
+    statements.push(env.DB.prepare(`INSERT OR IGNORE INTO buyer_subscriptions
+      (id, organization_id, buyer_id, provider, plan_code, provider_subscription_code, provider_customer_code,
+       provider_email_token, provider_reference, email, amount_cents, currency, interval, status, next_payment_date,
+       failure_reason)
+      VALUES (?, ?, ?, 'paystack', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(crypto.randomUUID(), organizationId, buyerId, claim.plan_code, claim.provider_subscription_code, claim.provider_customer_code,
+        claim.provider_email_token, claim.provider_reference, normalizedEmail, claim.amount_cents, claim.currency, claim.interval,
+        claim.status === "pending" ? "active" : claim.status === "claimed" ? "active" : claim.status, claim.next_payment_date, claim.failure_reason));
+    statements.push(env.DB.prepare("UPDATE buyer_subscription_claims SET status = 'claimed', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status <> 'claimed'").bind(claim.id));
+  }
+  await env.DB.batch(statements);
+}
+
+function buyerSubscriptionHasAccess(subscription: Record<string, unknown> | null): boolean {
+  if (!subscription) return false;
+  const status = String(subscription.status ?? "");
+  if (!["active", "non-renewing", "attention"].includes(status)) return false;
+  if (status === "non-renewing" && subscription.next_payment_date) {
+    const nextPayment = Date.parse(String(subscription.next_payment_date));
+    if (Number.isFinite(nextPayment) && nextPayment <= Date.now()) return false;
+  }
+  return true;
+}
+
+app.get("/api/subscription", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, 401);
+  const config = buyerSubscriptionConfig(c.env);
+  const subscription = await c.env.DB.prepare(`
+    SELECT id, provider, plan_code, provider_subscription_code, provider_customer_code,
+      provider_reference, amount_cents, currency, interval, status, next_payment_date,
+      failure_reason, created_at, updated_at
+    FROM buyer_subscriptions
+    WHERE organization_id = ? AND buyer_id = ?
+    ORDER BY created_at DESC LIMIT 1
+  `).bind(user.organizationId, user.id).first<Record<string, unknown>>();
+  const payments = subscription
+    ? await c.env.DB.prepare(`
+      SELECT provider, provider_event_id, provider_reference, invoice_code, event_type,
+        amount_cents, currency, status, period_start, period_end, paid_at, created_at
+      FROM buyer_subscription_payments
+      WHERE subscription_id = ? ORDER BY created_at DESC LIMIT 50
+    `).bind(String(subscription.id)).all<Record<string, unknown>>()
+    : { results: [] as Record<string, unknown>[] };
+  return c.json({
+    configured: Boolean(config),
+    plan: config ? { amountCents: config.amountCents, currency: "ZAR", interval: config.interval } : null,
+    sourceOfTruth: "paystack",
+    hasAccess: buyerSubscriptionHasAccess(subscription),
+    subscription,
+    payments: payments.results,
+  });
+});
+
+app.post("/api/subscription/manage-link", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, 401);
+  const subscription = await c.env.DB.prepare(`SELECT provider_subscription_code
+    FROM buyer_subscriptions WHERE organization_id = ? AND buyer_id = ?
+      AND provider = 'paystack' AND provider_subscription_code IS NOT NULL
+    ORDER BY updated_at DESC LIMIT 1`).bind(user.organizationId, user.id).first<{ provider_subscription_code: string }>();
+  const paymentToken = await resolveSecret(c.env.PAYMENT_TOKEN, c.env.PAYMENT_TOKEN_STORE);
+  if (!subscription || !paymentToken || !c.env.PAYMENT_ENDPOINT) return c.json({ error: "No Paystack subscription is available to manage" }, 404);
+  const apiBase = c.env.PAYMENT_ENDPOINT.replace(/\/transaction\/initialize\/?$/, "");
+  const response = await fetch(`${apiBase}/subscription/${encodeURIComponent(subscription.provider_subscription_code)}/manage/link`, { headers: { Authorization: `Bearer ${paymentToken}` } });
+  const value = await response.json().catch(() => ({})) as { status?: boolean; data?: { link?: string } };
+  if (!response.ok || value.status !== true || !value.data?.link) return c.json({ error: "Paystack could not create a subscription management link" }, 502);
+  return c.json({ manageUrl: value.data.link });
+});
+
+app.post("/api/subscription/session", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, 401);
+  if (String(c.env.PAYMENT_PROVIDER ?? "").toLowerCase() !== "paystack") return c.json({ error: "Buyer subscriptions require the Paystack provider" }, 503);
+  const config = buyerSubscriptionConfig(c.env);
+  if (!config) return c.json({ error: "Paystack subscription plan is not configured" }, 503);
+  const paymentToken = await resolveSecret(c.env.PAYMENT_TOKEN, c.env.PAYMENT_TOKEN_STORE);
+  if (!paymentToken || !c.env.PAYMENT_ENDPOINT) return c.json({ error: "Paystack payment credentials are not configured" }, 503);
+  const payload = subscriptionSessionSchema.parse(await c.req.json());
+  const existing = await c.env.DB.prepare(`
+    SELECT id, status FROM buyer_subscriptions
+    WHERE organization_id = ? AND buyer_id = ?
+      AND status IN ('pending', 'active', 'non-renewing', 'attention')
+    ORDER BY created_at DESC LIMIT 1
+  `).bind(user.organizationId, user.id).first<{ id: string; status: string }>();
+  if (existing) return c.json({ error: "A buyer subscription already exists", subscriptionId: existing.id, status: existing.status }, 409);
+
+  const subscriptionId = crypto.randomUUID();
+  await c.env.DB.prepare(`
+    INSERT INTO buyer_subscriptions
+      (id, organization_id, buyer_id, provider, plan_code, email, amount_cents, currency, interval, status)
+    VALUES (?, ?, ?, 'paystack', ?, ?, ?, 'ZAR', ?, 'pending')
+  `).bind(subscriptionId, user.organizationId, user.id, config.planCode, user.email, config.amountCents, config.interval).run();
+  try {
+    const integrations = new IntegrationContainer({ ...c.env, PAYMENT_TOKEN: paymentToken });
+    const session = await integrations.payments.get("paystack").createCheckoutSession({
+      idempotencyKey: `subscription:${subscriptionId}`,
+      licenceId: subscriptionId,
+      reference: `sub_${subscriptionId}`,
+      amountCents: config.amountCents,
+      currency: "ZAR",
+      buyer: { id: user.id, email: user.email },
+      successUrl: payload.successUrl,
+      cancelUrl: payload.cancelUrl,
+      planCode: config.planCode,
+      metadata: { organizationId: user.organizationId, userId: user.id, subscriptionId, subscriptionPlanCode: config.planCode },
+    });
+    await c.env.DB.prepare("UPDATE buyer_subscriptions SET provider_reference = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+      .bind(session.providerReference ?? session.id, subscriptionId).run();
+    return c.json({ subscriptionId, provider: session.provider, providerReference: session.providerReference, checkoutUrl: session.checkoutUrl, sourceOfTruth: "paystack" }, 201);
+  } catch (error) {
+    await c.env.DB.prepare("UPDATE buyer_subscriptions SET status = 'cancelled', failure_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+      .bind(error instanceof Error ? error.message : "Paystack checkout initialization failed", subscriptionId).run();
+    logEvent("error", "subscription.checkout_session_failed", c.get("trace"), { subscriptionId, error: error instanceof Error ? error.message : "unknown" });
+    return c.json({ error: "Paystack could not create the subscription checkout" }, 503);
+  }
+});
+
 const settlementSchema = z.object({
   amountCents: z.number().int().positive().max(100_000_000),
   currency: z.string().length(3).default("ZAR"),
@@ -1624,6 +1768,7 @@ function normalizePaymentWebhook(provider: string, raw: unknown): unknown | null
   const data = ((raw as Record<string, unknown>).data ?? {}) as Record<string, unknown>;
   if (!["charge.success", "refund.processed"].includes(event)) return null;
   const metadata = data.metadata && typeof data.metadata === "object" ? data.metadata as Record<string, unknown> : {};
+  if (metadata.subscriptionId || metadata.subscriptionPlanCode) return null;
   const reference = String(data.reference ?? data.transaction_reference ?? "");
   const licenceId = String(metadata.licenceId ?? reference);
   return {
@@ -1635,6 +1780,136 @@ function normalizePaymentWebhook(provider: string, raw: unknown): unknown | null
     amountCents: Number(data.amount),
     currency: String(data.currency ?? "ZAR"),
   };
+}
+
+async function handlePaystackSubscriptionWebhook(env: Bindings, raw: unknown, body: string): Promise<{ accepted: boolean; ignored?: boolean; duplicate?: boolean; eventId?: string; subscriptionId?: string; type?: string }> {
+  if (!raw || typeof raw !== "object") return { accepted: true, ignored: true };
+  const root = raw as Record<string, unknown>;
+  const event = String(root.event ?? "");
+  const data = (root.data && typeof root.data === "object" ? root.data : {}) as Record<string, unknown>;
+  const supported = new Set(["charge.success", "invoice.create", "invoice.payment_failed", "invoice.update", "subscription.create", "subscription.not_renew", "subscription.disable"]);
+  if (!supported.has(event)) return { accepted: true, ignored: true };
+  const metadata = data.metadata && typeof data.metadata === "object" ? data.metadata as Record<string, unknown> : {};
+  const subscriptionData = data.subscription && typeof data.subscription === "object" ? data.subscription as Record<string, unknown> : {};
+  const customer = data.customer && typeof data.customer === "object" ? data.customer as Record<string, unknown> : {};
+  const transaction = data.transaction && typeof data.transaction === "object" ? data.transaction as Record<string, unknown> : {};
+  const topPlan = data.plan && typeof data.plan === "object" ? data.plan as Record<string, unknown> : {};
+  const nestedPlan = subscriptionData.plan && typeof subscriptionData.plan === "object" ? subscriptionData.plan as Record<string, unknown> : {};
+  const subscriptionCode = String(subscriptionData.subscription_code ?? data.subscription_code ?? "").trim();
+  const providerReference = String(data.reference ?? transaction.reference ?? metadata.reference ?? "").trim() || null;
+  const email = String(customer.email ?? subscriptionData.customer_email ?? data.email ?? metadata.email ?? "").trim().toLowerCase();
+  const metadataSubscriptionId = String(metadata.subscriptionId ?? "").trim();
+  const eventId = String(data.id ?? data.invoice_code ?? `${event}:${subscriptionCode || metadataSubscriptionId || providerReference || email}`).trim();
+  if (!eventId) return { accepted: true, ignored: true };
+
+  const config = buyerSubscriptionConfig(env);
+  if (!config) return { accepted: true, ignored: true, eventId };
+  const eventPlanCode = String(nestedPlan.plan_code ?? topPlan.plan_code ?? data.plan_code ?? metadata.subscriptionPlanCode ?? metadata.planCode ?? "").trim();
+  if (eventPlanCode && eventPlanCode !== config.planCode) return { accepted: true, ignored: true, eventId };
+  const providerStatus = String(subscriptionData.status ?? data.status ?? "").toLowerCase();
+  const successfulInvoice = event === "invoice.update" && ["success", "paid"].includes(String(data.status ?? "").toLowerCase());
+  const incomingStatus = event === "subscription.create" ? providerStatus === "active" ? "active" : providerStatus === "non-renewing" ? "non-renewing" : "pending"
+    : event === "charge.success" || successfulInvoice ? "active"
+      : event === "invoice.payment_failed" ? "attention"
+        : event === "subscription.not_renew" ? "non-renewing"
+          : event === "subscription.disable" ? providerStatus === "complete" || providerStatus === "completed" ? "completed" : "cancelled"
+            : event === "invoice.create" ? "pending" : null;
+
+  const duplicate = await env.DB.prepare("SELECT id, status FROM payment_webhook_events WHERE provider = 'paystack' AND provider_event_id = ?").bind(eventId).first<{ id: string; status: string }>();
+  if (duplicate) return { accepted: true, duplicate: true, eventId, type: "duplicate" };
+
+  let subscription = metadataSubscriptionId
+    ? await env.DB.prepare("SELECT * FROM buyer_subscriptions WHERE id = ? AND provider = 'paystack'").bind(metadataSubscriptionId).first<Record<string, unknown>>()
+    : null;
+  if (!subscription && subscriptionCode) {
+    subscription = await env.DB.prepare("SELECT * FROM buyer_subscriptions WHERE provider = 'paystack' AND provider_subscription_code = ?").bind(subscriptionCode).first<Record<string, unknown>>();
+  }
+  if (!subscription && email) {
+    subscription = await env.DB.prepare(`
+      SELECT * FROM buyer_subscriptions
+      WHERE provider = 'paystack' AND email = ? AND status = 'pending'
+      ORDER BY created_at DESC LIMIT 1
+    `).bind(email).first<Record<string, unknown>>();
+  }
+  const amountCents = Number(data.amount ?? transaction.amount ?? subscriptionData.amount ?? config.amountCents);
+  const currency = String(data.currency ?? transaction.currency ?? "ZAR").toUpperCase();
+  const providerCustomerCode = String(customer.customer_code ?? "").trim() || null;
+  const emailToken = String(subscriptionData.email_token ?? data.email_token ?? "").trim() || null;
+  const nextPaymentDate = String(subscriptionData.next_payment_date ?? data.next_payment_date ?? "").trim() || null;
+  if ((event === "charge.success" || successfulInvoice) && (amountCents !== config.amountCents || currency !== "ZAR")) throw new Error("Subscription payment does not match the configured ZAR plan");
+  if (!subscription && subscriptionCode && email) {
+    const matched = await env.DB.prepare(`SELECT u.id AS buyer_id, om.organization_id
+      FROM users u JOIN organization_memberships om ON om.user_id = u.id AND om.status = 'active'
+      WHERE lower(u.email) = ? ORDER BY om.created_at LIMIT 1`).bind(email).first<{ buyer_id: string; organization_id: string }>();
+    if (matched) {
+      await env.DB.prepare(`INSERT OR IGNORE INTO buyer_subscriptions
+        (id, organization_id, buyer_id, provider, plan_code, provider_subscription_code,
+         provider_customer_code, provider_email_token, provider_reference, email, amount_cents, currency, interval, status, next_payment_date, failure_reason)
+        VALUES (?, ?, ?, 'paystack', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(crypto.randomUUID(), matched.organization_id, matched.buyer_id, config.planCode, subscriptionCode, providerCustomerCode, emailToken, providerReference, email, amountCents, currency, config.interval, incomingStatus ?? "pending", nextPaymentDate, event === "invoice.payment_failed" ? String(data.description ?? data.gateway_response ?? "Payment failed") : null).run();
+      subscription = await env.DB.prepare("SELECT * FROM buyer_subscriptions WHERE provider = 'paystack' AND provider_subscription_code = ?").bind(subscriptionCode).first<Record<string, unknown>>();
+    } else {
+      await env.DB.prepare(`INSERT INTO buyer_subscription_claims
+        (id, provider, provider_subscription_code, provider_customer_code, provider_email_token, provider_reference,
+         email, plan_code, amount_cents, currency, interval, status, next_payment_date, failure_reason, payload_json)
+        VALUES (?, 'paystack', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(provider, provider_subscription_code) DO UPDATE SET
+          provider_customer_code = COALESCE(excluded.provider_customer_code, buyer_subscription_claims.provider_customer_code),
+          provider_email_token = COALESCE(excluded.provider_email_token, buyer_subscription_claims.provider_email_token),
+          provider_reference = COALESCE(excluded.provider_reference, buyer_subscription_claims.provider_reference),
+          status = excluded.status, next_payment_date = COALESCE(excluded.next_payment_date, buyer_subscription_claims.next_payment_date),
+          failure_reason = excluded.failure_reason, payload_json = excluded.payload_json, updated_at = CURRENT_TIMESTAMP`)
+        .bind(crypto.randomUUID(), subscriptionCode, providerCustomerCode, emailToken, providerReference, email, config.planCode, amountCents, currency, config.interval, incomingStatus ?? "pending", nextPaymentDate, event === "invoice.payment_failed" ? String(data.description ?? data.gateway_response ?? "Payment failed") : null, body).run();
+      await env.DB.prepare(`INSERT INTO payment_webhook_events
+        (id, provider, provider_event_id, event_type, licence_id, subscription_id, amount_cents, currency, payload_json)
+        VALUES (?, 'paystack', ?, ?, NULL, NULL, ?, ?, ?)`)
+        .bind(crypto.randomUUID(), eventId, event, Number.isFinite(amountCents) && amountCents > 0 ? amountCents : null, currency, body).run();
+      return { accepted: true, eventId, type: "claim_pending" };
+    }
+  }
+  if (!subscription) return { accepted: true, ignored: true, eventId };
+
+  const paymentStatus = event === "invoice.payment_failed" ? "failed" : event === "invoice.create" ? "pending" : (event === "charge.success" || successfulInvoice) ? "success" : null;
+  if ((event === "charge.success" || successfulInvoice) && Number(subscription.amount_cents) !== amountCents) throw new Error("Subscription payment amount does not match the configured plan");
+
+  await env.DB.prepare(`
+    INSERT INTO payment_webhook_events
+      (id, provider, provider_event_id, event_type, licence_id, subscription_id, amount_cents, currency, payload_json)
+    VALUES (?, 'paystack', ?, ?, NULL, ?, ?, ?, ?)
+  `).bind(crypto.randomUUID(), eventId, event, String(subscription.id), Number.isFinite(amountCents) && amountCents > 0 ? amountCents : null, currency, body).run();
+
+  if (paymentStatus) {
+    await env.DB.prepare(`
+      INSERT OR IGNORE INTO buyer_subscription_payments
+        (id, subscription_id, provider, provider_event_id, provider_reference, invoice_code, event_type, amount_cents, currency, status, period_start, period_end, paid_at, payload_json)
+      VALUES (?, ?, 'paystack', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      crypto.randomUUID(), String(subscription.id), eventId, providerReference, String(data.invoice_code ?? "").trim() || null,
+      event, Number.isFinite(amountCents) && amountCents > 0 ? amountCents : null, currency, paymentStatus,
+      String(data.period_start ?? "").trim() || null, String(data.period_end ?? "").trim() || null,
+      paymentStatus === "success" ? String(data.paid_at ?? new Date().toISOString()) : null, body,
+    ).run();
+  }
+
+  const status = incomingStatus;
+  await env.DB.prepare(`
+    UPDATE buyer_subscriptions SET
+      provider_subscription_code = COALESCE(?, provider_subscription_code),
+      provider_customer_code = COALESCE(?, provider_customer_code),
+      provider_email_token = COALESCE(?, provider_email_token),
+      provider_reference = COALESCE(?, provider_reference),
+      next_payment_date = COALESCE(?, next_payment_date),
+      status = COALESCE(?, status),
+      failure_reason = CASE WHEN ? = 'attention' THEN COALESCE(?, failure_reason) ELSE NULL END,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).bind(
+    subscriptionCode || null, providerCustomerCode, emailToken, providerReference, nextPaymentDate, status,
+    status, event === "invoice.payment_failed" ? String(data.description ?? data.gateway_response ?? "Payment failed") : null,
+    String(subscription.id),
+  ).run();
+  await env.DB.prepare("UPDATE payment_webhook_events SET status = 'processed', processed_at = CURRENT_TIMESTAMP WHERE provider = 'paystack' AND provider_event_id = ?").bind(eventId).run();
+  return { accepted: true, eventId, subscriptionId: String(subscription.id), type: event };
 }
 
 async function postPaymentReversal(env: Bindings, licenceId: string, payload: { amountCents: number; currency: string; idempotencyKey: string; type: "refund" | "chargeback" }): Promise<string> {
@@ -1663,7 +1938,12 @@ app.post("/api/webhooks/payments", async (c) => {
   const provider = c.env.PAYMENT_PROVIDER ?? "generic";
   const signature = provider.toLowerCase() === "paystack" ? c.req.header("x-paystack-signature") ?? "" : c.req.header("x-payment-signature") ?? "";
   if (!(await verifyPaymentWebhook(paymentWebhookSecret, signature, body, provider))) return c.json({ error: "Invalid payment webhook signature" }, 401);
-  const normalized = normalizePaymentWebhook(provider, JSON.parse(body));
+  const raw = JSON.parse(body) as unknown;
+  if (provider.toLowerCase() === "paystack") {
+    const subscriptionResult = await handlePaystackSubscriptionWebhook(c.env, raw, body);
+    if (!subscriptionResult.ignored) return c.json(subscriptionResult, 200);
+  }
+  const normalized = normalizePaymentWebhook(provider, raw);
   if (!normalized) return c.json({ accepted: true, ignored: true }, 200);
   const payload = paymentWebhookSchema.parse(normalized);
   const duplicate = await c.env.DB.prepare("SELECT id, status FROM payment_webhook_events WHERE provider = ? AND provider_event_id = ?").bind(payload.provider, payload.eventId).first<{ id: string; status: string }>();
@@ -2500,6 +2780,11 @@ app.get("/api/analytics/contributor", async (c) => {
 app.get("/api/analytics/buyer", async (c) => {
   const user = await requestUser(c);
   if (!user) return c.json({ error: "Authentication required" }, 401);
+  const subscription = await c.env.DB.prepare(`
+    SELECT status, next_payment_date FROM buyer_subscriptions
+    WHERE organization_id = ? AND buyer_id = ? ORDER BY created_at DESC LIMIT 1
+  `).bind(user.organizationId, user.id).first<Record<string, unknown>>();
+  if (!buyerSubscriptionHasAccess(subscription)) return c.json({ error: "An active buyer subscription is required", code: "subscription_required" }, 402);
   const result = await c.env.DB.prepare(`SELECT l.campaign_id AS id, COALESCE(NULLIF(l.campaign_name, ''), 'Untitled campaign') AS name, a.title AS asset_title, a.id AS asset_id, l.price_cents AS spend_cents, l.status, COALESCE((SELECT SUM(count) FROM analytics_daily ad WHERE ad.metric_type = 'campaign_impression' AND ad.campaign_id = l.campaign_id), 0) AS impressions, COALESCE((SELECT SUM(count) FROM analytics_daily ad WHERE ad.metric_type = 'campaign_conversion' AND ad.campaign_id = l.campaign_id), 0) AS conversions FROM licences l JOIN assets a ON a.id = l.asset_id WHERE l.organization_id = ? AND l.buyer_id = ? AND l.status IN ('paid', 'expired') GROUP BY l.id ORDER BY l.created_at DESC`).bind(user.organizationId, user.id).all<Record<string, unknown>>();
   const campaigns = (result.results as Record<string, unknown>[]).map((row) => { const spendCents = Number(row.spend_cents ?? 0); const conversions = Number(row.conversions ?? 0); return { id: String(row.id), name: String(row.name), assetTitle: String(row.asset_title), assetId: String(row.asset_id), spendCents, impressions: Number(row.impressions ?? 0), conversions, roi: spendCents ? Math.round(((conversions * 420 - spendCents) / spendCents) * 100) : 0, status: String(row.status) }; });
   const spendCents = campaigns.reduce((sum, row) => sum + row.spendCents, 0); const impressions = campaigns.reduce((sum, row) => sum + row.impressions, 0); const conversions = campaigns.reduce((sum, row) => sum + row.conversions, 0); const roi = spendCents ? Math.round(((conversions * 420 - spendCents) / spendCents) * 100) : 0;
