@@ -5,8 +5,10 @@ export type AuthBindings = {
   APP_ENV?: string;
   SESSION_SECRET?: string;
   AUTH_JWT_SECRET?: string;
+  AUTH_JWKS_URL?: string;
   AUTH_ISSUER?: string;
   AUTH_AUDIENCE?: string;
+  AUTH_ROLES_CLAIM?: string;
   AUTH_COOKIE_DOMAIN?: string;
 };
 
@@ -43,12 +45,17 @@ const jwtClaimsSchema = z.object({
   name: z.string().trim().min(1).max(180).optional(),
   org_id: z.string().min(1).max(120).optional(),
   org_name: z.string().trim().min(1).max(180).optional(),
-  role: z.enum(["buyer", "contributor", "editor", "admin"]).optional(),
+  role: z.string().trim().min(1).max(80).optional(),
+  roles: z.array(z.string().trim().min(1).max(80)).max(50).optional(),
   iss: z.string().optional(),
   aud: z.union([z.string(), z.array(z.string())]).optional(),
   exp: z.number().optional(),
   nbf: z.number().optional(),
-});
+}).passthrough();
+
+const applicationRoles = ["buyer", "contributor", "editor", "admin"] as const;
+export type ApplicationRole = (typeof applicationRoles)[number];
+type JwtClaims = z.infer<typeof jwtClaimsSchema>;
 
 const utf8 = (value: string): Uint8Array<ArrayBuffer> => new TextEncoder().encode(value) as Uint8Array<ArrayBuffer>;
 
@@ -67,6 +74,26 @@ function base64UrlDecode(value: string): Uint8Array<ArrayBuffer> {
 async function hmac(secret: string, value: string): Promise<Uint8Array<ArrayBuffer>> {
   const key = await crypto.subtle.importKey("raw", utf8(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   return new Uint8Array(await crypto.subtle.sign("HMAC", key, utf8(value))) as Uint8Array<ArrayBuffer>;
+}
+
+async function verifyRsa256(jwksUrl: string, header: { alg?: string; kid?: string }, signingInput: string, signature: string): Promise<boolean> {
+  if (!header.kid) return false;
+  let jwks: { keys?: Array<JsonWebKey & { kid?: string }> };
+  try {
+    const response = await fetch(jwksUrl, { headers: { Accept: "application/json" } });
+    if (!response.ok) return false;
+    jwks = await response.json() as { keys?: Array<JsonWebKey & { kid?: string }> };
+  } catch {
+    return false;
+  }
+  const jwk = jwks.keys?.find((candidate) => candidate.kid === header.kid && candidate.kty === "RSA");
+  if (!jwk) return false;
+  try {
+    const key = await crypto.subtle.importKey("jwk", jwk, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]);
+    return crypto.subtle.verify({ name: "RSASSA-PKCS1-v1_5" }, key, base64UrlDecode(signature), utf8(signingInput));
+  } catch {
+    return false;
+  }
 }
 
 async function sha256Hex(value: string): Promise<string> {
@@ -173,25 +200,37 @@ export function csrfValid(request: Request, user: RequestUser): boolean {
   return timingSafeEqual(request.headers.get("X-CSRF-Token") ?? "", user.csrfToken);
 }
 
-export async function verifyExternalJwt(env: AuthBindings, token: string): Promise<z.infer<typeof jwtClaimsSchema> | null> {
-  if (!env.AUTH_JWT_SECRET) return null;
+export async function verifyExternalJwt(env: AuthBindings, token: string): Promise<JwtClaims | null> {
   const parts = token.split(".");
   if (parts.length !== 3) return null;
-  let header: { alg?: string; typ?: string };
-  let claims: z.infer<typeof jwtClaimsSchema>;
+  let header: { alg?: string; typ?: string; kid?: string };
+  let claims: JwtClaims;
   try {
-    header = JSON.parse(new TextDecoder().decode(base64UrlDecode(parts[0]))) as { alg?: string; typ?: string };
+    header = JSON.parse(new TextDecoder().decode(base64UrlDecode(parts[0]))) as { alg?: string; typ?: string; kid?: string };
     claims = jwtClaimsSchema.parse(JSON.parse(new TextDecoder().decode(base64UrlDecode(parts[1]))));
   } catch { return null; }
-  if (header.alg !== "HS256") return null;
-  const expected = base64UrlEncode(await hmac(env.AUTH_JWT_SECRET, `${parts[0]}.${parts[1]}`));
-  if (!timingSafeEqual(expected, parts[2])) return null;
+  const signingInput = `${parts[0]}.${parts[1]}`;
+  let signatureValid = false;
+  if (header.alg === "HS256" && env.AUTH_JWT_SECRET) {
+    const expected = base64UrlEncode(await hmac(env.AUTH_JWT_SECRET, signingInput));
+    signatureValid = timingSafeEqual(expected, parts[2]);
+  } else if (header.alg === "RS256" && env.AUTH_JWKS_URL) {
+    signatureValid = await verifyRsa256(env.AUTH_JWKS_URL, header, signingInput, parts[2]);
+  }
+  if (!signatureValid) return null;
   const now = Math.floor(Date.now() / 1000);
   if (claims.exp !== undefined && claims.exp <= now) return null;
   if (claims.nbf !== undefined && claims.nbf > now) return null;
   if (env.AUTH_ISSUER && claims.iss !== env.AUTH_ISSUER) return null;
   if (env.AUTH_AUDIENCE && !(Array.isArray(claims.aud) ? claims.aud.includes(env.AUTH_AUDIENCE) : claims.aud === env.AUTH_AUDIENCE)) return null;
   return claims;
+}
+
+export function applicationRoleFromClaims(claims: JwtClaims, env: AuthBindings): ApplicationRole {
+  const configuredClaim = env.AUTH_ROLES_CLAIM ? claims[env.AUTH_ROLES_CLAIM] : undefined;
+  const configuredRoles = Array.isArray(configuredClaim) ? configuredClaim : typeof configuredClaim === "string" ? [configuredClaim] : [];
+  const candidates = [claims.role, ...(claims.roles ?? []), ...configuredRoles];
+  return candidates.find((role): role is ApplicationRole => applicationRoles.includes(role as ApplicationRole)) ?? "buyer";
 }
 
 export { clearSessionCookie };

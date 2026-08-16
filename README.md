@@ -16,6 +16,8 @@ Veld Archive is a Cloudflare-native foundation for a trusted South African photo
 - Asynchronous R2 geographic DR replication, D1 export backups, structured logs, traces, custom metrics, Stream webhooks, and upload chaos testing.
 - South African taxonomy and explicitly marked demo seed records.
 - Responsive UI with asset detail modal, verification states, contributor and buyer workspaces, governance review, insights, community/collections, and rights-aware language.
+- Authenticated buyer/contributor lightboxes with private collection creation, idempotent asset saves, removal, deletion, tenant isolation, and audit events.
+- Tenant-scoped saved searches with daily/weekly in-app alerts, privacy-thresholded trending searches, and explainable recommendations derived only from explicit saved searches and lightboxes.
 - Curator metadata governance pipeline: ingestion → AI tagging → curator correction → approval, with auditable metadata events.
 - Pre-checkout licence rules that cross-check approval, rights scope, and contributor model/property releases; invalid transactions return HTTP 422.
 - Explainable search results showing match evidence, metadata fields used, separate confidence signals, and human verification status.
@@ -25,7 +27,7 @@ Veld Archive is a Cloudflare-native foundation for a trusted South African photo
 - Photo AI pipeline: image upload → queued Workers AI visual metadata/OCR → seller/editor correction and approval → one-time embedding → Vectorize upsert. Buyer searches query the stored vectors and never OCR-scan the repository.
 - Idempotent `photo_ai_jobs` records, queue retries/dead-letter handling, scheduled recovery, vector deletion for rejected photos, and an admin re-index endpoint (`POST /api/admin/photo-index/rebuild`).
 
-The visual cards are intentionally placeholder previews. They do not claim to be real photographs and should be replaced by uploaded, licensed media before production launch.
+Visual cards render only the approved preview URL returned by the media service. When a derivative is unavailable, the UI shows an explicit unavailable state and does not fabricate or substitute a stock image. Development-only demo fallback is removed from production bundles and production API routes block seeded demo media.
 
 ## Local South African media fixtures
 
@@ -38,11 +40,21 @@ npm install
 npm run dev
 ```
 
+Cloudflare binding types are generated in `worker-configuration.d.ts` and committed with the project so clean CI checkouts can typecheck without a network-dependent generation step. After changing `wrangler.jsonc`, refresh them with `npx wrangler types` and commit the updated file.
+
 The frontend runs on Vite. To run the Worker API locally after installing Wrangler and configuring a D1 database, use:
 
 ```powershell
 npm run worker:dev
 ```
+
+`npm run worker:deploy` is production-only and refuses to deploy the root development bindings. It runs the production bundle gate and requires a dedicated `env.production` block with `APP_ENV=production` and no demo, localhost, or placeholder values. Use `npm run worker:deploy:development` only for an intentional non-production Worker.
+
+### Auth0 Organizations
+
+Auth0 is the recommended production identity provider for this marketplace. Configure an Auth0 SPA application with Authorization Code + PKCE, enable Organizations, and configure the API to issue RS256 access tokens. Set `VITE_AUTH0_DOMAIN`, `VITE_AUTH0_CLIENT_ID`, `VITE_AUTH0_AUDIENCE`, and the optional `VITE_AUTH0_ORGANIZATION` for the frontend. Set `AUTH_JWKS_URL`, `AUTH_ISSUER`, `AUTH_AUDIENCE`, and `AUTH_ROLES_CLAIM` as Worker variables. Register the deployed app URL as an allowed callback, logout, and web-origin URL in Auth0.
+
+The Worker verifies the Auth0 token against the tenant JWKS and creates the existing HttpOnly session. Pre-provision each Auth0 Organization ID in D1 before allowing membership exchange; keep `AUTH_ALLOW_ORG_PROVISIONING=false` in production. Auth0 owns identity, organisation membership, and sign-in roles. D1 remains the source of truth for credits, licence ownership, ledger entries, and payment state.
 
 Apply the initial database migration with Wrangler after replacing the D1 ID in `wrangler.jsonc`:
 
@@ -60,10 +72,15 @@ The curator workspace is available through **Governance** in the top navigation.
 
 Community and rights-resolution endpoints are `GET /api/community/overview`, `POST /api/rights/takedown`, `GET /api/rights/cases`, and `POST /api/rights/cases/:id/messages`. Migration `0003_community_resolution.sql` creates the forums, showcases, featured collections, takedown cases, mediation sessions, and mediation messages.
 
+Personal lightbox endpoints are `GET /api/lightboxes`, `POST /api/lightboxes`, `POST /api/lightboxes/:id/assets`, `DELETE /api/lightboxes/:id/assets/:assetId`, and `DELETE /api/lightboxes/:id`. Migration `0013_user_lightboxes.sql` stores tenant-scoped collections per authenticated organisation member; the current UI defaults to private collections. Mutations require the session CSRF token.
+
+Discovery endpoints are `GET /api/discovery`, `POST /api/saved-searches`, `PATCH /api/saved-searches/:id`, and `DELETE /api/saved-searches/:id`. Migration `0015_personalized_discovery.sql` stores explicit search preferences and alert cadence. The scheduled Worker creates in-app notifications for new matches; trending queries require an aggregate privacy threshold, and recommendations disclose the matching metadata signal.
+
 The CI workflow runs typecheck, tests, production build, and a Playwright + axe-core WCAG 2.2 AA scan against the archive landing page and resolution workspace:
 
 ```powershell
 npm run build
+npm run release:check
 npx playwright install chromium
 npm run test:a11y
 ```
@@ -102,15 +119,16 @@ An audit event is accepted only after its signed R2 object is written and a cond
 
 The code is deployable as a staged foundation, but these external controls must be configured before accepting real users, media, or money:
 
-- Connect a proven Workers-compatible authentication provider and replace the development `x-demo-user-id` seam with verified sessions and organisation membership checks.
+- Configure the Auth0 Organization tenant values and map its organization IDs to the provisioned D1 `organizations` rows. The Worker now verifies Auth0 RS256/JWKS tokens and exchanges them for the existing HttpOnly session; keep the development login disabled in production.
 - Configure R2 S3 credentials for presigned PUTs, private preview objects, CORS, media-processing workers/queues, and Cloudflare Images transformations.
 - Configure Cloudflare Stream direct creator uploads, signed playback, and provider status mapping. Webhook verification is implemented; provider provisioning is not.
 - Optionally provision the Workers AI binding, the `veld-archive-photo-index` Vectorize index, and both photo queues. Search remains deterministic without AI; when enabled, it embeds only the buyer's query and retrieves approved photo IDs from Vectorize, while image OCR/vision runs only from upload/approval jobs.
 - OCR is separately opt-in. It stays unavailable with a `503` response until both `OCR_ENABLED=true` and an `AI` binding are configured. The model is pinned by `OCR_MODEL`; callers cannot select arbitrary models.
 - Register a payment provider and payout rail, then connect checkout state transitions to verified webhooks and the double-entry ledger. Adapter contracts and tests are present; no fake payment is treated as paid.
 - Configure Turnstile, audit signing keys, KYC provider secrets, WAF/rate limits, CSP, and production environment-specific bindings.
+- As an admin, call `GET /api/ops/readiness` after provisioning. Do not promote the release until every check reports `ready: true`; WAF, key rotation, and restore drills require dated attestations after live verification.
 
-Never use the demo user header or seeded demo records as production identity or evidence.
+Never use the demo user header or seeded demo records as production identity or evidence. The production search/media routes reject demo records, and the release gate removes development fallback content from the built client.
 
 ## Provider abstraction layer
 

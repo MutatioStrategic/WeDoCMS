@@ -4,7 +4,7 @@ export * from "./payouts";
 export * from "./payments";
 
 import { PayFastPayoutAdapter, PayoutProviderRegistry, SouthAfricanBankPayoutAdapter, StripeConnectPayoutAdapter } from "./payouts";
-import { JsonPaymentAdapter, PaymentProviderRegistry } from "./payments";
+import { JsonPaymentAdapter, PaymentProviderRegistry, PaystackPaymentAdapter } from "./payments";
 
 /** The environment values needed to compose the available integrations. */
 export type IntegrationEnvironment = {
@@ -34,11 +34,15 @@ export class IntegrationContainer {
     this.payouts = new PayoutProviderRegistry();
 
     if (environment.PAYMENT_PROVIDER && environment.PAYMENT_ENDPOINT && environment.PAYMENT_TOKEN) {
-      this.payments.register(new JsonPaymentAdapter({
-        provider: environment.PAYMENT_PROVIDER,
-        endpoint: environment.PAYMENT_ENDPOINT,
-        token: environment.PAYMENT_TOKEN,
-      }));
+      if (environment.PAYMENT_PROVIDER.toLowerCase() === "paystack") {
+        this.payments.register(new PaystackPaymentAdapter({ endpoint: environment.PAYMENT_ENDPOINT, secretKey: environment.PAYMENT_TOKEN }));
+      } else {
+        this.payments.register(new JsonPaymentAdapter({
+          provider: environment.PAYMENT_PROVIDER,
+          endpoint: environment.PAYMENT_ENDPOINT,
+          token: environment.PAYMENT_TOKEN,
+        }));
+      }
     }
     if (environment.STRIPE_SECRET_KEY) {
       this.payouts.register(new StripeConnectPayoutAdapter({ secretKey: environment.STRIPE_SECRET_KEY }));

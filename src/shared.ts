@@ -67,6 +67,15 @@ export type Asset = {
   releases?: ContributorRelease[];
   monetizationModel?: MonetizationModel;
   licensePriceCents?: number | null;
+  previewUrl?: string | null;
+  mediaContentType?: string | null;
+  mediaWidth?: number | null;
+  mediaHeight?: number | null;
+  mediaDurationSeconds?: number | null;
+  mediaOrientation?: "landscape" | "portrait" | "square" | null;
+  mediaHasPeople?: boolean;
+  mediaUsageType?: "commercial" | "editorial";
+  mediaAiGenerated?: boolean;
 };
 
 export type SearchResponse = {
@@ -74,6 +83,8 @@ export type SearchResponse = {
   mode: "keyword" | "semantic-preview";
   results: Asset[];
   facets: { label: string; value: string; count: number }[];
+  nextCursor?: string | null;
+  total?: number;
 };
 
 export type ModerationQueueResponse = {
@@ -180,6 +191,7 @@ export type BuyerAnalytics = {
 export type LicenceRequest = {
   assetId: string;
   licenceType: LicenceType;
+  productCode?: "standard" | "enhanced" | "editorial" | "custom";
   territory: string;
   durationDays: number;
 };
@@ -240,6 +252,89 @@ export type CommunityOverview = {
   threads: ForumThread[];
   showcases: CuratedShowcase[];
   collections: FeaturedCollection[];
+};
+
+export type CreatorProfile = {
+  id: string;
+  slug: string;
+  name: string;
+  headline: string;
+  bio: string;
+  location: string;
+  specialties: string[];
+  websiteUrl: string | null;
+  assetCount: number;
+  collectionCount: number;
+  featuredAssetId: string | null;
+};
+
+export type PortfolioCollection = {
+  id: string;
+  slug: string;
+  title: string;
+  description: string;
+  assetCount: number;
+  coverAssetId: string | null;
+  creator: Pick<CreatorProfile, "slug" | "name">;
+};
+
+export type ContributorPerformance = {
+  range: string;
+  summary: { views: number; saves: number; downloads: number; licences: number; conversionRate: number };
+  topAssets: Array<{ assetId: string; title: string; views: number; saves: number; downloads: number; licences: number; conversionRate: number }>;
+  downloadHistory: Array<{ id: string; assetId: string; assetTitle: string; licenceId: string; occurredAt: string }>;
+};
+
+export type LicenceProduct = {
+  code: "standard" | "enhanced" | "editorial" | "custom";
+  name: string;
+  description: string;
+  termsVersion: string;
+  restrictions: Record<string, boolean | number | string>;
+};
+
+export type AccountLifecycle = {
+  emailVerified: boolean;
+  mfaEnrolled: boolean;
+  emailNotifications: boolean;
+  productNotifications: boolean;
+  exportStatus: "not_requested" | "queued" | "ready" | "expired" | "failed";
+  deletionStatus: "none" | "requested" | "cancelled" | "scheduled" | "completed";
+};
+
+export type UserLightbox = {
+  id: string;
+  name: string;
+  description: string;
+  visibility: "private" | "shared";
+  assetIds: string[];
+  assetCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SavedSearch = {
+  id: string;
+  name: string;
+  query: string;
+  mediaKind: "all" | "image" | "video";
+  alertFrequency: "none" | "daily" | "weekly";
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type TrendingSearch = { query: string; searchCount: number };
+
+export type DiscoveryRecommendation = {
+  asset: Asset;
+  reason: string;
+};
+
+export type DiscoveryResponse = {
+  trending: TrendingSearch[];
+  savedSearches: SavedSearch[];
+  recommendations: DiscoveryRecommendation[];
+  personalized: boolean;
 };
 
 export type TakedownReason = "copyright" | "consent" | "cultural_harm" | "privacy" | "metadata" | "other";

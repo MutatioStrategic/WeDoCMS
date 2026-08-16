@@ -75,6 +75,8 @@ export const searchResponseSchema = z.object({
   mode: z.enum(["keyword", "semantic-preview"]),
   results: z.array(assetSchema),
   facets: z.array(z.object({ label: z.string(), value: z.string(), count: z.number().int().nonnegative() })),
+  nextCursor: z.string().nullable().optional(),
+  total: z.number().int().nonnegative().optional(),
 });
 
 export const assetCreateRequestSchema = z.object({
@@ -152,6 +154,7 @@ export const uploadCompleteResponseSchema = z.object({
 export const licenceRequestSchema = z.object({
   assetId: z.string().min(1),
   licenceType: z.enum(["editorial", "commercial", "advertising", "social", "broadcast", "exclusive"]),
+  productCode: z.enum(["standard", "enhanced", "editorial", "custom"]).optional(),
   territory: z.string().min(1).max(80),
   durationDays: z.number().int().positive().max(3650),
 });

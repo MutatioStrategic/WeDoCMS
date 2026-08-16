@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { chromium } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
@@ -24,22 +25,37 @@ function report(label, results) {
   return false;
 }
 
+function installedBrowserPath() {
+  if (process.env.PLAYWRIGHT_EXECUTABLE_PATH) return process.env.PLAYWRIGHT_EXECUTABLE_PATH;
+  if (process.platform !== "win32") return undefined;
+  const candidates = [
+    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+    "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+  ];
+  return candidates.find((candidate) => existsSync(candidate));
+}
+
 try {
   await waitForServer();
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ headless: true, executablePath: installedBrowserPath() });
   const context = await browser.newContext();
   const page = await context.newPage();
   await page.goto(`http://127.0.0.1:${port}`, { waitUntil: "networkidle" });
   const scan = () => new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"]).analyze();
   const initial = await scan();
   const initialPassed = report("archive landing page", initial);
+  await page.getByRole("button", { name: /Media studio/ }).click();
+  const studio = await scan();
+  const studioPassed = report("media formatting studio", studio);
   await page.getByRole("button", { name: "Community & collections" }).click();
   await page.getByRole("button", { name: "Open a resolution case" }).click();
   const resolution = await scan();
   const resolutionPassed = report("community and resolution workspace", resolution);
   await context.close();
   await browser.close();
-  if (!initialPassed || !resolutionPassed) process.exitCode = 1;
+  if (!initialPassed || !studioPassed || !resolutionPassed) process.exitCode = 1;
 } finally {
   server.kill();
 }

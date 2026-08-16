@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { JsonPaymentAdapter } from "./payments";
+import { JsonPaymentAdapter, PaystackPaymentAdapter } from "./payments";
 
 describe("JsonPaymentAdapter", () => {
   it("creates a hosted checkout session with an idempotency key", async () => {
@@ -43,5 +43,56 @@ describe("JsonPaymentAdapter", () => {
       successUrl: "https://app.example/success",
       cancelUrl: "https://app.example/cancel",
     })).rejects.toThrow("hosted URL");
+  });
+});
+
+describe("PaystackPaymentAdapter", () => {
+  it("initializes server-side hosted checkout with licence metadata", async () => {
+    let request: Request | undefined;
+    const adapter = new PaystackPaymentAdapter({
+      endpoint: "https://api.paystack.co/transaction/initialize",
+      secretKey: "test-secret",
+      fetcher: async (input, init) => {
+        request = new Request(input, init);
+        return new Response(JSON.stringify({ status: true, data: { authorization_url: "https://checkout.paystack.com/access", access_code: "access", reference: "licence-1" } }));
+      },
+    });
+    const result = await adapter.createCheckoutSession({
+      idempotencyKey: "licence:12345678",
+      licenceId: "licence-1",
+      amountCents: 12500,
+      currency: "ZAR",
+      buyer: { id: "buyer-1", email: "buyer@example.com" },
+      successUrl: "https://app.example/success",
+      cancelUrl: "https://app.example/cancel",
+      metadata: { organizationId: "org-1" },
+    });
+    expect(result).toMatchObject({ provider: "paystack", checkoutUrl: "https://checkout.paystack.com/access", providerReference: "licence-1" });
+    expect(request?.headers.get("Authorization")).toBe("Bearer test-secret");
+    expect(await request?.json()).toMatchObject({
+      email: "buyer@example.com",
+      amount: "12500",
+      currency: "ZAR",
+      reference: "licence-1",
+      callback_url: "https://app.example/success",
+      metadata: { licenceId: "licence-1", buyerId: "buyer-1", cancel_action: "https://app.example/cancel" },
+    });
+  });
+
+  it("fails closed when Paystack omits its authorization URL", async () => {
+    const adapter = new PaystackPaymentAdapter({
+      endpoint: "https://api.paystack.co/transaction/initialize",
+      secretKey: "test-secret",
+      fetcher: async () => new Response(JSON.stringify({ status: false, message: "invalid key" })),
+    });
+    await expect(adapter.createCheckoutSession({
+      idempotencyKey: "licence:12345678",
+      licenceId: "licence-1",
+      amountCents: 12500,
+      currency: "ZAR",
+      buyer: { id: "buyer-1", email: "buyer@example.com" },
+      successUrl: "https://app.example/success",
+      cancelUrl: "https://app.example/cancel",
+    })).rejects.toThrow("authorization URL");
   });
 });

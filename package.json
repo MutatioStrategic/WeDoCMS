@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "release:check": "node scripts/release-gate.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:a11y": "node scripts/accessibility-check.mjs",
@@ -19,11 +20,13 @@
     "test:local-smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-local-smoke.ps1",
     "seed:demo-media": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/seed-demo-media.ps1",
     "worker:dev": "wrangler dev",
-    "worker:deploy": "wrangler deploy",
+    "worker:deploy": "npm run build && npm run release:check && node scripts/release-gate.mjs --production && wrangler deploy --env production",
+    "worker:deploy:development": "wrangler deploy",
     "backup:d1": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/backup-d1.ps1",
     "chaos:uploads": "node scripts/chaos-upload.mjs"
   },
   "dependencies": {
+    "@auth0/auth0-react": "^2.24.0",
     "hono": "^4.7.7",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
