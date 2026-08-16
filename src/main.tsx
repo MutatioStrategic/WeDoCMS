@@ -28,7 +28,7 @@ function TurnstileChallenge({ onToken }: { onToken: (token: string) => void }) {
   return <div ref={ref} aria-label="Bot protection challenge" />;
 }
 
-type View = "explore" | "campaigns" | "contributors" | "contributor" | "buyer" | "review" | "governance" | "community" | "account" | "studio" | "rights" | "stakeholders";
+type View = "explore" | "search" | "campaigns" | "contributors" | "contributor" | "buyer" | "review" | "governance" | "community" | "account" | "studio" | "rights" | "stakeholders";
 type SessionUser = { id: string; email: string; displayName: string; role: string; organizationId: string; organizationName: string };
 type AppNotification = { id: string; type: string; title: string; body: string; resource_type?: string | null; resource_id?: string | null; read_at?: string | null; created_at: string };
 type Auth0Bridge = Pick<Auth0ContextInterface, "isAuthenticated" | "isLoading" | "getAccessTokenSilently" | "loginWithRedirect" | "logout">;
@@ -68,6 +68,8 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
   const [query, setQuery] = useState("");
   const [activeQuery, setActiveQuery] = useState("");
   const [assets, setAssets] = useState<Asset[]>([]);
+  const [assetsLoading, setAssetsLoading] = useState(true);
+  const [searchRequestId, setSearchRequestId] = useState(0);
   const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
   const [filter, setFilter] = useState<"all" | "image" | "video">("all");
   const [sort, setSort] = useState<"relevance" | "newest" | "popular" | "random">("relevance");
@@ -206,11 +208,15 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
 
   useEffect(() => {
     const controller = new AbortController();
+    const startedAt = performance.now();
+    let loadingTimer: ReturnType<typeof setTimeout> | undefined;
+    setAssetsLoading(true);
     const params = new URLSearchParams({ q: activeQuery, kind: filter, status: "published", sort, orientation });
     fetch(`/api/assets?${params}`, { signal: controller.signal, credentials: "include" })
       .then(async (response) => { if (!response.ok) throw new Error("API unavailable"); return response.json() as Promise<SearchResponse>; })
       .then((data) => setAssets(data.results.map((asset) => archiveDomain.withMatchExplanation(asset, activeQuery))))
       .catch(() => {
+        if (controller.signal.aborted) return;
         if (import.meta.env.DEV) {
           setAssets(filterDemoAssets(activeQuery, filter).map((asset) => archiveDomain.withMatchExplanation(asset, activeQuery)));
           setNotice("Demo archive mode is active while the live content service is unavailable.");
@@ -218,9 +224,14 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
         }
         setAssets([]);
         setNotice("The verified content service is unavailable. No fallback media is shown in production.");
+      })
+      .finally(() => {
+        if (controller.signal.aborted) return;
+        const remaining = Math.max(0, 900 - (performance.now() - startedAt));
+        loadingTimer = setTimeout(() => setAssetsLoading(false), remaining);
       });
-    return () => controller.abort();
-  }, [activeQuery, filter, sort, orientation]);
+    return () => { controller.abort(); if (loadingTimer) clearTimeout(loadingTimer); };
+  }, [activeQuery, filter, sort, orientation, searchRequestId]);
 
   async function loadReviewQueue() {
     try {
@@ -294,7 +305,9 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
   function useDiscoveryQuery(value: string) {
     setQuery(value);
     setActiveQuery(value);
-    setView("explore");
+    setAssetsLoading(true);
+    setSearchRequestId((current) => current + 1);
+    setView("search");
     trackEvent({ type: "search", query: value });
     setNotice(`Searching the archive for “${value}”`);
   }
@@ -303,8 +316,10 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
     event.preventDefault();
     const value = query.trim();
     setActiveQuery(value);
+    setAssetsLoading(true);
+    setSearchRequestId((current) => current + 1);
     trackEvent({ type: "search", query: value });
-    setView("explore");
+    setView("search");
     setNotice(query.trim() ? `Searching the archive for “${query.trim()}”` : "Showing the latest verified South African media");
   }
 
@@ -322,6 +337,7 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
     {!analyticsConsent && <button className="privacy-consent" onClick={() => setAnalyticsConsent(true)}>Allow anonymous demand insights</button>}
 
     {view === "explore" && <ExploreView query={query} setQuery={setQuery} runSearch={runSearch} assets={assets} filter={filter} setFilter={setFilter} sort={sort} setSort={setSort} orientation={orientation} setOrientation={setOrientation} verifiedCount={verifiedCount} notice={notice} onOpen={openAsset} authenticated={Boolean(sessionUser)} discovery={discovery} onUseQuery={useDiscoveryQuery} onSaveSearch={saveCurrentSearch} onDeleteSearch={deleteSavedSearch} />}
+    {view === "search" && <SearchResultsView query={query} setQuery={setQuery} activeQuery={activeQuery} runSearch={runSearch} assets={assets} assetsLoading={assetsLoading} filter={filter} setFilter={setFilter} sort={sort} setSort={setSort} orientation={orientation} setOrientation={setOrientation} notice={notice} onOpen={openAsset} />}
     {view === "campaigns" && <CampaignWorkspace api={api} onNotice={setNotice} onOpen={openAsset} />}
     {view === "contributors" && <CreatorMarketplace onOpen={openAsset} />}
     {view === "contributor" && <><AnalyticsDashboard role="contributor" /><MarketplaceLegalDocuments api={api} /><SellerVerificationPanel api={api} onNotice={setNotice} /><ContributorWorkspace api={api} onNotice={setNotice} /></>}
@@ -349,6 +365,68 @@ function ExploreView({ query, setQuery, runSearch, assets, filter, setFilter, so
     <ModerationQueue assets={assets} onReview={onOpen} />
     <section className="manifesto"><div className="manifesto-label">WHY VELD</div><div><h2>South Africa is not a<br /><em>stock category.</em></h2><p>Every place has a texture. Every community has a point of view. Veld gives the people who make the work more control over how it is found, licensed, and remembered.</p></div></section>
   </main>;
+}
+
+const searchSteps = [
+  "Reading the story brief",
+  "Searching verified archive records",
+  "Checking place, rights, and context",
+  "Ranking the closest visual matches",
+];
+
+function SearchResultsView({ query, setQuery, activeQuery, runSearch, assets, assetsLoading, filter, setFilter, sort, setSort, orientation, setOrientation, notice, onOpen }: { query: string; setQuery: (value: string) => void; activeQuery: string; runSearch: (event: React.FormEvent) => void; assets: Asset[]; assetsLoading: boolean; filter: "all" | "image" | "video"; setFilter: (value: "all" | "image" | "video") => void; sort: "relevance" | "newest" | "popular" | "random"; setSort: (value: "relevance" | "newest" | "popular" | "random") => void; orientation: "all" | "landscape" | "portrait" | "square"; setOrientation: (value: "all" | "landscape" | "portrait" | "square") => void; notice: string; onOpen: (asset: Asset) => void }) {
+  const [step, setStep] = useState(0);
+
+  useEffect(() => {
+    if (!assetsLoading) { setStep(searchSteps.length); return undefined; }
+    setStep(0);
+    const timer = setInterval(() => setStep((current) => Math.min(searchSteps.length - 1, current + 1)), 260);
+    return () => clearInterval(timer);
+  }, [activeQuery, assetsLoading]);
+
+  const rankedFallback = filterDemoAssets(activeQuery, filter);
+  const traceAssets = (assets.length ? assets : rankedFallback.length ? rankedFallback : demoAssets.filter((asset) => filter === "all" || asset.kind === filter)).slice(0, 4);
+  const isComplete = !assetsLoading;
+  const progress = isComplete ? 100 : Math.min(88, Math.round(((step + 1) / searchSteps.length) * 88));
+  const resultMessage = !isComplete
+    ? `Searching the archive for “${activeQuery || "the latest verified media"}”`
+    : notice.startsWith("The verified content service is unavailable")
+      ? notice
+      : `${assets.length} verified result${assets.length === 1 ? "" : "s"} found.`;
+
+  return <main className="search-results-page" id="search-results">
+    <section className="search-results-intro">
+      <div className="search-results-eyebrow"><span className="pulse" /> Archive search / live trace</div>
+      <h1>Finding the visual story<br /><em>behind your brief.</em></h1>
+      <form className="search-box" onSubmit={runSearch}><span className="search-icon" aria-hidden="true">⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Describe the story you need to tell…" aria-label="Search photo and video" /><button type="submit" disabled={assetsLoading}>{assetsLoading ? "Searching…" : "Search again"} <span>↗</span></button></form>
+      <div className="search-status" role="status" aria-live="polite" aria-busy={assetsLoading}><span className={`search-status-dot${isComplete ? " complete" : ""}`} /><span>{resultMessage}</span></div>
+    </section>
+
+    <section className="search-workbench" aria-label="Search process">
+      <aside className="search-progress-panel">
+        <div className="search-progress-heading"><span className="section-kicker">SEARCH PROCESS</span><strong>{isComplete ? "Complete" : `${progress}%`}</strong></div>
+        <div className="search-progress-track" aria-hidden="true"><span style={{ width: `${progress}%` }} /></div>
+        <ol className="search-step-list">{searchSteps.map((label, index) => <li key={label} className={index < step || isComplete ? "done" : index === step ? "current" : ""}><span>{index < step || isComplete ? "✓" : String(index + 1).padStart(2, "0")}</span><strong>{label}</strong>{index === step && !isComplete && <small>Working through indexed records</small>}</li>)}</ol>
+        <p className="search-provenance"><strong>What is being checked?</strong> Published records, human verification, location context, rights status, and the language of your brief.</p>
+      </aside>
+      <section className="search-trace-panel" aria-labelledby="trace-heading">
+        <div className="search-trace-heading"><div><span className="section-kicker">CANDIDATE MEDIA</span><h2 id="trace-heading">{isComplete ? "Candidate records checked" : "Images being checked"} <em>{isComplete ? "first." : "now."}</em></h2></div><span className="trace-count">{traceAssets.length} candidate{traceAssets.length === 1 ? "" : "s"} in view</span></div>
+        <div className="search-trace-grid">{traceAssets.map((asset, index) => <SearchTraceCard key={asset.id} asset={asset} index={index} onOpen={onOpen} loading={!isComplete} />)}</div>
+      </section>
+    </section>
+
+    <section className="search-matches" aria-labelledby="matches-heading">
+      <div className="section-heading"><div><span className="section-kicker">RANKED MATCHES</span><h2 id="matches-heading">The closest <em>stories.</em></h2></div><span className="result-note">Open a result to inspect the metadata, verification, and rights evidence behind its ranking.</span></div>
+      <div className="toolbar"><div className="filter-tabs" role="tablist" aria-label="Media type">{(["all", "image", "video"] as const).map((value) => <button key={value} type="button" role="tab" aria-selected={filter === value} className={filter === value ? "active" : ""} onClick={() => setFilter(value)}>{value === "all" ? "All media" : value === "image" ? "Photography" : "Film & video"}</button>)}</div><label className="toolbar-select">Sort<select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="relevance">Most relevant</option><option value="newest">Newest</option><option value="popular">Popular</option><option value="random">Surprise me</option></select></label><label className="toolbar-select">Orientation<select value={orientation} onChange={(event) => setOrientation(event.target.value as typeof orientation)}><option value="all">Any orientation</option><option value="landscape">Landscape</option><option value="portrait">Portrait</option><option value="square">Square</option></select></label><div className="verified-stat"><span className="verified-dot" />{assets.filter((asset) => asset.humanVerified).length} human-verified results</div></div>
+      <div className="asset-grid" aria-busy={assetsLoading}>{assetsLoading ? <div className="empty-state" role="status">Ranking the checked candidates…</div> : assets.length ? assets.map((asset, index) => <AssetCard key={asset.id} asset={asset} index={index} onOpen={onOpen} />) : <div className="empty-state">No records matched this brief closely enough. Try a location, landmark, or cultural context.</div>}</div>
+    </section>
+  </main>;
+}
+
+function SearchTraceCard({ asset, index, onOpen, loading }: { asset: Asset; index: number; onOpen: (asset: Asset) => void; loading: boolean }) {
+  const [failed, setFailed] = useState(false);
+  const available = Boolean(asset.previewUrl) && !failed;
+  return <button type="button" className={`search-trace-card${loading ? " is-loading" : ""}`} onClick={() => onOpen(asset)} aria-label={`Inspect ${asset.title} while searching`}><div className={`search-trace-visual visual-${(index % 3) + 1} ${asset.kind}`}>{available && asset.kind === "image" && <img src={asset.previewUrl!} alt="" loading="lazy" onError={() => setFailed(true)} />}{available && asset.kind === "video" && <video src={asset.previewUrl!} muted playsInline preload="metadata" onError={() => setFailed(true)} />}{!available && <span className="search-trace-placeholder">Preview queued</span>}<span className="search-trace-scan" aria-hidden="true" /><span className="search-trace-kind">{asset.kind === "video" ? "FILM" : "PHOTO"}</span><span className="search-trace-place">{asset.landmark ?? asset.locality ?? asset.city}</span></div><div className="search-trace-copy"><strong>{asset.title}</strong><small>{loading ? "Checking metadata…" : "Match candidate"}</small></div></button>;
 }
 
 function DiscoveryShelf({ discovery, authenticated, activeQuery, onUseQuery, onOpen, onSaveSearch, onDeleteSearch }: { discovery: DiscoveryResponse; authenticated: boolean; activeQuery: string; onUseQuery: (value: string) => void; onOpen: (asset: Asset) => void; onSaveSearch: (frequency: SavedSearch["alertFrequency"]) => Promise<void>; onDeleteSearch: (id: string) => Promise<void> }) {

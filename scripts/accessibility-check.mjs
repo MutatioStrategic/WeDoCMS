@@ -46,6 +46,17 @@ try {
   const scan = () => new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"]).analyze();
   const initial = await scan();
   const initialPassed = report("archive landing page", initial);
+  await page.route("**/api/assets?**", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ results: [] }) });
+  });
+  await page.getByLabel("Search photo and video").fill("Table Mountain");
+  await page.getByRole("button", { name: /Search archive/ }).click();
+  await page.locator(".search-trace-card.is-loading .search-trace-scan").first().waitFor();
+  console.log("âœ“ archive search: scanning feedback is visible while results load");
+  await page.locator(".search-status-dot.complete").waitFor();
+  const searchResults = await scan();
+  const searchPassed = report("archive search results", searchResults);
   await page.locator("button.stakeholder-nav-link").click();
   const stakeholderOverview = await scan();
   const stakeholderOverviewPassed = report("stakeholder system overview", stakeholderOverview);
@@ -58,7 +69,7 @@ try {
   const resolutionPassed = report("community and resolution workspace", resolution);
   await context.close();
   await browser.close();
-  if (!initialPassed || !stakeholderOverviewPassed || !studioPassed || !resolutionPassed) process.exitCode = 1;
+  if (!initialPassed || !searchPassed || !stakeholderOverviewPassed || !studioPassed || !resolutionPassed) process.exitCode = 1;
 } finally {
   server.kill();
 }
