@@ -41,3 +41,18 @@ export function isDemoAssetRow(row: Record<string, unknown>): boolean {
     || String(row.id ?? "").startsWith("asset-test-photo-")
     || String(row.contributor ?? "").toLowerCase().includes("demo archive");
 }
+
+export function isPublishedPreviewAssetRow(row: Record<string, unknown>): boolean {
+  return String(row.status ?? "") === "published"
+    && ["image", "video"].includes(String(row.kind ?? ""))
+    && String(row.rights_status ?? "") === "verified"
+    && Number(row.human_verified ?? 0) === 1
+    && Boolean(String(row.source_url ?? "").trim())
+    && Boolean(String(row.source_license ?? "").trim())
+    && Boolean(String(row.source_attribution ?? "").trim())
+    && Boolean(String(row.preview_key ?? row.original_key ?? "").trim());
+}
+
+export function isProductionDemoAssetRow(row: Record<string, unknown>): boolean {
+  return isDemoAssetRow(row) && !isPublishedPreviewAssetRow(row);
+}

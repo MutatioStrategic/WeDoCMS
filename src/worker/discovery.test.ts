@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Asset } from "../shared";
-import { discoveryTokens, isDemoAssetRow, normalizeSavedQuery, scoreRecommendation } from "./discovery";
+import { discoveryTokens, isDemoAssetRow, isProductionDemoAssetRow, isPublishedPreviewAssetRow, normalizeSavedQuery, scoreRecommendation } from "./discovery";
 
 const asset: Asset = {
   id: "asset-cape", kind: "image", status: "published", workflowStage: "approval",
@@ -28,5 +28,13 @@ describe("personalized discovery", () => {
     expect(isDemoAssetRow({ id: "asset-real", demo_seed: 0, contributor: "Studio" })).toBe(false);
     expect(isDemoAssetRow({ id: "asset-demo-table-mountain", demo_seed: 0 })).toBe(true);
     expect(isDemoAssetRow({ id: "asset-real", demo_seed: 1 })).toBe(true);
+  });
+
+  it("allows only published, verified sourced previews through the production exception", () => {
+    const published = { id: "asset-demo-table-mountain", kind: "image", status: "published", demo_seed: 1, rights_status: "verified", human_verified: 1, source_url: "https://commons.wikimedia.org/example", source_license: "CC BY-SA 4.0", source_attribution: "Creator / Wikimedia Commons", preview_key: "previews/demo/table-mountain.webp" };
+    const pending = { ...published, status: "needs_review" };
+    expect(isPublishedPreviewAssetRow(published)).toBe(true);
+    expect(isProductionDemoAssetRow(published)).toBe(false);
+    expect(isProductionDemoAssetRow(pending)).toBe(true);
   });
 });

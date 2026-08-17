@@ -47,7 +47,7 @@ import {
   type RequestUser,
 } from "./auth";
 import { allowedOrigin, applySecurityHeaders, enforceRateLimit, scanMediaObject, type SecurityBindings } from "./security";
-import { discoveryTokens, isDemoAssetRow, normalizeSavedQuery, scoreRecommendation } from "./discovery";
+import { discoveryTokens, isDemoAssetRow, isProductionDemoAssetRow, normalizeSavedQuery, scoreRecommendation } from "./discovery";
 import { parseCampaignBrief, rankCampaignAssets, type BrandKit, type CampaignBrief, type CampaignStage } from "../campaign-intelligence";
 import { agreementText, buyerAgreement, getMarketplaceAgreement, paymentDisclosure, sellerAgreement } from "../legal/agreements";
 import {
@@ -552,9 +552,11 @@ const assetRowToDomain = (row: Record<string, unknown>): Asset => ({
   artistLicenseSha256: (row.artist_license_sha256 as string | null) ?? null,
   monetizationModel: (row.monetization_model as MonetizationModel | undefined) ?? "membership",
   licensePriceCents: row.license_price_cents == null ? null : Number(row.license_price_cents),
-  previewUrl: row.kind === "image" && row.original_key
-    ? `/api/assets/${String(row.id)}/image/preview`
-    : row.preview_key ? `/api/assets/${String(row.id)}/media?variant=preview` : null,
+  previewUrl: row.preview_key
+    ? `/api/assets/${String(row.id)}/media?variant=preview`
+    : row.kind === "image" && row.original_key
+      ? `/api/assets/${String(row.id)}/image/preview`
+      : null,
   mediaContentType: (row.media_content_type as string | null) ?? null,
   mediaWidth: row.media_width == null ? null : Number(row.media_width),
   mediaHeight: row.media_height == null ? null : Number(row.media_height),
@@ -2639,7 +2641,7 @@ app.get("/api/assets", async (c) => {
     }
   }
 
-  if (String(c.env.APP_ENV) === "production" && rows.some(isDemoAssetRow)) {
+  if (String(c.env.APP_ENV) === "production" && rows.some(isProductionDemoAssetRow)) {
     logEvent("error", "production.demo_asset_blocked", c.get("trace"), { route: "/api/assets", resultCount: rows.length });
     return c.json({ error: "Production content guard blocked demo media", code: "production_demo_asset_blocked" }, 503);
   }
@@ -2648,7 +2650,10 @@ app.get("/api/assets", async (c) => {
     const clauses = [params.status === "all" ? "1 = 1" : "a.status = ?"];
     const values: Array<string | number> = params.status === "all" ? [] : [params.status];
 
-    if (String(c.env.APP_ENV) === "production") clauses.push("COALESCE(a.demo_seed, 0) = 0 AND a.id NOT LIKE 'asset-demo-%' AND a.id NOT LIKE 'asset-test-photo-%'");
+    if (String(c.env.APP_ENV) === "production") {
+      clauses.push("((COALESCE(a.demo_seed, 0) = 0 AND a.id NOT LIKE 'asset-demo-%' AND a.id NOT LIKE 'asset-test-photo-%') OR (a.status = 'published' AND a.kind IN ('image', 'video') AND a.rights_status = 'verified' AND a.human_verified = 1 AND a.source_url IS NOT NULL AND a.source_license IS NOT NULL AND a.source_attribution IS NOT NULL AND (a.preview_key IS NOT NULL OR a.original_key IS NOT NULL)))");
+      clauses.push("(a.preview_key IS NOT NULL OR a.original_key IS NOT NULL)");
+    }
 
     if (params.kind !== "all") {
       clauses.push("a.kind = ?");
@@ -2863,9 +2868,9 @@ app.post("/api/licences/:id/download", async (c) => {
 });
 
 app.get("/api/assets/:id/media", async (c) => {
-  const asset = await c.env.DB.prepare("SELECT id, organization_id, owner_id, kind, status, original_key, preview_key, stream_uid, demo_seed, updated_at FROM assets WHERE id = ? AND status IN ('published', 'processing', 'needs_review')").bind(c.req.param("id")).first<{ id: string; organization_id: string; owner_id: string; kind: string; status: string; original_key: string | null; preview_key: string | null; stream_uid: string | null; demo_seed: number; updated_at: string }>();
+  const asset = await c.env.DB.prepare("SELECT id, organization_id, owner_id, kind, status, original_key, preview_key, stream_uid, demo_seed, updated_at, rights_status, human_verified, source_url, source_license, source_attribution FROM assets WHERE id = ? AND status IN ('published', 'processing', 'needs_review')").bind(c.req.param("id")).first<{ id: string; organization_id: string; owner_id: string; kind: string; status: string; original_key: string | null; preview_key: string | null; stream_uid: string | null; demo_seed: number; updated_at: string; rights_status: string; human_verified: number; source_url: string | null; source_license: string | null; source_attribution: string | null }>();
   if (!asset) return c.json({ error: "Asset not found" }, 404);
-  if (String(c.env.APP_ENV) === "production" && (asset.demo_seed === 1 || asset.id.startsWith("asset-demo-") || asset.id.startsWith("asset-test-photo-"))) return c.json({ error: "Production content guard blocked demo media" }, 404);
+  if (String(c.env.APP_ENV) === "production" && isProductionDemoAssetRow(asset)) return c.json({ error: "Production content guard blocked demo media" }, 404);
   if (asset.status !== "published") {
     const user = await requestUser(c);
     if (!user || user.organizationId !== asset.organization_id || (user.id !== asset.owner_id && !allowedRole(user, ["editor", "admin"]))) return c.json({ error: "Asset not found" }, 404);
@@ -2892,7 +2897,7 @@ app.get("/api/assets/:id/media", async (c) => {
     if (object.httpEtag) headers.set("ETag", object.httpEtag);
     return new Response(object.body, { headers });
   }
-  const version = encodeURIComponent(asset.updated_at);
+  const version = encodeURIComponent(String(asset.updated_at));
   const imageVariants = asset.kind === "image" && asset.original_key ? [
     { variant: "thumb", width: 320, height: 240, status: "ready", contentType: "image/auto", url: `/api/assets/${asset.id}/image/thumb?v=${version}` },
     { variant: "card", width: 800, height: 600, status: "ready", contentType: "image/auto", url: `/api/assets/${asset.id}/image/card?v=${version}` },
@@ -2910,13 +2915,13 @@ const imageVariantOptions = {
 
 app.get("/api/assets/:id/image/:variant", async (c) => {
   const variant = imageVariantSchema.parse(c.req.param("variant"));
-  const cache = await caches.open("veld-archive-image-variants-v1");
+  const cache = await caches.open("veld-archive-image-variants-v2");
   const cacheKey = new Request(c.req.url, { headers: { Accept: c.req.header("Accept") ?? "image/webp" } });
   const cached = await cache.match(cacheKey);
   if (cached) return cached;
-  const asset = await c.env.DB.prepare("SELECT id, original_key, demo_seed FROM assets WHERE id = ? AND kind = 'image' AND status = 'published'").bind(c.req.param("id")).first<{ id: string; original_key: string | null; demo_seed: number }>();
-  if (!asset?.original_key || (String(c.env.APP_ENV) === "production" && (asset.demo_seed === 1 || asset.id.startsWith("asset-demo-") || asset.id.startsWith("asset-test-photo-")))) return c.json({ error: "Published image not found" }, 404);
-  const original = await c.env.MEDIA_BUCKET.get(asset.original_key);
+  const asset = await c.env.DB.prepare("SELECT id, original_key, demo_seed, status, kind, rights_status, human_verified, source_url, source_license, source_attribution, preview_key FROM assets WHERE id = ? AND kind = 'image' AND status = 'published'").bind(c.req.param("id")).first<Record<string, unknown>>();
+  if (!asset?.original_key || (String(c.env.APP_ENV) === "production" && isProductionDemoAssetRow(asset))) return c.json({ error: "Published image not found" }, 404);
+  const original = await c.env.MEDIA_BUCKET.get(String(asset.original_key));
   if (!original?.body) return c.json({ error: "Image original is unavailable" }, 503);
   const accept = c.req.header("Accept") ?? "";
   const format = accept.includes("image/avif") ? "image/avif" : accept.includes("image/webp") ? "image/webp" : "image/jpeg";
@@ -3017,7 +3022,7 @@ app.get("/api/discovery", async (c) => {
   const tokens = discoveryTokens(preferenceValues);
   const savedIds = new Set(savedAssets.results.map((row) => String(row.id)));
   const recommendations = candidates.results
-    .filter((row) => !savedIds.has(String(row.id)) && !(String(c.env.APP_ENV) === "production" && isDemoAssetRow(row)))
+    .filter((row) => !savedIds.has(String(row.id)) && !(String(c.env.APP_ENV) === "production" && isProductionDemoAssetRow(row)))
     .map((row) => {
       const asset = assetRowToDomain(row);
       return { asset, ...scoreRecommendation(asset, tokens) };

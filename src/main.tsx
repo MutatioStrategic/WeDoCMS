@@ -47,22 +47,6 @@ const paystackSubscriptionPlanCode = (import.meta.env.VITE_PAYSTACK_SUBSCRIPTION
 const supabaseClient: SupabaseClient | undefined = supabaseConfigured ? createClient(supabaseUrl!, supabaseAnonKey!, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } }) : undefined;
 const emptyDiscovery: DiscoveryResponse = { trending: [], savedSearches: [], recommendations: [], personalized: false };
 
-const demoAssets: Asset[] = [
-  { id: "asset-braai-cape-flats", kind: "image", status: "published", title: "Saturday braai, Cape Flats", description: "A human-verified South African braai in an everyday Cape Flats setting.", caption: "Friends gather around a wood-fire braai in the Cape Flats.", country: "South Africa", province: "Western Cape", city: "Cape Town", locality: "Mitchells Plain", landmark: null, subjectTags: ["people", "food", "community", "outdoor"], culturalTags: ["South African braai", "wood-fire braai", "Cape Flats"], rightsStatus: "verified", modelReleaseStatus: "verified", propertyReleaseStatus: "not_required", authenticityConfidence: .92, humanVerified: true, contributor: "Veld demo archive", workflowStage: "approval", aiTags: ["braai", "community"], curatorNotes: "Demo fallback record." },
-  { id: "asset-demo-table-mountain", kind: "image", status: "published", title: "Table Mountain above Cape Town", description: "A documented panorama of Table Mountain in Cape Town, Western Cape.", caption: "Table Mountain, Cape Town, Western Cape, South Africa.", country: "South Africa", province: "Western Cape", city: "Cape Town", locality: "City Bowl", landmark: "Table Mountain", subjectTags: ["landscape", "mountain", "city", "coast"], culturalTags: ["South African landscape", "Cape Town"], rightsStatus: "verified", modelReleaseStatus: "not_required", propertyReleaseStatus: "not_required", authenticityConfidence: .99, humanVerified: true, contributor: "Veld demo archive", workflowStage: "approval", aiTags: ["South Africa", "Cape Town", "Table Mountain"], curatorNotes: "Demo fallback record." },
-  { id: "asset-demo-garden-route", kind: "image", status: "published", title: "Garden Route landscape", description: "A documented photograph of the Garden Route National Park in South Africa.", caption: "Garden Route National Park landscape, South Africa.", country: "South Africa", province: "Eastern Cape", city: "Knysna", locality: "Garden Route", landmark: "Garden Route National Park", subjectTags: ["landscape", "forest", "coast", "travel"], culturalTags: ["South African landscape", "Garden Route"], rightsStatus: "verified", modelReleaseStatus: "not_required", propertyReleaseStatus: "not_required", authenticityConfidence: .98, humanVerified: true, contributor: "Veld demo archive", workflowStage: "approval", aiTags: ["South Africa", "Garden Route"], curatorNotes: "Demo fallback record." },
-  { id: "asset-demo-road", kind: "video", status: "published", title: "Left-side drive through the Garden Route", description: "A right-hand-drive vehicle travels on the left side of a Garden Route road.", caption: "Road footage through the Garden Route, South Africa.", country: "South Africa", province: "Western Cape", city: "George", locality: "Garden Route", landmark: "Outeniqua Mountains", subjectTags: ["road", "travel", "driving", "video"], culturalTags: ["Garden Route", "right-hand drive", "South African road life"], rightsStatus: "verified", modelReleaseStatus: "not_required", propertyReleaseStatus: "not_required", authenticityConfidence: .94, humanVerified: true, contributor: "Veld demo archive", workflowStage: "approval", aiTags: ["Garden Route", "road footage"], curatorNotes: "Demo fallback record." },
-];
-
-function filterDemoAssets(query: string, kind: "all" | "image" | "video"): Asset[] {
-  const terms = query.toLowerCase().split(/[^a-z0-9]+/).filter((term) => term.length > 2);
-  return demoAssets.filter((asset) => {
-    if (kind !== "all" && asset.kind !== kind) return false;
-    const haystack = [asset.title, asset.description, asset.caption, asset.city, asset.locality, asset.landmark, ...asset.subjectTags, ...asset.culturalTags].filter(Boolean).join(" ").toLowerCase();
-    return terms.every((term) => haystack.includes(term));
-  });
-}
-
 function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClient }) {
   const [view, setView] = useState<View>(() => window.location.pathname === "/account" ? "account" : "explore");
   const [query, setQuery] = useState("");
@@ -217,13 +201,8 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
       .then((data) => setAssets(data.results.map((asset) => archiveDomain.withMatchExplanation(asset, activeQuery))))
       .catch(() => {
         if (controller.signal.aborted) return;
-        if (import.meta.env.DEV) {
-          setAssets(filterDemoAssets(activeQuery, filter).map((asset) => archiveDomain.withMatchExplanation(asset, activeQuery)));
-          setNotice("Demo archive mode is active while the live content service is unavailable.");
-          return;
-        }
         setAssets([]);
-        setNotice("The verified content service is unavailable. No fallback media is shown in production.");
+        setNotice("The verified content service is unavailable. No fallback media is shown.");
       })
       .finally(() => {
         if (controller.signal.aborted) return;
@@ -384,8 +363,7 @@ function SearchResultsView({ query, setQuery, activeQuery, runSearch, assets, as
     return () => clearInterval(timer);
   }, [activeQuery, assetsLoading]);
 
-  const rankedFallback = filterDemoAssets(activeQuery, filter);
-  const traceAssets = (assets.length ? assets : rankedFallback.length ? rankedFallback : demoAssets.filter((asset) => filter === "all" || asset.kind === filter)).slice(0, 4);
+  const traceAssets = assets.filter((asset) => Boolean(asset.previewUrl)).slice(0, 4);
   const isComplete = !assetsLoading;
   const progress = isComplete ? 100 : Math.min(88, Math.round(((step + 1) / searchSteps.length) * 88));
   const resultMessage = !isComplete
@@ -407,7 +385,7 @@ function SearchResultsView({ query, setQuery, activeQuery, runSearch, assets, as
         <div className="search-progress-heading"><span className="section-kicker">SEARCH PROCESS</span><strong>{isComplete ? "Complete" : `${progress}%`}</strong></div>
         <div className="search-progress-track" aria-hidden="true"><span style={{ width: `${progress}%` }} /></div>
         <ol className="search-step-list">{searchSteps.map((label, index) => <li key={label} className={index < step || isComplete ? "done" : index === step ? "current" : ""}><span>{index < step || isComplete ? "✓" : String(index + 1).padStart(2, "0")}</span><strong>{label}</strong>{index === step && !isComplete && <small>Working through indexed records</small>}</li>)}</ol>
-        <p className="search-provenance"><strong>What is being checked?</strong> Published records, human verification, location context, rights status, and the language of your brief.</p>
+        <p className="search-provenance"><strong>What is being checked?</strong> Published records, stored previews, human verification, location context, rights status, and the language of your brief.</p>
       </aside>
       <section className="search-trace-panel" aria-labelledby="trace-heading">
         <div className="search-trace-heading"><div><span className="section-kicker">CANDIDATE MEDIA</span><h2 id="trace-heading">{isComplete ? "Candidate records checked" : "Images being checked"} <em>{isComplete ? "first." : "now."}</em></h2></div><span className="trace-count">{traceAssets.length} candidate{traceAssets.length === 1 ? "" : "s"} in view</span></div>

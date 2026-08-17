@@ -35,7 +35,8 @@ const mainSource = await readFile(new URL("../src/main.tsx", import.meta.url), "
 const sharedSource = await readFile(new URL("../src/shared.ts", import.meta.url), "utf8");
 if (!sharedSource.includes('export type AssetKind = "image" | "video"')) failures.push("The declared product boundary must remain photo/video only.");
 if (!mainSource.includes("No substitute image is shown.")) failures.push("Missing the explicit unavailable-preview state; visual cards must not fabricate substitute media.");
-if (!mainSource.includes("if (import.meta.env.DEV)")) failures.push("Demo fallback is not restricted to development builds.");
+const hasDemoFallback = /filterDemoAssets|demoAssets/.test(mainSource);
+if (hasDemoFallback && !mainSource.includes("import.meta.env.DEV")) failures.push("Demo fallback is not restricted to development builds.");
 
 if (process.argv.includes("--production")) {
   const wrangler = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
