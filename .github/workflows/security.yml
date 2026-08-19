@@ -154,12 +154,15 @@ jobs:
             --var PAYMENT_WEBHOOK_SECRET:ci-payment-webhook-secret-that-is-long-enough > worker.log 2>&1 &
           worker_pid=$!
           echo "$worker_pid" > worker.pid
+          ready=false
           for attempt in $(seq 1 45); do
-            if curl --silent --fail http://127.0.0.1:8787/api/health >/dev/null; then exit 0; fi
+            if curl --silent --fail http://127.0.0.1:8787/api/health >/dev/null; then ready=true; break; fi
             sleep 1
           done
-          cat worker.log
-          exit 1
+          if [ "$ready" != true ]; then
+            cat worker.log
+            exit 1
+          fi
       - name: OWASP ZAP baseline scan
         uses: zaproxy/action-baseline@v0.14.0
         with:
@@ -176,6 +179,12 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
       - name: Scan repository for vulnerabilities, secrets, and misconfiguration
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -186,7 +195,7 @@ jobs:
           ignore-unfixed: true
           exit-code: '1'
       - name: Validate Wrangler configuration
-        run: npx --yes wrangler@4.28.0 deploy --dry-run --outdir=security-dry-run
+        run: npx --yes wrangler@4.122.0 deploy --env production --dry-run --outdir=security-dry-run
       - name: Check workflow permissions and unsafe patterns
         uses: zizmorcore/zizmor-action@v0.2.0
         with:

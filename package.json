@@ -19,6 +19,7 @@
     "test:dr": "node scripts/dr-restore-smoke.mjs",
     "test:wordpress-plugin": "node scripts/wordpress-plugin-smoke.mjs",
     "test:wordpress-integration": "node scripts/wordpress-integration-smoke.mjs",
+    "test:zoho": "node scripts/zoho-integration-smoke.mjs",
     "test:local-smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-local-smoke.ps1",
     "seed:demo-media": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/seed-demo-media.ps1",
     "seed:paystack-demo": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/seed-paystack-split-demo.ps1",
