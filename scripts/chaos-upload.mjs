@@ -44,6 +44,7 @@ for (const [scenario, expectedStatus] of scenarios) {
   });
   const createBody = await createResponse.json();
   let observedStatus = createResponse.status;
+  let observedBody = createBody;
 
   if (createResponse.ok && createBody.uploadId) {
     const completeResponse = await fetch(`${baseUrl}/api/uploads/${createBody.uploadId}/complete`, {
@@ -51,9 +52,10 @@ for (const [scenario, expectedStatus] of scenarios) {
       headers: { "x-chaos-scenario": scenario, "x-chaos-token": token, ...authenticatedHeaders },
     });
     observedStatus = completeResponse.status;
+    observedBody = await completeResponse.json().catch(() => ({}));
   }
 
-  results.push({ scenario, expectedStatus, observedStatus, passed: observedStatus === expectedStatus });
+  results.push({ scenario, expectedStatus, observedStatus, passed: observedStatus === expectedStatus, ...(observedStatus === expectedStatus ? {} : { observedBody }) });
 }
 
 console.log(JSON.stringify({ baseUrl, results }, null, 2));

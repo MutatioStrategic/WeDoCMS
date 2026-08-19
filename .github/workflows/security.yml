@@ -108,6 +108,7 @@ jobs:
         shell: bash
         env:
           CHAOS_TEST_TOKEN: ci-chaos-test-token
+          CHAOS_BASE_URL: http://127.0.0.1:8787
         run: |
           npx wrangler dev --local --port 8787 \
             --var SESSION_SECRET:ci-session-secret-that-is-long-enough-for-tests \
