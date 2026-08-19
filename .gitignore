@@ -5,6 +5,8 @@ dist/
 security-dry-run/
 security-dry-run-*/
 worker-smoke-*.log
+worker-*.log
+worker-*.log
 .dev.vars
 .env
 .backups/
