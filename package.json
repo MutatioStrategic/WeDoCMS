@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:models": "vitest run src/contracts/schemas.test.ts && npm run test:migrations",
-    "test:contracts": "npm run test:contracts:openapi && npm run test:contracts:consumer && npm run test:contracts:provider",
+    "test:contracts": "node scripts/run-contract-tests.mjs",
     "test:contracts:openapi": "node scripts/contracts-openapi.mjs",
     "test:contracts:consumer": "node scripts/contracts-consumer.mjs",
     "test:contracts:provider": "node scripts/contracts-provider.mjs",
@@ -59,8 +59,8 @@
     "@supabase/supabase-js": "^2.110.1",
     "hono": "^4.7.7",
     "jose": "^6.2.9",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
     "zod": "^3.25.67"
   },
   "devDependencies": {

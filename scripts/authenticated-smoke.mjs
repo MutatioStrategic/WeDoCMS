@@ -35,6 +35,10 @@ assert(me.ok && meBody.user.id === loginBody.user.id && meBody.user.role === "co
 
 const members = await call("/api/organization/members");
 assert(members.status === 403, "non-admin organization member listing was allowed");
+const contributorReview = await call("/api/admin/review");
+assert(contributorReview.status === 403, "contributor reached the editor review queue");
+const contributorBuyerKeys = await call("/api/buyer-api-keys");
+assert(contributorBuyerKeys.status === 403, "contributor reached the buyer API-key workspace");
 
 const publicOrigin = await fetch(`${baseUrl}/api/health`, { headers: { Origin: "https://untrusted.example" } });
 assert(!publicOrigin.headers.has("access-control-allow-origin"), "untrusted CORS origin was allowed");
@@ -97,4 +101,22 @@ assert(logout.ok, "logout failed");
 const afterLogout = await call("/api/me");
 assert(afterLogout.ok && (await afterLogout.json()).authenticated === false, "revoked session remained active");
 
-console.log(JSON.stringify({ ok: true, baseUrl, checks: ["session", "header-spoofing", "org-rbac", "cors", "upload-auth", "csrf", "rights", "lightboxes", "lightbox-sharing", "discovery", "saved-searches", "campaign-cms", "campaign-manifest", "logout"] }, null, 2));
+for (const role of ["buyer", "editor", "admin"]) {
+  cookie = "";
+  const roleLogin = await call("/api/auth/dev-login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role }) });
+  assert(roleLogin.ok, `${role} dev login failed with ${roleLogin.status}`);
+  const roleBody = await roleLogin.json();
+  assert(roleBody.user?.role === role, `${role} login returned ${roleBody.user?.role ?? "no role"}`);
+
+  const review = await call("/api/admin/review");
+  assert(role === "editor" || role === "admin" ? review.ok : review.status === 403, `${role} editor-review permission was incorrect`);
+  const buyerKeys = await call("/api/buyer-api-keys");
+  assert(role === "buyer" || role === "admin" ? buyerKeys.ok : buyerKeys.status === 403, `${role} buyer-workspace permission was incorrect`);
+  const organizationMembers = await call("/api/organization/members");
+  assert(role === "editor" || role === "admin" ? organizationMembers.ok : organizationMembers.status === 403, `${role} organization-admin permission was incorrect`);
+
+  const roleLogout = await call("/api/auth/logout", { method: "POST", headers: { "X-CSRF-Token": roleBody.csrfToken } });
+  assert(roleLogout.ok, `${role} logout failed`);
+}
+
+console.log(JSON.stringify({ ok: true, baseUrl, checks: ["session", "header-spoofing", "role-matrix", "org-rbac", "cors", "upload-auth", "csrf", "rights", "lightboxes", "lightbox-sharing", "discovery", "saved-searches", "campaign-cms", "campaign-manifest", "logout"], roles: ["buyer", "contributor", "editor", "admin"] }, null, 2));

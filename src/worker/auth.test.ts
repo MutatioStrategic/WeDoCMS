@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { applicationRoleFromClaims, enrichExternalIdentity, verifyExternalJwt, verifyExternalJwtWithProvider } from "./auth";
+import { applicationRoleFromClaims, enrichExternalIdentity, sessionTokenFromRequest, verifyExternalJwt, verifyExternalJwtWithProvider } from "./auth";
 
 function encode(value: unknown): string {
   const bytes = new TextEncoder().encode(JSON.stringify(value));
@@ -17,6 +17,12 @@ async function sign(secret: string, value: string): Promise<string> {
 }
 
 describe("verified identity exchange", () => {
+  it("accepts native app sessions through the dedicated authorization scheme", () => {
+    expect(sessionTokenFromRequest(new Request("https://api.example.test/me", { headers: { Authorization: "VeldSession session-id.token-secret" } }))).toBe("session-id.token-secret");
+    expect(sessionTokenFromRequest(new Request("https://api.example.test/me", { headers: { Authorization: "Bearer external.jwt.token" } }))).toBeNull();
+    expect(sessionTokenFromRequest(new Request("https://api.example.test/me", { headers: { Cookie: "va_session=cookie-session.token", Authorization: "VeldSession header-session.token" } }))).toBe("cookie-session.token");
+  });
+
   it("accepts a valid HS256 identity token and rejects a tampered token", async () => {
     const secret = "test-secret-that-is-long-enough-for-auth";
     const header = encode({ alg: "HS256", typ: "JWT" });

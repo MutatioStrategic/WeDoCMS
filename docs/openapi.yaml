@@ -295,8 +295,48 @@ paths:
                 image: { type: string, format: binary }
       responses:
         '200': { description: Related assets returned }
+        '400': { description: The multipart image field is missing or invalid }
         '413': { description: Image exceeds 10 MB limit }
         '503': { description: Visual search is not configured }
+  /api/creators:
+    get:
+      operationId: listCreators
+      summary: Discover contributors who explicitly published a public profile
+      parameters:
+        - { name: q, in: query, schema: { type: string, maxLength: 120 } }
+      responses:
+        '200':
+          description: Public creator profiles
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/CreatorProfile' } }
+  /api/creators/{slug}:
+    get:
+      operationId: getCreator
+      summary: Return one public creator profile with published assets and collections
+      parameters:
+        - { name: slug, in: path, required: true, schema: { type: string, pattern: '^[a-z0-9-]{3,100}$' } }
+      responses:
+        '200': { description: Public creator detail }
+        '404': { description: Creator not found or not public }
+  /api/licence-products:
+    get:
+      operationId: listLicenceProducts
+      summary: Return active, versioned licence products and restrictions
+      responses:
+        '200':
+          description: Active licence products
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/LicenceProduct' } }
   /api/discovery:
     get:
       operationId: getDiscovery
@@ -673,6 +713,34 @@ components:
       type: object
       properties:
         organizationId: { type: string, minLength: 1, maxLength: 120 }
+      additionalProperties: false
+    CreatorProfile:
+      type: object
+      required: [id, slug, name, headline, bio, location, specialties, assetCount, publishedImageCount, reviewCount, collectionCount]
+      properties:
+        id: { type: string }
+        slug: { type: string }
+        name: { type: string }
+        headline: { type: string }
+        bio: { type: string }
+        location: { type: string }
+        specialties: { type: array, items: { type: string } }
+        websiteUrl: { type: string, format: uri, nullable: true }
+        assetCount: { type: integer, minimum: 0 }
+        publishedImageCount: { type: integer, minimum: 0 }
+        reviewCount: { type: integer, minimum: 0 }
+        collectionCount: { type: integer, minimum: 0 }
+        featuredAssetId: { type: string, nullable: true }
+      additionalProperties: false
+    LicenceProduct:
+      type: object
+      required: [code, name, description, termsVersion, restrictions]
+      properties:
+        code: { type: string, enum: [standard, enhanced, editorial, custom] }
+        name: { type: string }
+        description: { type: string }
+        termsVersion: { type: string }
+        restrictions: { type: object, additionalProperties: true }
       additionalProperties: false
     Asset:
       type: object

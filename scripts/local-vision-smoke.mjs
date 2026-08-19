@@ -6,9 +6,10 @@ const imagePath = resolve(process.argv[2] ?? "fixtures/demo-media/garden-route-s
 const relativeImagePath = relative(imageRoot, imagePath);
 if (relativeImagePath.startsWith("..") || isAbsolute(relativeImagePath)) throw new Error(`Image path must stay inside ${imageRoot}`);
 const image = (await readFile(imagePath)).toString("base64");
+const token = process.env.LOCAL_VISION_TOKEN?.trim() || process.env.VISION_PROXY_TOKEN?.trim();
 const response = await fetch(process.env.LOCAL_VISION_URL ?? "http://127.0.0.1:11434/api/generate", {
   method: "POST",
-  headers: { "content-type": "application/json" },
+  headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
   body: JSON.stringify({
     model: process.env.LOCAL_VISION_MODEL ?? "moondream",
     prompt: "Describe only what is visibly present in this image. Return one concise factual sentence.",
@@ -17,7 +18,7 @@ const response = await fetch(process.env.LOCAL_VISION_URL ?? "http://127.0.0.1:1
     think: false,
   }),
 });
-if (!response.ok) throw new Error(`Local vision provider returned HTTP ${response.status}`);
+if (!response.ok) throw new Error(`Local vision provider returned HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
 const body = await response.json();
 const responseText = body.response || body.thinking;
 const output = typeof responseText === "string" ? responseText.trim() : "";

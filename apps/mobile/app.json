@@ -8,20 +8,27 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
     "plugins": [
+      "expo-secure-store",
       [
         "expo-image-picker",
         {
           "photosPermission": "Veld Archive needs access to selected photos for editorial submission."
         }
-      ]
+      ],
+      "expo-secure-store"
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "za.co.wedocms.veldarchive"
+      "bundleIdentifier": "za.co.wedocms.veldarchive",
+      "config": {
+        "usesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "za.co.wedocms.veldarchive",
-      "permissions": ["INTERNET"],
+      "permissions": [
+        "INTERNET"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#F3F0E9",
         "foregroundImage": "./assets/android-icon-foreground.png",

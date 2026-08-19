@@ -86,6 +86,7 @@ const PHOTO_PROMPT_VERSION = "photo-enrichment-v3";
 const PHOTO_SCHEMA_VERSION = "photo-metadata-v3";
 // Keep enough headroom for the data URL and base64 expansion in the AI request.
 const MAX_AI_IMAGE_BYTES = 8_000_000;
+const DIRECT_VISION_CONTENT_TYPES = new Set(["image/jpeg", "image/png"]);
 const AI_IMAGE_TRANSFORM_ATTEMPTS = [
   { width: 1600, quality: 75 },
   { width: 1200, quality: 70 },
@@ -155,7 +156,7 @@ export async function preparePhotoForVision(
   object: R2ObjectBody,
   contentType: string,
 ): Promise<PreparedVisionImage> {
-  if (object.size <= MAX_AI_IMAGE_BYTES) {
+  if (object.size <= MAX_AI_IMAGE_BYTES && DIRECT_VISION_CONTENT_TYPES.has(contentType)) {
     return { bytes: new Uint8Array(await object.arrayBuffer()), contentType, transformed: false, aiInput: null };
   }
 
@@ -280,11 +281,16 @@ function base64Bytes(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-async function runPhotoVision(env: PhotoPipelineBindings, model: string, image: Uint8Array, aiImage: string): Promise<unknown> {
+export async function runPhotoVision(env: PhotoPipelineBindings, model: string, image: Uint8Array, aiImage: string): Promise<unknown> {
   const provider = (env.PHOTO_VISION_PROVIDER ?? "").trim().toLowerCase();
   if (provider === "ollama" || provider === "ollama-tunnel") {
     const remote = provider === "ollama-tunnel";
-    const endpoint = new URL(remote ? (env.REMOTE_VISION_URL?.trim() || "") : (env.LOCAL_VISION_URL?.trim() || "http://127.0.0.1:11434/api/generate"));
+    let endpoint: URL;
+    try {
+      endpoint = new URL(remote ? (env.REMOTE_VISION_URL?.trim() || "") : (env.LOCAL_VISION_URL?.trim() || "http://127.0.0.1:11434/api/generate"));
+    } catch {
+      throw new PhotoPipelineError("Vision provider endpoint is not configured", "permanent");
+    }
     if (remote ? endpoint.protocol !== "https:" : endpoint.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(endpoint.hostname)) {
       throw new PhotoPipelineError("Vision provider endpoint is not permitted", "permanent");
     }
@@ -297,6 +303,7 @@ async function runPhotoVision(env: PhotoPipelineBindings, model: string, image: 
         method: "POST",
         headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify({ model: localModel, prompt: PHOTO_VISION_PROMPT, images: [base64Bytes(image)], format: PHOTO_VISION_JSON_SCHEMA, stream: false, think: false, options: { temperature: 0 } }),
+        signal: AbortSignal.timeout(300_000),
       });
     } catch (error) {
       throw new PhotoPipelineError(`Local vision provider is unavailable: ${error instanceof Error ? error.message : "connection failed"}`, "retryable");
@@ -484,6 +491,10 @@ function revisionDocumentId(assetId: string, revision: number): string {
   return `${assetId}::r${revision}`;
 }
 
+function candidateRevisionDocumentId(assetId: string, revision: number): string {
+  return `candidate::${assetId}::r${revision}`;
+}
+
 export async function enqueuePhotoJob(
   env: PhotoPipelineBindings,
   assetId: string,
@@ -518,7 +529,11 @@ export async function enqueuePhotoJob(
       dead_lettered_at = NULL, requested_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
   `).bind(jobId, assetId, operation, asset.asset_revision, asset.source_etag, PHOTO_PROMPT_VERSION, PHOTO_SCHEMA_VERSION).run();
   if (operation === "sync_index") {
-    await env.DB.prepare("UPDATE assets SET vector_index_status = 'pending', index_terminal_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+    await env.DB.prepare(`UPDATE assets SET
+      vector_index_status = CASE WHEN status = 'published' THEN 'pending' ELSE 'not_indexed' END,
+      candidate_vector_status = CASE WHEN status = 'published' THEN candidate_vector_status ELSE 'pending' END,
+      index_terminal_reason = CASE WHEN status = 'published' THEN NULL ELSE status END,
+      updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
       .bind(assetId).run();
   }
   const row = await env.DB.prepare("SELECT id FROM photo_ai_jobs WHERE asset_id = ? AND operation = ? AND asset_revision = ?")
@@ -604,6 +619,73 @@ export async function retryQueuedPhotoJobs(env: PhotoPipelineBindings): Promise<
     body: { type: "photo.enrich" as const, jobId: job.id, assetId: job.asset_id, operation: job.operation, assetRevision: job.asset_revision, sourceEtag: job.source_etag },
   })));
   return result.results.length;
+}
+
+export async function repairPendingPhotoPipeline(
+  env: PhotoPipelineBindings,
+  limit = 40,
+): Promise<{ queued: number; recovered: number; stale: number; resolvedReviews: number }> {
+  if (!env.PHOTO_ENRICHMENT_QUEUE) return { queued: 0, recovered: 0, stale: 0, resolvedReviews: 0 };
+
+  // Preserve historical failure/validation evidence in provenance while
+  // removing records that no longer require an operational response.
+  const staleResult = await env.DB.prepare(`UPDATE photo_ai_jobs SET status = 'skipped', error_class = 'stale',
+    last_error = 'superseded-by-newer-asset-revision', updated_at = CURRENT_TIMESTAMP
+    WHERE status = 'dead_lettered' AND EXISTS (
+      SELECT 1 FROM assets a WHERE a.id = photo_ai_jobs.asset_id
+        AND (a.asset_revision <> photo_ai_jobs.asset_revision
+          OR COALESCE(a.source_etag, '') <> COALESCE(photo_ai_jobs.source_etag, ''))
+    )`).run();
+  const resolvedReviewResult = await env.DB.prepare(`UPDATE photo_ai_jobs SET status = 'completed',
+    error_class = NULL, last_error = NULL, completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
+    updated_at = CURRENT_TIMESTAMP
+    WHERE operation = 'enrich' AND status = 'needs_review' AND EXISTS (
+      SELECT 1 FROM assets a WHERE a.id = photo_ai_jobs.asset_id
+        AND a.metadata_review_status = 'reviewed'
+        AND COALESCE(a.reviewed_revision, 0) >= photo_ai_jobs.asset_revision
+    )`).run();
+
+  // Older pipeline versions used the public vector status for review assets.
+  // Move those records into the private candidate namespace before queueing.
+  await env.DB.prepare(`UPDATE assets SET candidate_vector_status = 'pending', vector_index_status = 'not_indexed',
+    index_terminal_reason = status, updated_at = CURRENT_TIMESTAMP
+    WHERE kind = 'image' AND status <> 'published' AND vector_index_status = 'pending'
+      AND COALESCE(candidate_vector_status, 'not_indexed') <> 'indexed'`).run();
+
+  const pending = await env.DB.prepare(`SELECT a.id FROM assets a
+    WHERE a.kind = 'image'
+      AND ((a.status = 'published' AND a.vector_index_status = 'pending' AND a.approved_revision = a.asset_revision)
+        OR (a.status <> 'published' AND a.candidate_vector_status = 'pending'))
+      AND NOT EXISTS (
+        SELECT 1 FROM photo_ai_jobs j
+        WHERE j.asset_id = a.id AND j.operation = 'sync_index' AND j.asset_revision = a.asset_revision
+          AND (j.status IN ('queued', 'running') OR (j.status = 'failed' AND j.error_class = 'retryable' AND j.attempts < ?))
+      )
+    ORDER BY a.updated_at ASC LIMIT ?`).bind(MAX_ATTEMPTS, Math.max(1, Math.min(limit, 50)))
+    .all<{ id: string }>();
+
+  let queued = 0;
+  for (const asset of pending.results) {
+    await enqueuePhotoJob(env, asset.id, "sync_index");
+    queued += 1;
+  }
+
+  const legacyFailures = await env.DB.prepare(`SELECT j.id FROM photo_ai_jobs j
+    JOIN assets a ON a.id = j.asset_id
+    WHERE j.operation = 'enrich' AND j.status = 'dead_lettered' AND a.kind = 'image' AND a.status <> 'published'
+      AND a.asset_revision = j.asset_revision AND COALESCE(a.source_etag, '') = COALESCE(j.source_etag, '')
+      AND (j.last_error LIKE '%size limit%' OR j.last_error LIKE '%Image resizing%')
+    ORDER BY j.updated_at ASC LIMIT 10`).all<{ id: string }>();
+  let recovered = 0;
+  for (const job of legacyFailures.results) {
+    if (await requeuePhotoEnrichment(env, job.id)) recovered += 1;
+  }
+  return {
+    queued,
+    recovered,
+    stale: Number(staleResult.meta.changes ?? 0),
+    resolvedReviews: Number(resolvedReviewResult.meta.changes ?? 0),
+  };
 }
 
 async function markJob(env: PhotoPipelineBindings, jobId: string, status: string, options: { error?: string; errorClass?: PhotoJobErrorClass; vectorId?: string; nextAttemptMinutes?: number } = {}): Promise<void> {
@@ -782,13 +864,15 @@ async function syncCandidatePhotoIndex(env: PhotoPipelineBindings, job: PhotoEnr
     return;
   }
   const namespace = env.PHOTO_CANDIDATE_INDEX_NAMESPACE?.trim() || "review-photos-v1";
-  const vectorId = revisionDocumentId(asset.id, job.assetRevision);
+  const vectorId = candidateRevisionDocumentId(asset.id, job.assetRevision);
   await env.PHOTO_INDEX.upsert([{ id: vectorId, values: vector, namespace, metadata: {
     assetId: asset.id, revision: job.assetRevision, status: asset.status, kind: asset.kind,
     candidate: true, locationType: asString(asset.visual_location_type), category: asString(asset.primary_category),
   } }]);
   const indexed = await env.DB.prepare(`UPDATE assets SET candidate_vector_status = 'indexed', candidate_vector_indexed_at = CURRENT_TIMESTAMP,
-    candidate_vector_version = ?, candidate_vector_id = ?, updated_at = CURRENT_TIMESTAMP
+    candidate_vector_version = ?, candidate_vector_id = ?, vector_index_status = 'not_indexed', vector_indexed_at = NULL,
+    vector_index_version = NULL, vector_index_id = NULL, indexed_revision = NULL, index_terminal_reason = status,
+    updated_at = CURRENT_TIMESTAMP
     WHERE id = ? AND asset_revision = ? AND status <> 'published' AND candidate_vector_status = 'pending'`)
     .bind(embeddingModel, vectorId, asset.id, job.assetRevision).run();
   if (indexed.meta.changes === 0) {
@@ -796,6 +880,7 @@ async function syncCandidatePhotoIndex(env: PhotoPipelineBindings, job: PhotoEnr
     await markStale(env, job, attempt, "conditional-candidate-index-write-was-stale");
     return;
   }
+  if (asset.vector_index_id && asset.vector_index_id !== vectorId) await env.PHOTO_INDEX.deleteByIds([asset.vector_index_id]);
   await markJob(env, job.jobId, "completed", { vectorId });
   await recordProvenance(env, job, attempt, "indexed", { model: embeddingModel, actorId: "photo-indexer", result: { vectorId, namespace, dimensions: vector.length, scope: "candidate" } });
   recordMetric(env, "photo_candidate_vector_indexed", trace, 1, [asset.id]);
@@ -959,7 +1044,7 @@ export async function searchPhotoIndex(
   env: PhotoPipelineBindings,
   query: string,
   filters: { kind: "all" | "image" | "video"; status: "published" | "needs_review" | "all"; location?: string; locationType?: string; category?: string },
-): Promise<{ rows: Record<string, unknown>[]; usedVectorIndex: boolean; mode: "keyword" | "semantic-preview" | "hybrid" }> {
+): Promise<{ rows: Record<string, unknown>[]; usedVectorIndex: boolean; mode: "keyword" | "semantic-preview" | "hybrid"; fallbackReason?: "embedding_failed" | "embedding_empty" | "vector_query_failed" }> {
   const filter = filterClauses(filters);
   const match = ftsQuery(query);
   const keywordResult = match
@@ -978,16 +1063,30 @@ export async function searchPhotoIndex(
   try {
     const embeddingResult = await env.AI.run(env.PHOTO_EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MODEL, { text: query, pooling: "cls" }) as { data?: number[][] };
     vector = embeddingResult.data?.[0];
-  } catch {
-    return { rows: mergeHybridSearchRows([], keywordRows, query, new Map()), usedVectorIndex: false, mode: "keyword" };
+  } catch (error) {
+    console.warn(JSON.stringify({
+      level: "warn",
+      event: "photo.search.embedding_failed",
+      model: env.PHOTO_EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MODEL,
+      error: error instanceof Error ? error.message.slice(0, 300) : "unknown-error",
+    }));
+    return { rows: mergeHybridSearchRows([], keywordRows, query, new Map()), usedVectorIndex: false, mode: "keyword", fallbackReason: "embedding_failed" as const };
   }
-  if (!vector?.length) return { rows: mergeHybridSearchRows([], keywordRows, query, new Map()), usedVectorIndex: false, mode: "keyword" };
+  if (!vector?.length) {
+    console.warn(JSON.stringify({ level: "warn", event: "photo.search.embedding_empty", model: env.PHOTO_EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MODEL }));
+    return { rows: mergeHybridSearchRows([], keywordRows, query, new Map()), usedVectorIndex: false, mode: "keyword", fallbackReason: "embedding_empty" as const };
+  }
   const namespace = env.PHOTO_INDEX_NAMESPACE?.trim() || undefined;
   let matches: VectorizeMatches;
   try {
-    matches = await env.PHOTO_INDEX.query(vector, { topK: 120, returnMetadata: false, ...(namespace ? { namespace } : {}) });
-  } catch {
-    return { rows: mergeHybridSearchRows([], keywordRows, query, new Map()), usedVectorIndex: false, mode: "keyword" };
+    matches = await env.PHOTO_INDEX.query(vector, { topK: 80, returnMetadata: "none", ...(namespace ? { namespace } : {}) });
+  } catch (error) {
+    console.warn(JSON.stringify({
+      level: "warn",
+      event: "photo.search.vector_query_failed",
+      error: error instanceof Error ? error.message.slice(0, 300) : "unknown-error",
+    }));
+    return { rows: mergeHybridSearchRows([], keywordRows, query, new Map()), usedVectorIndex: false, mode: "keyword", fallbackReason: "vector_query_failed" as const };
   }
   const currentMatches = matches.matches.map((item) => ({ vectorId: item.id, assetId: vectorAssetId(item.id), score: item.score })).filter((item) => item.assetId);
   const ids = [...new Set(currentMatches.map((item) => item.assetId))];

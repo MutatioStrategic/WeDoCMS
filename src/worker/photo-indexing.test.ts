@@ -8,10 +8,12 @@ import {
   mergeAiMetadataFallback,
   normalizeSceneContext,
   preparePhotoForVision,
+  runPhotoVision,
   photoJobMatchesAsset,
   enqueuePhotoJob,
   replayPhotoJob,
   requeuePhotoEnrichment,
+  searchPhotoIndex,
   type PhotoPipelineBindings,
 } from "./photo-indexing";
 
@@ -212,6 +214,49 @@ describe("photo AI indexing", () => {
     }
   });
 
+  it("normalizes WebP originals to JPEG before local vision inference", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => new Response(new Uint8Array(256), { headers: { "content-type": "image/jpeg" } }));
+    try {
+      const prepared = await preparePhotoForVision({
+        R2_ACCOUNT_ID: "account",
+        R2_ACCESS_KEY_ID: "access",
+        R2_SECRET_ACCESS_KEY: "secret",
+        R2_BUCKET_NAME: "media",
+      } as unknown as PhotoPipelineBindings, "originals/preview.webp", "job-webp", imageObject(1024), "image/webp");
+      expect(prepared).toMatchObject({ transformed: true, contentType: "image/jpeg" });
+      expect(globalThis.fetch).toHaveBeenCalledWith(expect.stringContaining("X-Amz-Algorithm"), expect.objectContaining({
+        cf: expect.objectContaining({ image: expect.objectContaining({ format: "jpeg" }) }),
+      }));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("calls the authenticated HTTPS tunnel without using Workers AI", async () => {
+    const originalFetch = globalThis.fetch;
+    const aiRun = vi.fn();
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({ response: '{"description":"A forest path in warm light"}' }), {
+      headers: { "content-type": "application/json" },
+    }));
+    try {
+      await expect(runPhotoVision({
+        PHOTO_VISION_PROVIDER: "ollama-tunnel",
+        REMOTE_VISION_URL: "https://veld-vision.example/api/generate",
+        REMOTE_VISION_TOKEN: "secret-token",
+        LOCAL_VISION_MODEL: "qwen3-vl:8b",
+        AI: { run: aiRun },
+      } as unknown as PhotoPipelineBindings, "ignored-cloud-model", new Uint8Array([1, 2, 3]), "unused")).resolves.toContain("forest path");
+      expect(aiRun).not.toHaveBeenCalled();
+      expect(globalThis.fetch).toHaveBeenCalledOnce();
+      const [, request] = vi.mocked(globalThis.fetch).mock.calls[0];
+      expect(request?.headers).toMatchObject({ authorization: "Bearer secret-token" });
+      expect(JSON.parse(String(request?.body))).toMatchObject({ model: "qwen3-vl:8b", stream: false, think: false });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("reports missing private R2 signing instead of silently dropping an oversized image", async () => {
     await expect(preparePhotoForVision({} as PhotoPipelineBindings, "originals/mountain.jpg", "job-1", imageObject(22_500_000), "image/jpeg"))
       .rejects.toThrow("private R2 GET signing and the AI source origin are not configured");
@@ -240,6 +285,25 @@ describe("photo AI indexing", () => {
     ];
     const ranked = mergeHybridSearchRows(semantic, keyword, "fresh bread market", new Map([["coast", 0.91], ["market", 0.76]]));
     expect(ranked[0]?.id).toBe("market");
+  });
+
+  it("keeps enough D1 bind slots after the Vectorize candidate query", async () => {
+    const query = vi.fn(async () => ({ count: 0, matches: [] }));
+    const all = vi.fn(async () => ({ results: [] }));
+    const prepare = vi.fn(() => ({ bind: vi.fn(() => ({ all })) }));
+    const result = await searchPhotoIndex({
+      DB: { prepare },
+      AI: { run: vi.fn(async () => ({ data: [[0.1, 0.2, 0.3]] })) },
+      PHOTO_INDEX: { query },
+      PHOTO_INDEX_NAMESPACE: "published-photos-v1",
+    } as unknown as PhotoPipelineBindings, "forest path", { kind: "image", status: "published" });
+
+    expect(query).toHaveBeenCalledWith([0.1, 0.2, 0.3], {
+      topK: 80,
+      returnMetadata: "none",
+      namespace: "published-photos-v1",
+    });
+    expect(result).toMatchObject({ usedVectorIndex: true, mode: "semantic-preview" });
   });
 
   it("builds a stable searchable record from persisted metadata", () => {

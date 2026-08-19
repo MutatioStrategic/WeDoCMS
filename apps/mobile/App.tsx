@@ -12,6 +12,8 @@ import {
   Home,
   Image as ImageIcon,
   Layers3,
+  LogIn,
+  LogOut,
   MapPin,
   RefreshCw,
   Search,
@@ -39,6 +41,7 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { mobileSessionHeaders, type MobileApiSession, useMobileAuth } from "./auth";
 
 declare const process: { env: { EXPO_PUBLIC_API_BASE_URL?: string } };
 
@@ -83,7 +86,8 @@ type DiscoveryResponse = {
   personalized: boolean;
 };
 
-type HealthResponse = { ok?: boolean; status?: string; service?: string; version?: string };
+type HealthResponse = { ok?: boolean; status?: string; service?: string; version?: string; environment?: string };
+type MobileAuth = ReturnType<typeof useMobileAuth>;
 
 const API_BASE_URL = (process.env.EXPO_PUBLIC_API_BASE_URL ?? "https://veld-archive.pages.dev").replace(/\/$/, "");
 const COLORS = {
@@ -122,10 +126,10 @@ async function apiGet<T>(path: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function apiPost<T>(path: string, payload: unknown): Promise<{ status: number; body: T | null }> {
+async function apiPost<T>(path: string, payload: unknown, session?: MobileApiSession | null): Promise<{ status: number; body: T | null }> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: "POST",
-    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    headers: { Accept: "application/json", "Content-Type": "application/json", ...(session ? mobileSessionHeaders(session) : {}) },
     body: JSON.stringify(payload),
   });
   const body = await response.json().catch(() => null) as T | null;
@@ -305,7 +309,9 @@ function SearchScreen({ initialQuery, onOpenAsset }: { initialQuery: string; onO
   );
 }
 
-function CreateScreen() {
+function CreateScreen({ auth }: { auth: MobileAuth }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [title, setTitle] = useState("");
   const [caption, setCaption] = useState("");
   const [city, setCity] = useState("");
@@ -315,6 +321,16 @@ function CreateScreen() {
   const [selectedMedia, setSelectedMedia] = useState<ImagePicker.ImagePickerAsset | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+
+  const signIn = async () => {
+    setMessage(null);
+    try {
+      await auth.signIn(email, password);
+      setPassword("");
+    } catch (signInError) {
+      setMessage(signInError instanceof Error ? signInError.message : "Sign-in failed.");
+    }
+  };
 
   const pickMedia = async () => {
     if (kind === "video") {
@@ -335,6 +351,7 @@ function CreateScreen() {
   };
 
   const submit = async () => {
+    if (!auth.session) { setMessage("Sign in with a contributor account before submitting."); return; }
     if (!title.trim()) { setMessage("A title is required."); return; }
     if (!selectedMedia) { setMessage("Choose an image before submitting."); return; }
     setSaving(true);
@@ -354,7 +371,7 @@ function CreateScreen() {
       artistLicenseKey: "cc_by_4_0",
       artistLicenseVersion: "4.0",
       artistLicenseUrl: "https://creativecommons.org/licenses/by/4.0/",
-    });
+    }, auth.session);
     setSaving(false);
     if (response.status === 201 && response.body && "id" in response.body) {
       const mediaType = selectedMedia.mimeType ?? "image/jpeg";
@@ -365,7 +382,7 @@ function CreateScreen() {
         contentType: mediaType,
         sizeBytes: selectedMedia.fileSize ?? mediaBlob.size,
         assetId: response.body.id,
-      });
+      }, auth.session);
       if (upload.status !== 201 || !upload.body?.uploadId || !upload.body.uploadUrl) {
         setMessage(upload.body?.error ?? "The media upload session could not be created.");
         setSaving(false);
@@ -373,7 +390,7 @@ function CreateScreen() {
       }
       const putResponse = await fetch(upload.body.uploadUrl, { method: "PUT", headers: { "Content-Type": mediaType }, body: mediaBlob });
       if (!putResponse.ok) { setMessage("The media upload failed before completion."); setSaving(false); return; }
-      const completion = await apiPost<{ error?: string }>(`/api/uploads/${upload.body.uploadId}/complete`, {});
+      const completion = await apiPost<{ error?: string }>(`/api/uploads/${upload.body.uploadId}/complete`, {}, auth.session);
       if (completion.status >= 300) { setMessage(completion.body?.error ?? "The media upload could not be completed."); setSaving(false); return; }
       setMessage("Draft submitted for editorial review.");
       setTitle(""); setCaption(""); setCity(""); setTags(""); setSelectedMedia(null);
@@ -384,11 +401,38 @@ function CreateScreen() {
     }
   };
 
+  if (auth.loading && !auth.session) return <ScrollView contentContainerStyle={styles.scrollContent}><Text style={styles.eyebrow}>CONTRIBUTE</Text><Text style={styles.screenTitle}>Add to the archive</Text><LoadingState label="Restoring contributor access" /></ScrollView>;
+
+  if (!auth.session) return (
+    <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+      <Text style={styles.eyebrow}>CONTRIBUTE</Text>
+      <Text style={styles.screenTitle}>Contributor sign in</Text>
+      <Text style={styles.screenIntro}>Use the same approved contributor account as the Veld Archive workspace.</Text>
+      {!auth.configured ? <View style={styles.notice}><WifiOff color={COLORS.amber} size={18} /><Text style={styles.noticeText}>Supabase authentication is not configured for this build. Add the Expo public Supabase URL and publishable key.</Text></View> : <>
+        <Field label="Email" value={email} onChangeText={setEmail} placeholder="you@example.com" autoCapitalize="none" keyboardType="email-address" />
+        <Field label="Password" value={password} onChangeText={setPassword} placeholder="Your password" secureTextEntry />
+        {(message || auth.error) ? <View style={styles.notice}><WifiOff color={COLORS.amber} size={18} /><Text style={styles.noticeText}>{message ?? auth.error}</Text></View> : null}
+        <Pressable style={[styles.primaryButton, (auth.loading || !email.trim() || !password) && styles.disabledButton]} disabled={auth.loading || !email.trim() || !password} onPress={() => void signIn()}>
+          {auth.loading ? <ActivityIndicator color={COLORS.surface} /> : <><LogIn color={COLORS.surface} size={17} /><Text style={styles.primaryButtonText}>Sign in to contribute</Text></>}
+        </Pressable>
+      </>}
+    </ScrollView>
+  );
+
+  if (!["contributor", "editor", "admin"].includes(auth.session.user.role)) return (
+    <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+      <Text style={styles.eyebrow}>CONTRIBUTE</Text><Text style={styles.screenTitle}>Contributor access required</Text>
+      <View style={styles.accountCard}><View style={{ flex: 1 }}><Text style={styles.cardTitle}>{auth.session.user.displayName}</Text><Text style={styles.cardMeta}>{auth.session.user.email} · {auth.session.user.role}</Text></View><Pressable onPress={() => void auth.signOut()}><LogOut color={COLORS.muted} size={19} /></Pressable></View>
+      <View style={styles.notice}><ShieldCheck color={COLORS.amber} size={18} /><Text style={styles.noticeText}>This account is signed in but does not have contributor permissions. Ask an archive administrator to add the contributor role.</Text></View>
+    </ScrollView>
+  );
+
   return (
     <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
       <Text style={styles.eyebrow}>CONTRIBUTE</Text>
       <Text style={styles.screenTitle}>Add to the archive</Text>
       <Text style={styles.screenIntro}>Prepare metadata for editorial review.</Text>
+      <View style={styles.accountCard}><View style={{ flex: 1 }}><Text style={styles.cardTitle}>{auth.session.user.displayName}</Text><Text style={styles.cardMeta}>{auth.session.user.organizationName} · {auth.session.user.role}</Text></View><Pressable accessibilityLabel="Sign out" onPress={() => void auth.signOut()}><LogOut color={COLORS.muted} size={19} /></Pressable></View>
       <Pressable style={styles.uploadDropzone} onPress={() => void pickMedia()}><UploadCloud color={COLORS.green} size={28} /><Text style={styles.dropzoneTitle}>{selectedMedia?.fileName ?? "Choose an image"}</Text><Text style={styles.dropzoneMeta}>{selectedMedia ? `${Math.round((selectedMedia.fileSize ?? 0) / 1024)} KB selected` : "Open photo library"}</Text></Pressable>
       <Field label="Title" value={title} onChangeText={setTitle} placeholder="Give this moment a name" />
       <Field label="Caption" value={caption} onChangeText={setCaption} placeholder="Add useful context" multiline />
@@ -406,19 +450,18 @@ function CreateScreen() {
 
 function StatusScreen() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
-  const [readiness, setReadiness] = useState<HealthResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const load = useCallback(async () => {
     setLoading(true); setError(false);
-    try { const [nextHealth, nextReadiness] = await Promise.all([apiGet<HealthResponse>("/api/health"), apiGet<HealthResponse>("/api/ops/readiness")]); setHealth(nextHealth); setReadiness(nextReadiness); } catch { setError(true); } finally { setLoading(false); }
+    try { setHealth(await apiGet<HealthResponse>("/api/health")); } catch { setError(true); } finally { setLoading(false); }
   }, []);
   useEffect(() => { void load(); }, [load]);
   return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
     <View style={styles.topRow}><View><Text style={styles.eyebrow}>SYSTEM</Text><Text style={styles.screenTitle}>App status</Text></View><Pressable style={styles.avatarButton} onPress={() => void load()}><RefreshCw color={COLORS.ink} size={20} /></Pressable></View>
     <View style={styles.statusHero}><View style={styles.statusIcon}><Activity color={COLORS.green} size={25} /></View><View style={{ flex: 1 }}><Text style={styles.cardTitle}>Veld Archive mobile</Text><Text style={styles.cardMeta}>Native Expo client - Metro runtime</Text></View><CheckCircle2 color={COLORS.green} size={22} /></View>
-    {loading ? <LoadingState label="Checking services" /> : error ? <ErrorState message="The API could not be reached" onRetry={load} /> : <View style={styles.statusList}><StatusRow label="API health" value={health?.status ?? (health?.ok ? "healthy" : "available")} /><StatusRow label="Readiness" value={readiness?.status ?? "ready"} /><StatusRow label="Endpoint" value={API_BASE_URL.replace(/^https?:\/\//, "")} /><StatusRow label="Media review" value="Editorial gates active" /></View>}
-    <View style={styles.offlineNote}><WifiOff color={COLORS.blue} size={18} /><Text style={styles.offlineText}>Offline caching will be added alongside authenticated sync.</Text></View>
+    {loading ? <LoadingState label="Checking services" /> : error ? <ErrorState message="The public API could not be reached" onRetry={load} /> : <View style={styles.statusList}><StatusRow label="API health" value={health?.status ?? (health?.ok ? "healthy" : "available")} /><StatusRow label="Environment" value={health?.environment ?? "unknown"} /><StatusRow label="Endpoint" value={API_BASE_URL.replace(/^https?:\/\//, "")} /><StatusRow label="Operations" value="Admin workspace only" /></View>}
+    <View style={styles.offlineNote}><ShieldCheck color={COLORS.blue} size={18} /><Text style={styles.offlineText}>Contributor sessions are stored securely on device and refreshed through Supabase.</Text></View>
   </ScrollView>;
 }
 
@@ -435,7 +478,7 @@ function AssetDetail({ asset, onClose }: { asset: Asset | null; onClose: () => v
   return <Modal animationType="slide" transparent visible onRequestClose={onClose}><View style={styles.modalBackdrop}><View style={styles.modalSheet}><View style={styles.modalHeader}><Text style={styles.modalTitle}>Asset detail</Text><Pressable onPress={onClose} style={styles.closeButton}><X color={COLORS.ink} size={20} /></Pressable></View><ScrollView showsVerticalScrollIndicator={false}><Image source={{ uri: imageFor(asset) }} style={styles.detailImage} /><Text style={styles.eyebrow}>{asset.kind === "video" ? "VIDEO" : "IMAGE"}</Text><Text style={styles.detailTitle}>{asset.title}</Text><Text style={styles.detailMeta}><MapPin color={COLORS.muted} size={14} /> {locationFor(asset)}</Text>{asset.caption || asset.description ? <Text style={styles.detailDescription}>{asset.caption || asset.description}</Text> : null}<View style={styles.detailFacts}><Fact label="Rights" value={asset.rightsStatus ?? "Pending"} /><Fact label="Verification" value={asset.humanVerified ? "Human verified" : "Editorial review"} /><Fact label="Confidence" value={`${confidenceFor(asset)}%`} /></View>{[...(asset.subjectTags ?? []), ...(asset.culturalTags ?? [])].length ? <View style={styles.tagWrap}>{[...(asset.subjectTags ?? []), ...(asset.culturalTags ?? [])].map((tag) => <Text key={tag} style={styles.tag}>{tag}</Text>)}</View> : null}{asset.sourceUrl ? <Pressable style={styles.secondaryButton} onPress={() => void Linking.openURL(asset.sourceUrl ?? "")}><ArrowUpRight color={COLORS.ink} size={16} /><Text style={styles.secondaryButtonText}>Open source</Text></Pressable> : null}</ScrollView></View></View></Modal>;
 }
 
-function Field({ label, value, onChangeText, placeholder, multiline = false }: { label: string; value: string; onChangeText: (value: string) => void; placeholder: string; multiline?: boolean }) { return <View style={styles.field}><Text style={styles.fieldLabel}>{label}</Text><TextInput value={value} onChangeText={onChangeText} placeholder={placeholder} placeholderTextColor={COLORS.muted} multiline={multiline} style={[styles.textField, multiline && styles.multilineField]} /></View>; }
+function Field({ label, value, onChangeText, placeholder, multiline = false, ...inputProps }: { label: string; value: string; onChangeText: (value: string) => void; placeholder: string; multiline?: boolean; secureTextEntry?: boolean; autoCapitalize?: "none" | "sentences" | "words" | "characters"; keyboardType?: "default" | "email-address" }) { return <View style={styles.field}><Text style={styles.fieldLabel}>{label}</Text><TextInput value={value} onChangeText={onChangeText} placeholder={placeholder} placeholderTextColor={COLORS.muted} multiline={multiline} {...inputProps} style={[styles.textField, multiline && styles.multilineField]} /></View>; }
 function Fact({ label, value }: { label: string; value: string }) { return <View style={styles.fact}><Text style={styles.factLabel}>{label}</Text><Text style={styles.factValue} numberOfLines={1}>{value}</Text></View>; }
 function StatusRow({ label, value }: { label: string; value: string }) { return <View style={styles.statusRow}><View style={styles.statusDot} /><Text style={styles.statusLabel}>{label}</Text><Text style={styles.statusValue} numberOfLines={1}>{value}</Text></View>; }
 function SectionHeader({ title, action, onPress }: { title: string; action: string; onPress: () => void }) { return <View style={styles.sectionHeader}><Text style={styles.sectionTitle}>{title}</Text><Pressable onPress={onPress}><Text style={styles.sectionAction}>{action}</Text></Pressable></View>; }
@@ -444,12 +487,13 @@ function ErrorState({ message, onRetry }: { message: string; onRetry: () => void
 function EmptyState({ label = "No published assets yet" }: { label?: string }) { return <View style={styles.centerState}><ImageIcon color={COLORS.muted} size={28} /><Text style={styles.stateText}>{label}</Text></View>; }
 
 export default function App() {
+  const auth = useMobileAuth(API_BASE_URL);
   const [tab, setTab] = useState<TabKey>("explore");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
   const changeTab = (nextTab: TabKey) => { void Haptics.selectionAsync(); setTab(nextTab); };
   const openSearch = (query: string) => { setSearchQuery(query); changeTab("search"); };
-  return <SafeAreaView style={styles.app}><StatusBar style="dark" /><View style={styles.content}>{tab === "explore" ? <ExploreScreen onOpenAsset={setSelectedAsset} onSearch={openSearch} /> : tab === "search" ? <SearchScreen initialQuery={searchQuery} onOpenAsset={setSelectedAsset} /> : tab === "create" ? <CreateScreen /> : <StatusScreen />}</View><View style={styles.tabBar}>{tabs.map(({ key, label, icon: TabIcon }) => { const active = tab === key; return <Pressable key={key} style={styles.tabItem} onPress={() => changeTab(key)} accessibilityRole="tab" accessibilityState={{ selected: active }}><TabIcon color={active ? COLORS.green : COLORS.muted} size={21} strokeWidth={active ? 2.4 : 1.8} /><Text style={[styles.tabLabel, active && styles.tabLabelActive]}>{label}</Text></Pressable>; })}</View><AssetDetail asset={selectedAsset} onClose={() => setSelectedAsset(null)} /></SafeAreaView>;
+  return <SafeAreaView style={styles.app}><StatusBar style="dark" /><View style={styles.content}>{tab === "explore" ? <ExploreScreen onOpenAsset={setSelectedAsset} onSearch={openSearch} /> : tab === "search" ? <SearchScreen initialQuery={searchQuery} onOpenAsset={setSelectedAsset} /> : tab === "create" ? <CreateScreen auth={auth} /> : <StatusScreen />}</View><View style={styles.tabBar}>{tabs.map(({ key, label, icon: TabIcon }) => { const active = tab === key; return <Pressable key={key} style={styles.tabItem} onPress={() => changeTab(key)} accessibilityRole="tab" accessibilityState={{ selected: active }}><TabIcon color={active ? COLORS.green : COLORS.muted} size={21} strokeWidth={active ? 2.4 : 1.8} /><Text style={[styles.tabLabel, active && styles.tabLabelActive]}>{label}</Text></Pressable>; })}</View><AssetDetail asset={selectedAsset} onClose={() => setSelectedAsset(null)} /></SafeAreaView>;
 }
 
 const styles = StyleSheet.create({
@@ -520,6 +564,7 @@ const styles = StyleSheet.create({
   multilineField: { minHeight: 92, paddingTop: 13, textAlignVertical: "top" },
   notice: { backgroundColor: COLORS.amberSoft, borderRadius: 12, padding: 12, flexDirection: "row", gap: 8, alignItems: "flex-start", marginBottom: 15 },
   noticeText: { color: COLORS.ink, flex: 1, fontSize: 12, lineHeight: 18 },
+  accountCard: { minHeight: 64, backgroundColor: COLORS.surface, borderRadius: 14, borderWidth: 1, borderColor: COLORS.line, padding: 13, flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 17 },
   statusHero: { backgroundColor: COLORS.greenSoft, borderRadius: 16, padding: 15, flexDirection: "row", alignItems: "center", gap: 11, marginTop: 19, marginBottom: 15 },
   statusIcon: { width: 46, height: 46, borderRadius: 14, backgroundColor: COLORS.surface, alignItems: "center", justifyContent: "center" },
   statusList: { backgroundColor: COLORS.surface, borderRadius: 15, borderWidth: 1, borderColor: COLORS.line, paddingHorizontal: 15, marginBottom: 15 },

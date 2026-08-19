@@ -2,7 +2,7 @@ import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { z } from "zod";
 import { archiveDomain } from "../shared";
-import type { Asset, BuyerAnalytics, CommunityOverview, ContributorAnalytics, DiscoveryResponse, LicenceRequest, MonetizationModel, RightsCase, SavedSearch, SearchResponse, TakedownReason, UserLightbox } from "../shared";
+import type { Asset, BuyerAnalytics, CommunityOverview, ContributorAnalytics, CreatorProfile, DiscoveryResponse, LicenceProduct, LicenceRequest, MonetizationModel, PortfolioCollection, RightsCase, SavedSearch, SearchResponse, TakedownReason, UserLightbox } from "../shared";
 import {
   elapsedMilliseconds,
   logEvent,
@@ -39,9 +39,12 @@ import { buildStatementCsv, buildStatementPdf } from "./statement-export";
 import { canonicalContract, ocrValidation, sanitizeOcrResult, sha256Hex } from "./seller-workflow";
 import {
   enqueuePhotoJob,
+  classifyVisionResult,
   processPhotoJob,
+  repairPendingPhotoPipeline,
   replayPhotoJob,
   requeuePhotoEnrichment,
+  runPhotoVision,
   retryQueuedPhotoJobs,
   searchPhotoIndex,
   type PhotoEnrichmentJob,
@@ -297,20 +300,35 @@ app.use("/api/*", async (c, next) => {
   await next();
 });
 
-const devLoginSchema = z.object({ role: z.enum(["buyer", "contributor", "admin"]) });
-const exchangeSchema = z.object({ organizationId: z.string().min(1).max(120).optional() });
+const devLoginSchema = z.object({ role: z.enum(["buyer", "contributor", "editor", "admin"]) });
+const exchangeSchema = z.object({
+  organizationId: z.string().min(1).max(120).optional(),
+  sessionTransport: z.enum(["cookie", "bearer"]).optional(),
+});
 type AppContext = Context<{ Bindings: Bindings; Variables: Variables }>;
 type DemoRole = z.infer<typeof devLoginSchema>["role"];
 
-async function sessionResponse(c: { env: Bindings; req: { raw: Request }; json: (data: unknown, status?: number) => Response }, userId: string, organizationId: string): Promise<Response> {
+async function sessionResponse(c: { env: Bindings; req: { raw: Request }; json: (data: unknown, status?: number) => Response }, userId: string, organizationId: string, transport: "cookie" | "bearer" = "cookie"): Promise<Response> {
   const session = await createSession(c.env, userId, organizationId);
   const user = await getRequestUser(c.env, new Request(c.req.raw.url, { headers: { Cookie: `va_session=${session.token}` } }));
   if (!user) return new Response(JSON.stringify({ error: "Could not create authenticated session" }), { status: 500, headers: { "Content-Type": "application/json" } });
-  return responseWithSession(c.json({ authenticated: true, user, csrfToken: session.csrfToken, expiresAt: session.expiresAt }), session.token, c.env);
+  const response = c.json({ authenticated: true, user, csrfToken: session.csrfToken, expiresAt: session.expiresAt, ...(transport === "bearer" ? { sessionToken: session.token } : {}) });
+  response.headers.set("Cache-Control", "no-store");
+  return responseWithSession(response, session.token, c.env);
 }
 
 async function seedSessionForRole(c: AppContext, role: DemoRole): Promise<Response> {
-  const userId = role === "admin" ? "demo-admin" : role === "contributor" ? "demo-contributor" : "demo-buyer";
+  const userId = role === "admin" ? "demo-admin" : role === "editor" ? "demo-editor" : role === "contributor" ? "demo-contributor" : "demo-buyer";
+  if (role === "editor") {
+    const adminMembership = await c.env.DB.prepare("SELECT organization_id FROM organization_memberships WHERE user_id = 'demo-admin' AND status = 'active' ORDER BY created_at LIMIT 1")
+      .first<{ organization_id: string }>();
+    if (!adminMembership) return c.json({ error: "Demo seed identity is not available; apply migrations first" }, 503);
+    await c.env.DB.batch([
+      c.env.DB.prepare("INSERT OR IGNORE INTO users (id, email, display_name, role) VALUES ('demo-editor', 'review.editor@veldarchive.local', 'Veld Review Editor', 'editor')"),
+      c.env.DB.prepare("INSERT INTO organization_memberships (id, organization_id, user_id, role, status) VALUES (?, ?, 'demo-editor', 'editor', 'active') ON CONFLICT(organization_id, user_id) DO UPDATE SET role = 'editor', status = 'active', updated_at = CURRENT_TIMESTAMP")
+        .bind(crypto.randomUUID(), adminMembership.organization_id),
+    ]);
+  }
   const user = await c.env.DB.prepare("SELECT id FROM users WHERE id = ? AND status = 'active'").bind(userId).first<{ id: string }>();
   const membership = await c.env.DB.prepare("SELECT organization_id FROM organization_memberships WHERE user_id = ? AND status = 'active' ORDER BY created_at LIMIT 1").bind(userId).first<{ organization_id: string }>();
   if (!user || !membership) return c.json({ error: "Demo seed identity is not available; apply migrations first" }, 503);
@@ -362,7 +380,7 @@ app.post("/api/auth/exchange", async (c) => {
   }
   const membership = await c.env.DB.prepare("SELECT organization_id FROM organization_memberships WHERE organization_id = ? AND user_id = ? AND status = 'active'").bind(organizationId, user.id).first<{ organization_id: string }>();
   if (!membership) return c.json({ error: "User is not a member of the requested organization" }, 403);
-  return sessionResponse(c, user.id, membership.organization_id);
+  return sessionResponse(c, user.id, membership.organization_id, requested.sessionTransport ?? "cookie");
 });
 
 app.get("/api/me", async (c) => {
@@ -742,6 +760,52 @@ function addReleaseDocuments(asset: Asset, rows: Record<string, unknown>[]): Ass
   } : asset;
 }
 
+function parseStringArray(value: unknown): string[] {
+  try {
+    const parsed = JSON.parse(String(value ?? "[]"));
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+async function resolveHumanReviewedPhotoJobs(env: Bindings, assetId: string, reviewedRevision: number): Promise<void> {
+  await env.DB.prepare(`UPDATE photo_ai_jobs SET status = 'completed', error_class = NULL, last_error = NULL,
+    completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
+    WHERE asset_id = ? AND operation = 'enrich' AND status = 'needs_review' AND asset_revision <= ?`)
+    .bind(assetId, reviewedRevision).run();
+}
+
+function creatorProfileFromRow(row: Record<string, unknown>): CreatorProfile {
+  return {
+    id: String(row.user_id),
+    slug: String(row.slug),
+    name: String(row.display_name),
+    headline: String(row.headline ?? ""),
+    bio: String(row.bio ?? ""),
+    location: String(row.location ?? ""),
+    specialties: parseStringArray(row.specialties_json),
+    websiteUrl: row.website_url == null ? null : String(row.website_url),
+    assetCount: Number(row.asset_count ?? 0),
+    publishedImageCount: Number(row.published_image_count ?? 0),
+    reviewCount: Number(row.review_count ?? 0),
+    collectionCount: Number(row.collection_count ?? 0),
+    featuredAssetId: row.featured_asset_id == null ? null : String(row.featured_asset_id),
+  };
+}
+
+function portfolioCollectionFromRow(row: Record<string, unknown>): PortfolioCollection {
+  return {
+    id: String(row.id),
+    slug: String(row.slug),
+    title: String(row.title),
+    description: String(row.description ?? ""),
+    assetCount: Number(row.asset_count ?? 0),
+    coverAssetId: row.cover_asset_id == null ? null : String(row.cover_asset_id),
+    creator: { slug: String(row.creator_slug), name: String(row.creator_name) },
+  };
+}
+
 const searchSchema = z.object({
   q: z.string().trim().max(240).default(""),
   kind: z.enum(["all", "image", "video"]).default("all"),
@@ -922,6 +986,7 @@ app.post("/api/governance/assets/:id/action", async (c) => {
   await c.env.DB.prepare(`UPDATE photo_ai_provenance SET reviewed_by = ?, review_outcome = ?, reviewed_at = CURRENT_TIMESTAMP
     WHERE id = (SELECT id FROM photo_ai_provenance WHERE asset_id = ? ORDER BY created_at DESC LIMIT 1)`)
     .bind(actor.id, payload.action === "save_correction" ? "reviewed" : payload.action, assetId).run();
+  await resolveHumanReviewedPhotoJobs(c.env, assetId, revisionRow?.asset_revision ?? exists.asset_revision);
   let indexing = "not_required";
   if ((payload.action === "approve" || payload.action === "reject") && exists.kind === "image") {
     indexing = (await enqueuePhotoJobBestEffort(c.env, assetId, "sync_index")) ? "index_sync_queued" : "index_sync_retry_pending";
@@ -1302,6 +1367,7 @@ app.post("/api/admin/assets/:id/review", async (c) => {
   await c.env.DB.prepare(`UPDATE photo_ai_provenance SET reviewed_by = ?, review_outcome = ?, reviewed_at = CURRENT_TIMESTAMP
     WHERE id = (SELECT id FROM photo_ai_provenance WHERE asset_id = ? ORDER BY created_at DESC LIMIT 1)`)
     .bind(user.id, payload.decision, asset.id).run();
+  await resolveHumanReviewedPhotoJobs(c.env, asset.id, asset.asset_revision);
   const indexing = asset.kind === "image" && payload.decision !== "needs_changes"
     ? (await enqueuePhotoJobBestEffort(c.env, asset.id, "sync_index") ? "index_sync_queued" : "index_sync_retry_pending")
     : "not_required";
@@ -3097,6 +3163,138 @@ app.on(["GET", "HEAD"], "/internal/photo-ai-source/:jobId", async (c) => {
   return new Response(c.req.method === "HEAD" ? null : object.body, { status: 200, headers });
 });
 
+const publicCreatorSearchSchema = z.object({ q: z.string().trim().max(120).default("") });
+
+const productionCreatorFilter = `AND (
+  u.id NOT LIKE 'demo-%' OR EXISTS (
+    SELECT 1 FROM assets public_asset
+    WHERE public_asset.owner_id = cp.user_id AND public_asset.status = 'published'
+      AND COALESCE(public_asset.demo_seed, 0) = 0
+      AND public_asset.id NOT LIKE 'asset-demo-%'
+      AND public_asset.id NOT LIKE 'asset-test-photo-%'
+  )
+)`;
+
+app.get("/api/creators", async (c) => {
+  const { q } = publicCreatorSearchSchema.parse({ q: c.req.query("q") ?? "" });
+  const query = `%${q}%`;
+  const production = String(c.env.APP_ENV) === "production";
+  const productionAssetFilter = production
+    ? "AND COALESCE(a.demo_seed, 0) = 0 AND a.id NOT LIKE 'asset-demo-%' AND a.id NOT LIKE 'asset-test-photo-%'"
+    : "";
+  const rows = await c.env.DB.prepare(`
+    SELECT cp.*, u.display_name,
+      (SELECT COUNT(*) FROM assets a WHERE a.owner_id = cp.user_id AND a.status = 'published' ${productionAssetFilter}) AS asset_count,
+      (SELECT COUNT(*) FROM assets a WHERE a.owner_id = cp.user_id AND a.status = 'published' AND a.kind = 'image' ${productionAssetFilter}) AS published_image_count,
+      (SELECT COUNT(*) FROM assets a WHERE a.owner_id = cp.user_id AND a.status = 'needs_review' ${productionAssetFilter}) AS review_count,
+      (SELECT COUNT(*) FROM portfolio_collections pc WHERE pc.owner_id = cp.user_id AND pc.visibility = 'public') AS collection_count
+    FROM creator_profiles cp JOIN users u ON u.id = cp.user_id
+    WHERE cp.visibility = 'public' ${production ? productionCreatorFilter : ""}
+      AND (cp.slug LIKE ? OR u.display_name LIKE ? OR cp.headline LIKE ? OR cp.location LIKE ? OR cp.specialties_json LIKE ?)
+    ORDER BY asset_count DESC, cp.updated_at DESC LIMIT 48
+  `).bind(query, query, query, query, query).all<Record<string, unknown>>();
+  return c.json({ results: rows.results.map(creatorProfileFromRow) });
+});
+
+app.get("/api/creators/:slug", async (c) => {
+  const slug = z.string().regex(/^[a-z0-9-]{3,100}$/).parse(c.req.param("slug"));
+  const production = String(c.env.APP_ENV) === "production";
+  const productionAssetFilter = production
+    ? "AND COALESCE(a.demo_seed, 0) = 0 AND a.id NOT LIKE 'asset-demo-%' AND a.id NOT LIKE 'asset-test-photo-%'"
+    : "";
+  const row = await c.env.DB.prepare(`
+    SELECT cp.*, u.display_name,
+      (SELECT COUNT(*) FROM assets a WHERE a.owner_id = cp.user_id AND a.status = 'published' ${productionAssetFilter}) AS asset_count,
+      (SELECT COUNT(*) FROM assets a WHERE a.owner_id = cp.user_id AND a.status = 'published' AND a.kind = 'image' ${productionAssetFilter}) AS published_image_count,
+      (SELECT COUNT(*) FROM assets a WHERE a.owner_id = cp.user_id AND a.status = 'needs_review' ${productionAssetFilter}) AS review_count,
+      (SELECT COUNT(*) FROM portfolio_collections pc WHERE pc.owner_id = cp.user_id AND pc.visibility = 'public') AS collection_count
+    FROM creator_profiles cp JOIN users u ON u.id = cp.user_id
+    WHERE cp.slug = ? AND cp.visibility = 'public' ${production ? productionCreatorFilter : ""}
+  `).bind(slug).first<Record<string, unknown>>();
+  if (!row) return c.json({ error: "Creator not found" }, 404);
+  const [assets, collections] = await Promise.all([
+    c.env.DB.prepare(`SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id
+      WHERE a.owner_id = ? AND a.status = 'published' ${productionAssetFilter}
+      ORDER BY a.human_verified DESC, a.updated_at DESC LIMIT 24`).bind(row.user_id).all<Record<string, unknown>>(),
+    c.env.DB.prepare(`SELECT pc.*, cp.slug AS creator_slug, u.display_name AS creator_name,
+      (SELECT COUNT(*) FROM portfolio_collection_assets pca WHERE pca.collection_id = pc.id) AS asset_count
+      FROM portfolio_collections pc JOIN creator_profiles cp ON cp.user_id = pc.owner_id JOIN users u ON u.id = pc.owner_id
+      WHERE pc.owner_id = ? AND pc.visibility = 'public' ORDER BY pc.updated_at DESC`).bind(row.user_id).all<Record<string, unknown>>(),
+  ]);
+  return c.json({
+    profile: creatorProfileFromRow(row),
+    assets: assets.results.map((asset) => assetRowToDomain(asset, c.env)),
+    collections: collections.results.map(portfolioCollectionFromRow),
+  });
+});
+
+app.get("/api/licence-products", async (c) => {
+  const rows = await c.env.DB.prepare(`SELECT code, name, description, terms_version, restrictions_json
+    FROM licence_products WHERE active = 1
+    ORDER BY CASE code WHEN 'standard' THEN 1 WHEN 'enhanced' THEN 2 WHEN 'editorial' THEN 3 ELSE 4 END`).all<Record<string, unknown>>();
+  const results: LicenceProduct[] = rows.results.map((row) => ({
+    code: String(row.code) as LicenceProduct["code"],
+    name: String(row.name),
+    description: String(row.description),
+    termsVersion: String(row.terms_version),
+    restrictions: JSON.parse(String(row.restrictions_json)) as LicenceProduct["restrictions"],
+  }));
+  return c.json({ results });
+});
+
+app.post("/api/search/visual", async (c) => {
+  if (!c.env.AI || !c.env.PHOTO_INDEX) return c.json({ error: "Visual search is not configured", code: "visual_search_unavailable" }, 503);
+  const contentLength = Number(c.req.header("content-length") ?? 0);
+  if (contentLength > 12 * 1024 * 1024) return c.json({ error: "Visual search images must be 10 MB or smaller" }, 413);
+  const form = await c.req.raw.formData();
+  const file = form.get("image");
+  if (!(file instanceof File) || !file.type.startsWith("image/")) return c.json({ error: "Upload an image file in the image field" }, 400);
+  if (file.size > 10 * 1024 * 1024) return c.json({ error: "Visual search images must be 10 MB or smaller" }, 413);
+
+  let visualStage = "image_prepare";
+  try {
+    const source = new Uint8Array(await file.arrayBuffer());
+    let image: Uint8Array<ArrayBufferLike> = source;
+    let contentType = file.type.toLowerCase();
+    if (source.byteLength > 8_000_000 || !["image/jpeg", "image/png"].includes(contentType)) {
+      let transformed: Uint8Array<ArrayBufferLike> | null = null;
+      for (const options of [{ width: 1600, quality: 75 }, { width: 1200, quality: 70 }, { width: 900, quality: 65 }]) {
+        const input = new Response(source).body;
+        if (!input) throw new Error("Visual search image stream is unavailable");
+        const output = await c.env.IMAGES.input(input).transform({ width: options.width })
+          .output({ format: "image/jpeg", quality: options.quality });
+        const candidate = new Uint8Array(await new Response(output.image()).arrayBuffer());
+        if (candidate.byteLength > 0 && candidate.byteLength <= 8_000_000) { transformed = candidate; break; }
+      }
+      if (!transformed) return c.json({ error: "The image could not be prepared for visual search" }, 422);
+      image = transformed;
+      contentType = "image/jpeg";
+    }
+    const aiImage = `data:${contentType};base64,${base64Bytes(image)}`;
+    const model = c.env.PHOTO_VISION_PROVIDER === "ollama-tunnel"
+      ? `ollama:${c.env.LOCAL_VISION_MODEL?.trim() || "qwen3-vl:8b"}`
+      : (c.env.PHOTO_VISION_MODEL ?? "@cf/moondream/moondream3.1-9B-A2B");
+    visualStage = "vision_provider";
+    const vision = await runPhotoVision(photoPipeline(c.env), model, image, aiImage);
+    const metadata = classifyVisionResult(vision).metadata;
+    const description = [metadata.description, ...metadata.subjectTags, metadata.locationType, metadata.sceneContext, metadata.primaryCategory, ...metadata.sceneAttributes]
+      .filter((value) => value && value !== "unknown" && value !== "other").join(" ").trim().slice(0, 1200);
+    if (!description) return c.json({ error: "The image could not be described for visual search" }, 422);
+    visualStage = "semantic_lookup";
+    const semantic = await searchPhotoIndex(photoPipeline(c.env), description, { kind: "image", status: "published" });
+    return c.json({
+      query: metadata.description || description,
+      mode: semantic.usedVectorIndex ? "visual-to-semantic" : "visual-to-keyword",
+      results: semantic.rows.map((row) => assetRowToDomain(row, c.env)),
+      usedVectorIndex: semantic.usedVectorIndex,
+    });
+  } catch (error) {
+    logEvent("error", "photo.search.visual_failed", c.get("trace"), { error: error instanceof Error ? error.message : "unknown-error" });
+    c.header("X-Visual-Search-Failure-Stage", visualStage);
+    return c.json({ error: "Visual search is temporarily unavailable", code: "visual_search_failed" }, 503);
+  }
+});
+
 app.get("/api/assets", async (c) => {
   const params = searchSchema.parse({
     q: c.req.query("q") ?? "",
@@ -3116,6 +3314,7 @@ app.get("/api/assets", async (c) => {
       const semantic = await searchPhotoIndex(photoPipeline(c.env), params.q, params);
       rows = semantic.rows;
       searchMode = semantic.mode;
+      if (semantic.fallbackReason) c.header("X-Search-Fallback-Reason", semantic.fallbackReason);
       searchHandled = true;
     } catch (error) {
       logEvent("error", "photo.search.hybrid_failed", c.get("trace"), { error: error instanceof Error ? error.message : "unknown-error" });
@@ -3155,7 +3354,12 @@ app.get("/api/assets", async (c) => {
     rows = result.results as Record<string, unknown>[];
   }
   if (params.verified) rows = rows.filter((row) => Boolean(row.human_verified));
-  const matchedAssets = archiveDomain.rankSearchAssets(rows.map((row) => assetRowToDomain(row, c.env)), params.q);
+  const domainAssets = rows.map((row) => assetRowToDomain(row, c.env));
+  // Vectorize has already ranked semantic candidates. Applying the lexical
+  // relevance gate again would discard valid intent matches such as "warm forest".
+  const matchedAssets = searchMode === "keyword"
+    ? archiveDomain.rankSearchAssets(domainAssets, params.q)
+    : domainAssets;
   const countBy = <T extends string>(values: (T | null | undefined)[]): Map<string, number> => {
     const counts = new Map<string, number>();
     for (const value of values) if (value) counts.set(value, (counts.get(value) ?? 0) + 1);
@@ -4657,9 +4861,19 @@ const worker: ExportedHandler<Bindings, QueueMessage> = {
     try {
       await catchUpR2Replication(env, trace);
       const requeued = await retryQueuedPhotoJobs(photoPipeline(env));
+      const repaired = { queued: 0, recovered: 0, stale: 0, resolvedReviews: 0 };
+      for (let pass = 0; pass < 3; pass += 1) {
+        const batch = await repairPendingPhotoPipeline(photoPipeline(env), 50);
+        repaired.queued += batch.queued;
+        repaired.recovered += batch.recovered;
+        repaired.stale += batch.stale;
+        repaired.resolvedReviews += batch.resolvedReviews;
+        if (batch.queued < 50) break;
+      }
       await runMaintenance(env);
       const alerted = await dispatchSavedSearchAlerts(env);
       recordMetric(env, "photo_jobs_requeued", trace, requeued, ["cron"]);
+      recordMetric(env, "photo_pipeline_repairs", trace, repaired.queued + repaired.recovered + repaired.stale + repaired.resolvedReviews, ["cron"]);
       recordMetric(env, "saved_search_alerts_sent", trace, alerted, ["cron"]);
     } catch (error) {
       logEvent("error", "r2.replication.failed", trace, {

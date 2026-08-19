@@ -111,6 +111,13 @@ function cookieValue(request: Request): string | null {
   return item ? decodeURIComponent(item.slice("va_session=".length)) : null;
 }
 
+export function sessionTokenFromRequest(request: Request): string | null {
+  const cookieSession = cookieValue(request);
+  if (cookieSession) return cookieSession;
+  const authorization = request.headers.get("Authorization") ?? "";
+  return authorization.match(/^VeldSession\s+([^\s]+)$/i)?.[1] ?? null;
+}
+
 function sessionCookie(value: string, env: AuthBindings, maxAge: number): string {
   const attributes = ["HttpOnly", "Path=/", `Max-Age=${maxAge}`, "SameSite=Lax"];
   if (String(env.APP_ENV) === "production") attributes.push("Secure");
@@ -154,7 +161,7 @@ export async function createSession(env: AuthBindings, userId: string, organizat
 }
 
 export async function getRequestUser(env: AuthBindings, request: Request): Promise<RequestUser | null> {
-  const session = cookieValue(request);
+  const session = sessionTokenFromRequest(request);
   if (!session) return null;
   const separator = session.indexOf(".");
   if (separator < 1) return null;
