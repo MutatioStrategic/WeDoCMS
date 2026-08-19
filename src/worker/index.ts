@@ -638,7 +638,7 @@ const collectionInputSchema = z.object({ slug: z.string().trim().toLowerCase().r
 app.get("/api/me/creator-profile", async (c) => {
   const user = await requestUser(c);
   if (!user || !allowedRole(user, ["contributor", "editor", "admin"])) return c.json({ error: "Contributor access required" }, 403);
-  const row = await c.env.DB.prepare(`SELECT cp.*, u.display_name, (SELECT COUNT(*) FROM assets a WHERE a.owner_id = cp.user_id AND a.status = 'published') AS asset_count, (SELECT COUNT(*) FROM portfolio_collections pc WHERE pc.owner_id = cp.user_id AND pc.visibility = 'public') AS collection_count FROM creator_profiles cp JOIN users u ON u.id = cp.user_id WHERE cp.user_id = ?`).bind(user.id).first<Record<string, unknown>>();
+  const row = await c.env.DB.prepare(`SELECT cp.*, u.display_name, (SELECT COUNT(*) FROM assets a WHERE a.owner_id = cp.user_id AND a.status = 'published') AS asset_count, (SELECT COUNT(*) FROM assets a WHERE a.owner_id = cp.user_id AND a.status = 'published' AND a.kind = 'image') AS published_image_count, (SELECT COUNT(*) FROM assets a WHERE a.owner_id = cp.user_id AND a.status = 'needs_review') AS review_count, (SELECT COUNT(*) FROM portfolio_collections pc WHERE pc.owner_id = cp.user_id AND pc.visibility = 'public') AS collection_count FROM creator_profiles cp JOIN users u ON u.id = cp.user_id WHERE cp.user_id = ?`).bind(user.id).first<Record<string, unknown>>();
   return c.json({ profile: row ? creatorProfileFromRow(row) : null });
 });
 
@@ -910,6 +910,7 @@ function creatorProfileFromRow(row: Record<string, unknown>): CreatorProfile {
     id: String(row.user_id), slug: String(row.slug), name: String(row.display_name), headline: String(row.headline ?? ""),
     bio: String(row.bio ?? ""), location: String(row.location ?? ""), specialties: parseStringArray(row.specialties_json),
     websiteUrl: row.website_url == null ? null : String(row.website_url), assetCount: Number(row.asset_count ?? 0),
+    publishedImageCount: Number(row.published_image_count ?? 0), reviewCount: Number(row.review_count ?? 0),
     collectionCount: Number(row.collection_count ?? 0), featuredAssetId: row.featured_asset_id == null ? null : String(row.featured_asset_id),
   };
 }
@@ -2822,6 +2823,8 @@ app.get("/api/creators", async (c) => {
   const rows = await c.env.DB.prepare(`
     SELECT cp.*, u.display_name,
       (SELECT COUNT(*) FROM assets a WHERE a.owner_id = cp.user_id AND a.status = 'published' ${production ? "AND COALESCE(a.demo_seed, 0) = 0 AND a.id NOT LIKE 'asset-demo-%' AND a.id NOT LIKE 'asset-test-photo-%'" : ""}) AS asset_count,
+      (SELECT COUNT(*) FROM assets a WHERE a.owner_id = cp.user_id AND a.status = 'published' AND a.kind = 'image' ${production ? "AND COALESCE(a.demo_seed, 0) = 0 AND a.id NOT LIKE 'asset-demo-%' AND a.id NOT LIKE 'asset-test-photo-%'" : ""}) AS published_image_count,
+      (SELECT COUNT(*) FROM assets a WHERE a.owner_id = cp.user_id AND a.status = 'needs_review' ${production ? "AND COALESCE(a.demo_seed, 0) = 0 AND a.id NOT LIKE 'asset-demo-%' AND a.id NOT LIKE 'asset-test-photo-%'" : ""}) AS review_count,
       (SELECT COUNT(*) FROM portfolio_collections pc WHERE pc.owner_id = cp.user_id AND pc.visibility = 'public') AS collection_count
     FROM creator_profiles cp JOIN users u ON u.id = cp.user_id
     WHERE cp.visibility = 'public' ${production ? "AND u.id NOT LIKE 'demo-%'" : ""} AND (cp.slug LIKE ? OR u.display_name LIKE ? OR cp.headline LIKE ? OR cp.location LIKE ? OR cp.specialties_json LIKE ?)
@@ -2836,6 +2839,8 @@ app.get("/api/creators/:slug", async (c) => {
   const row = await c.env.DB.prepare(`
     SELECT cp.*, u.display_name,
       (SELECT COUNT(*) FROM assets a WHERE a.owner_id = cp.user_id AND a.status = 'published') AS asset_count,
+      (SELECT COUNT(*) FROM assets a WHERE a.owner_id = cp.user_id AND a.status = 'published' AND a.kind = 'image') AS published_image_count,
+      (SELECT COUNT(*) FROM assets a WHERE a.owner_id = cp.user_id AND a.status = 'needs_review') AS review_count,
       (SELECT COUNT(*) FROM portfolio_collections pc WHERE pc.owner_id = cp.user_id AND pc.visibility = 'public') AS collection_count
     FROM creator_profiles cp JOIN users u ON u.id = cp.user_id WHERE cp.slug = ? AND cp.visibility = 'public' ${production ? "AND u.id NOT LIKE 'demo-%'" : ""}
   `).bind(slug).first<Record<string, unknown>>();

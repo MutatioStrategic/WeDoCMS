@@ -269,6 +269,8 @@ export type CreatorProfile = {
   specialties: string[];
   websiteUrl: string | null;
   assetCount: number;
+  publishedImageCount: number;
+  reviewCount: number;
   collectionCount: number;
   featuredAssetId: string | null;
 };

@@ -18,7 +18,7 @@
     "typescript": "~6.0.3"
   },
   "overrides": {
-    "image-size": "2.0.2"
+    "image-size": "npm:image-size-safe@2.0.3"
   },
   "scripts": {
     "start": "expo start",
