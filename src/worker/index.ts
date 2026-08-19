@@ -2,7 +2,7 @@ import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { z } from "zod";
 import { archiveDomain } from "../shared";
-import type { Asset, BuyerAnalytics, CommunityOverview, ContributorAnalytics, LicenceRequest, MonetizationModel, RightsCase, SearchResponse, TakedownReason } from "../shared";
+import type { Asset, BuyerAnalytics, CommunityOverview, ContributorAnalytics, DiscoveryResponse, LicenceRequest, MonetizationModel, RightsCase, SavedSearch, SearchResponse, TakedownReason, UserLightbox } from "../shared";
 import {
   elapsedMilliseconds,
   logEvent,
@@ -61,6 +61,9 @@ import { allowedOrigin, applySecurityHeaders, enforceRateLimit, scanMediaObject,
 import { createPresignedR2Url } from "./r2-presign";
 import { decidePayoutBatch } from "./payout-decision";
 import { AUTO_APPROVAL_SCOPE, AUTO_APPROVAL_TERMS_VERSION, autoApprovalIsActive, licenceApprovalStatus } from "./licence-approval";
+import { discoveryTokens, normalizeSavedQuery, scoreRecommendation } from "./discovery";
+import { parseCampaignBrief, rankCampaignAssets, type BrandKit, type CampaignBrief, type CampaignStage } from "../campaign-intelligence";
+import { bearerToken, normalizeWordPressSiteUrl, WORDPRESS_SCOPES, wordPressApiBaseUrl } from "../integrations/wordpress";
 import {
   assetCreateRequestSchema as contractAssetCreateRequestSchema,
   assetCreateResponseSchema,
@@ -421,6 +424,90 @@ app.post("/api/auth/switch-organization", async (c) => {
   const membership = await c.env.DB.prepare("SELECT organization_id FROM organization_memberships WHERE organization_id = ? AND user_id = ? AND status = 'active'").bind(payload.organizationId, user.id).first<{ organization_id: string }>();
   if (!membership) return c.json({ error: "Organization membership required" }, 403);
   return sessionResponse(c, user.id, membership.organization_id);
+});
+
+const wordpressPairingSchema = z.object({ siteUrl: z.string().trim().min(8).max(2048), siteName: z.string().trim().max(180).default("") });
+const wordpressExchangeSchema = wordpressPairingSchema.extend({ pairingCode: z.string().regex(/^wpc_[A-Za-z0-9_-]{40,180}$/), pluginVersion: z.string().trim().max(40).default("") });
+type WordPressConnectionRow = { id: string; organization_id: string; created_by: string; site_url: string; site_name: string; plugin_version: string; status: "active" | "revoked" };
+
+async function requestWordPressConnection(c: { env: Bindings; req: { raw: Request } }): Promise<WordPressConnectionRow | null> {
+  const token = bearerToken(c.req.raw);
+  if (!token) return null;
+  const connection = await c.env.DB.prepare("SELECT id, organization_id, created_by, site_url, site_name, plugin_version, status FROM wordpress_connections WHERE token_hash = ? AND status = 'active'").bind(await sha256Hex(token)).first<WordPressConnectionRow>();
+  if (!connection) return null;
+  await c.env.DB.prepare("UPDATE wordpress_connections SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'active'").bind(connection.id).run();
+  return connection;
+}
+
+function wordpressConnectionResponse(request: Request, env: Bindings, connection: WordPressConnectionRow): Record<string, unknown> {
+  return { connectionId: connection.id, siteUrl: connection.site_url, siteName: connection.site_name, status: connection.status, pluginVersion: connection.plugin_version, scopes: [...WORDPRESS_SCOPES], apiBaseUrl: wordPressApiBaseUrl(request, env.APP_PUBLIC_URL) };
+}
+
+function wordpressAssetResponse(request: Request, env: Bindings, row: Record<string, unknown>): Record<string, unknown> {
+  const asset = assetRowToDomain(row, env);
+  return { id: asset.id, kind: asset.kind, title: asset.title, description: asset.description, caption: asset.caption, country: asset.country, province: asset.province, city: asset.city, locality: asset.locality, landmark: asset.landmark, rightsStatus: asset.rightsStatus, modelReleaseStatus: asset.modelReleaseStatus, propertyReleaseStatus: asset.propertyReleaseStatus, sourceAttribution: asset.sourceAttribution, tags: [...asset.subjectTags, ...asset.culturalTags], previewUrl: `${wordPressApiBaseUrl(request, env.APP_PUBLIC_URL)}/api/assets/${encodeURIComponent(asset.id)}/preview`, licenceRequired: true };
+}
+
+app.post("/api/integrations/wordpress/pairing", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["buyer", "editor", "admin"])) return c.json({ error: "WordPress connection requires buyer, editor, or admin access" }, 403);
+  const payload = wordpressPairingSchema.parse(await c.req.json());
+  const siteUrl = normalizeWordPressSiteUrl(payload.siteUrl, String(c.env.APP_ENV) === "production");
+  if (!siteUrl) return c.json({ error: "A valid HTTPS WordPress site URL is required" }, 422);
+  const pairingCode = `wpc_${base64UrlToken()}`;
+  const id = crypto.randomUUID();
+  await c.env.DB.prepare("INSERT INTO wordpress_pairing_codes (id, organization_id, created_by, code_hash, site_url, site_name, expires_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now', '+10 minutes'))").bind(id, user.organizationId, user.id, await sha256Hex(pairingCode), siteUrl, payload.siteName).run();
+  return c.json({ pairingId: id, pairingCode, siteUrl, expiresInSeconds: 600, apiBaseUrl: wordPressApiBaseUrl(c.req.raw, c.env.APP_PUBLIC_URL) }, 201);
+});
+
+app.post("/api/integrations/wordpress/pairing/exchange", async (c) => {
+  const payload = wordpressExchangeSchema.parse(await c.req.json());
+  const siteUrl = normalizeWordPressSiteUrl(payload.siteUrl, String(c.env.APP_ENV) === "production");
+  if (!siteUrl) return c.json({ error: "A valid HTTPS WordPress site URL is required" }, 422);
+  const pairing = await c.env.DB.prepare("SELECT id, organization_id, created_by, site_url, site_name FROM wordpress_pairing_codes WHERE code_hash = ? AND used_at IS NULL AND expires_at > CURRENT_TIMESTAMP").bind(await sha256Hex(payload.pairingCode)).first<{ id: string; organization_id: string; created_by: string; site_url: string; site_name: string }>();
+  if (!pairing || pairing.site_url !== siteUrl) return c.json({ error: "Pairing code is invalid, expired, already used, or bound to another site" }, 401);
+  const accessToken = `wpa_${base64UrlToken()}`;
+  const connectionId = crypto.randomUUID();
+  await c.env.DB.batch([
+    c.env.DB.prepare("INSERT INTO wordpress_connections (id, organization_id, created_by, site_url, site_name, token_hash, token_prefix, plugin_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(connectionId, pairing.organization_id, pairing.created_by, siteUrl, payload.siteName || pairing.site_name, await sha256Hex(accessToken), accessToken.slice(0, 12), payload.pluginVersion),
+    c.env.DB.prepare("UPDATE wordpress_pairing_codes SET used_at = CURRENT_TIMESTAMP WHERE id = ? AND used_at IS NULL").bind(pairing.id),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, metadata_json) VALUES (?, ?, 'wordpress_connection_created', 'wordpress_connection', ?, ?)").bind(crypto.randomUUID(), pairing.created_by, connectionId, JSON.stringify({ siteUrl, pluginVersion: payload.pluginVersion })),
+  ]);
+  const connection: WordPressConnectionRow = { id: connectionId, organization_id: pairing.organization_id, created_by: pairing.created_by, site_url: siteUrl, site_name: payload.siteName || pairing.site_name, plugin_version: payload.pluginVersion, status: "active" };
+  return c.json({ ...wordpressConnectionResponse(c.req.raw, c.env, connection), accessToken, tokenWarning: "Store this token securely. It will not be shown again." }, 201);
+});
+
+app.post("/api/integrations/wordpress/connections/:id/revoke", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["admin", "editor"])) return c.json({ error: "Organisation administration required" }, 403);
+  const connection = await c.env.DB.prepare("SELECT id FROM wordpress_connections WHERE id = ? AND organization_id = ? AND status = 'active'").bind(c.req.param("id"), user.organizationId).first<{ id: string }>();
+  if (!connection) return c.json({ error: "Active WordPress connection not found" }, 404);
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE wordpress_connections SET status = 'revoked', revoked_at = CURRENT_TIMESTAMP WHERE id = ?").bind(c.req.param("id")),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id) VALUES (?, ?, 'wordpress_connection_revoked', 'wordpress_connection', ?)").bind(crypto.randomUUID(), user.id, c.req.param("id")),
+  ]);
+  return c.json({ connectionId: c.req.param("id"), status: "revoked" });
+});
+
+app.get("/api/integrations/wordpress/v1/me", async (c) => {
+  const connection = await requestWordPressConnection(c);
+  if (!connection) return c.json({ error: "WordPress connection is invalid or revoked" }, 401);
+  return c.json(wordpressConnectionResponse(c.req.raw, c.env, connection));
+});
+
+app.get("/api/integrations/wordpress/v1/assets", async (c) => {
+  const connection = await requestWordPressConnection(c);
+  if (!connection) return c.json({ error: "WordPress connection is invalid or revoked" }, 401);
+  const query = String(c.req.query("q") ?? "").trim().slice(0, 180);
+  const clauses = ["a.organization_id = ?", "a.status = 'published'", "a.kind = 'image'"];
+  const values: unknown[] = [connection.organization_id];
+  for (const token of discoveryTokens([query]).slice(0, 6)) {
+    clauses.push("(lower(a.title) LIKE ? OR lower(a.description) LIKE ? OR lower(a.caption) LIKE ? OR lower(a.subject_tags) LIKE ? OR lower(COALESCE(a.city, '')) LIKE ? OR lower(COALESCE(a.province, '')) LIKE ?)");
+    const pattern = `%${token}%`;
+    values.push(pattern, pattern, pattern, pattern, pattern, pattern);
+  }
+  const rows = await c.env.DB.prepare(`SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id WHERE ${clauses.join(" AND ")} ORDER BY a.human_verified DESC, a.updated_at DESC LIMIT 40`).bind(...values).all<Record<string, unknown>>();
+  return c.json({ query, page: 1, limit: 40, total: rows.results.length, results: rows.results.map((row) => wordpressAssetResponse(c.req.raw, c.env, row)) });
 });
 
 function base64UrlToken(): string {
@@ -3062,7 +3149,7 @@ app.get("/api/assets", async (c) => {
       FROM assets a JOIN users u ON u.id = a.owner_id
       WHERE ${clauses.join(" AND ")}
       ORDER BY a.human_verified DESC, a.authenticity_confidence DESC, a.created_at DESC
-      LIMIT 60
+      LIMIT 200
     `).bind(...values).all<Record<string, unknown>>();
 
     rows = result.results as Record<string, unknown>[];
@@ -3815,21 +3902,259 @@ app.get("/api/rights/cases/:id/messages", async (c) => {
   return c.json({ caseId, results: rows.results.map((row) => ({ id: String(row.id), authorId: String(row.author_id), authorName: String(row.author_name), body: String(row.body), visibility: row.visibility, createdAt: String(row.created_at) })) });
 });
 
+const campaignBrandKitSchema = z.object({
+  colours: z.array(z.string().trim().max(40)).max(12).default([]),
+  logoNotes: z.string().trim().max(500).default(""),
+  tone: z.string().trim().max(160).default(""),
+  industry: z.string().trim().max(160).default(""),
+  forbiddenStyles: z.array(z.string().trim().max(80)).max(20).default([]),
+  preferredVisuals: z.string().trim().max(1000).default(""),
+}).strict();
+const campaignInputSchema = z.object({
+  name: z.string().trim().min(2).max(180),
+  briefText: z.string().trim().max(8000).optional(),
+  brief: z.union([z.string().trim().max(8000), z.record(z.unknown())]).default(""),
+  platforms: z.array(z.string().trim().max(40)).max(8).default([]),
+  brandKit: campaignBrandKitSchema.default({}),
+  status: z.enum(["draft", "active", "archived"]).default("draft"),
+});
+const campaignAssetSchema = z.object({
+  assetId: z.string().min(1).max(120),
+  stage: z.enum(["shortlisted", "rejected", "approved", "needs_review"]).default("shortlisted"),
+  note: z.string().trim().max(1000).default(""),
+});
+
+function safeJsonObject<T>(value: unknown, fallback: T): T {
+  if (typeof value !== "string" || !value.trim()) return fallback;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed as T : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function campaignBriefFromPayload(payload: z.infer<typeof campaignInputSchema>): { briefText: string; briefFields: CampaignBrief } {
+  const briefText = payload.briefText ?? (typeof payload.brief === "string" ? payload.brief : "");
+  const parsed = parseCampaignBrief(briefText, payload.platforms);
+  const briefFields = typeof payload.brief === "string" ? parsed : { ...parsed, ...payload.brief } as CampaignBrief;
+  return { briefText, briefFields };
+}
+
+function campaignSummaryFromRow(row: Record<string, unknown>) {
+  const briefText = String(row.brief_text ?? "");
+  const briefFields = safeJsonObject<CampaignBrief>(row.brief_json, parseCampaignBrief(briefText));
+  const brandKit = safeJsonObject<BrandKit>(row.brand_kit_json, { colours: [], logoNotes: "", tone: "", industry: "", forbiddenStyles: [], preferredVisuals: "" });
+  return {
+    id: String(row.id),
+    name: String(row.name),
+    briefText,
+    brief: briefText,
+    briefFields,
+    brandKit,
+    status: String(row.status),
+    assetCounts: {
+      shortlisted: Number(row.shortlisted_count ?? 0),
+      approved: Number(row.approved_count ?? 0),
+      needsReview: Number(row.needs_review_count ?? 0),
+      rejected: Number(row.rejected_count ?? 0),
+    },
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+app.get("/api/campaigns", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const rows = await c.env.DB.prepare(`SELECT c.*,
+    SUM(CASE WHEN ca.stage = 'shortlisted' THEN 1 ELSE 0 END) AS shortlisted_count,
+    SUM(CASE WHEN ca.stage = 'approved' THEN 1 ELSE 0 END) AS approved_count,
+    SUM(CASE WHEN ca.stage = 'needs_review' THEN 1 ELSE 0 END) AS needs_review_count,
+    SUM(CASE WHEN ca.stage = 'rejected' THEN 1 ELSE 0 END) AS rejected_count
+    FROM campaigns c LEFT JOIN campaign_assets ca ON ca.campaign_id = c.id
+    WHERE c.organization_id = ? GROUP BY c.id ORDER BY c.updated_at DESC LIMIT 100`).bind(user.organizationId).all<Record<string, unknown>>();
+  return c.json({ results: rows.results.map(campaignSummaryFromRow) });
+});
+
+app.post("/api/campaigns", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Campaign workspace access required" }, 403);
+  const payload = campaignInputSchema.parse(await c.req.json());
+  const id = crypto.randomUUID();
+  const { briefText, briefFields } = campaignBriefFromPayload(payload);
+  await c.env.DB.batch([
+    c.env.DB.prepare("INSERT INTO campaigns (id, organization_id, owner_id, name, brief_text, brief_json, brand_kit_json, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(id, user.organizationId, user.id, payload.name, briefText, JSON.stringify(briefFields), JSON.stringify(payload.brandKit), payload.status),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, metadata_json) VALUES (?, ?, 'campaign_created', 'campaign', ?, ?)").bind(crypto.randomUUID(), user.id, id, JSON.stringify({ name: payload.name, platforms: briefFields.platforms, usageRights: briefFields.usageRights })),
+  ]);
+  return c.json({ id, name: payload.name, brief: briefText, briefText, briefFields, brandKit: payload.brandKit, status: payload.status, assetCounts: { shortlisted: 0, approved: 0, needsReview: 0, rejected: 0 } }, 201);
+});
+
+app.get("/api/campaigns/:id", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const campaignId = c.req.param("id");
+  const campaign = await c.env.DB.prepare(`SELECT c.*,
+    SUM(CASE WHEN ca.stage = 'shortlisted' THEN 1 ELSE 0 END) AS shortlisted_count,
+    SUM(CASE WHEN ca.stage = 'approved' THEN 1 ELSE 0 END) AS approved_count,
+    SUM(CASE WHEN ca.stage = 'needs_review' THEN 1 ELSE 0 END) AS needs_review_count,
+    SUM(CASE WHEN ca.stage = 'rejected' THEN 1 ELSE 0 END) AS rejected_count
+    FROM campaigns c LEFT JOIN campaign_assets ca ON ca.campaign_id = c.id
+    WHERE c.id = ? AND c.organization_id = ? GROUP BY c.id`).bind(campaignId, user.organizationId).first<Record<string, unknown>>();
+  if (!campaign) return c.json({ error: "Campaign not found" }, 404);
+  const summary = campaignSummaryFromRow(campaign);
+  const stagedRows = await c.env.DB.prepare(`SELECT ca.stage, ca.note, a.*, u.display_name AS contributor
+    FROM campaign_assets ca JOIN assets a ON a.id = ca.asset_id JOIN users u ON u.id = a.owner_id
+    WHERE ca.campaign_id = ? AND a.organization_id = ? ORDER BY ca.updated_at DESC`).bind(campaignId, user.organizationId).all<Record<string, unknown>>();
+  const stagedByAsset = new Map(stagedRows.results.map((row) => [String(row.id), { stage: String(row.stage) as CampaignStage, note: String(row.note ?? "") }]));
+  const assets = stagedRows.results.map((row) => ({ ...assetRowToDomain(row, c.env), campaignStage: String(row.stage) as CampaignStage, campaignNote: String(row.note ?? ""), activeLicenceId: null }));
+  const candidateRows = await c.env.DB.prepare("SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.organization_id = ? AND a.status = 'published' ORDER BY a.human_verified DESC, a.created_at DESC LIMIT 80").bind(user.organizationId).all<Record<string, unknown>>();
+  const recommendations = rankCampaignAssets(candidateRows.results.map((row) => assetRowToDomain(row, c.env)), summary.briefFields, summary.brandKit).slice(0, 12).map((item) => {
+    const staged = stagedByAsset.get(item.asset.id);
+    return { ...item, stage: staged?.stage ?? null, note: staged?.note ?? "" };
+  });
+  return c.json({ campaign: summary, recommendations, assets, editVersions: [], derivatives: [], bundles: [] });
+});
+
+app.post("/api/campaigns/:id/assets", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Campaign workspace access required" }, 403);
+  const payload = campaignAssetSchema.parse(await c.req.json());
+  const campaignId = c.req.param("id");
+  const campaign = await c.env.DB.prepare("SELECT id FROM campaigns WHERE id = ? AND organization_id = ?").bind(campaignId, user.organizationId).first<{ id: string }>();
+  if (!campaign) return c.json({ error: "Campaign not found" }, 404);
+  const asset = await c.env.DB.prepare("SELECT id FROM assets WHERE id = ? AND organization_id = ? AND status = 'published'").bind(payload.assetId, user.organizationId).first<{ id: string }>();
+  if (!asset) return c.json({ error: "Published asset not found" }, 404);
+  await c.env.DB.batch([
+    c.env.DB.prepare("INSERT INTO campaign_assets (campaign_id, asset_id, stage, note, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(campaign_id, asset_id) DO UPDATE SET stage = excluded.stage, note = excluded.note, updated_at = CURRENT_TIMESTAMP").bind(campaignId, payload.assetId, payload.stage, payload.note),
+    c.env.DB.prepare("UPDATE campaigns SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(campaignId),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, metadata_json) VALUES (?, ?, 'campaign_asset_stage_changed', 'campaign', ?, ?)").bind(crypto.randomUUID(), user.id, campaignId, JSON.stringify({ assetId: payload.assetId, stage: payload.stage })),
+  ]);
+  return c.json({ ok: true, assetId: payload.assetId, stage: payload.stage });
+});
+
+app.get("/api/campaigns/:id/manifest", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const campaign = await c.env.DB.prepare("SELECT * FROM campaigns WHERE id = ? AND organization_id = ?").bind(c.req.param("id"), user.organizationId).first<Record<string, unknown>>();
+  if (!campaign) return c.json({ error: "Campaign not found" }, 404);
+  const briefFields = safeJsonObject<CampaignBrief>(campaign.brief_json, parseCampaignBrief(String(campaign.brief_text ?? "")));
+  const approvedRows = await c.env.DB.prepare(`SELECT ca.stage, ca.note, a.*, u.display_name AS contributor
+    FROM campaign_assets ca JOIN assets a ON a.id = ca.asset_id JOIN users u ON u.id = a.owner_id
+    WHERE ca.campaign_id = ? AND a.organization_id = ? AND ca.stage = 'approved' ORDER BY ca.updated_at DESC`).bind(campaign.id, user.organizationId).all<Record<string, unknown>>();
+  const approvedAssets = approvedRows.results.map((row) => assetRowToDomain(row, c.env));
+  return c.json({
+    manifestVersion: "3A",
+    campaignId: String(campaign.id),
+    generatedAt: new Date().toISOString(),
+    brief: briefFields,
+    auditTrail: {
+      approvedCount: approvedAssets.length,
+      rightsVerifiedCount: approvedAssets.filter((asset) => asset.rightsStatus === "verified").length,
+      humanVerifiedCount: approvedAssets.filter((asset) => asset.humanVerified).length,
+    },
+    assets: approvedAssets.map((asset) => ({ id: asset.id, title: asset.title, rightsStatus: asset.rightsStatus, humanVerified: asset.humanVerified, sourceAttribution: asset.sourceAttribution })),
+  });
+});
+
 const savedSearchSchema = z.object({
-  label: z.string().trim().min(1).max(120),
+  name: z.string().trim().min(1).max(120).optional(),
+  label: z.string().trim().min(1).max(120).optional(),
   query: z.string().trim().max(240).default(""),
-  kind: z.enum(["all", "image", "video"]).default("all"),
+  mediaKind: z.enum(["all", "image", "video"]).optional(),
+  kind: z.enum(["all", "image", "video"]).optional(),
+  alertFrequency: z.enum(["none", "daily", "weekly"]).optional(),
   location: z.string().trim().max(80).optional(),
   locationType: z.string().trim().max(40).optional(),
   category: z.string().trim().max(40).optional(),
-  notifyOnNew: z.boolean().default(true),
+  notifyOnNew: z.boolean().optional(),
+}).refine((payload) => payload.name || payload.label, { message: "Saved search name is required" });
+
+function nullableString(value: unknown): string | null {
+  const text = typeof value === "string" ? value.trim() : "";
+  return text ? text : null;
+}
+
+function savedSearchFromRow(row: Record<string, unknown>): SavedSearch {
+  const name = String(row.label ?? "");
+  const kind = (["all", "image", "video"].includes(String(row.kind)) ? String(row.kind) : "all") as SavedSearch["mediaKind"];
+  const notifyOnNew = Number(row.notify_on_new ?? 0) === 1 || row.notify_on_new === true;
+  return {
+    id: String(row.id),
+    name,
+    label: name,
+    query: String(row.query ?? ""),
+    mediaKind: kind,
+    kind,
+    alertFrequency: notifyOnNew ? "daily" : "none",
+    notifyOnNew,
+    location: nullableString(row.location),
+    locationType: nullableString(row.location_type),
+    category: nullableString(row.category),
+    lastNotifiedAt: nullableString(row.last_notified_at),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.created_at),
+  };
+}
+
+function lightboxFromRow(row: Record<string, unknown>): UserLightbox {
+  const assetIds = String(row.asset_ids ?? "").split(",").map((value) => value.trim()).filter(Boolean);
+  const name = String(row.name ?? "");
+  return {
+    id: String(row.id),
+    name,
+    description: String(row.description ?? ""),
+    visibility: row.visibility === "shared" ? "shared" : "private",
+    assetIds,
+    assetCount: Number(row.asset_count ?? assetIds.length),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+async function listUserLightboxes(c: { env: Bindings }, user: RequestUser): Promise<UserLightbox[]> {
+  const rows = await c.env.DB.prepare(`SELECT l.*, COUNT(la.asset_id) AS asset_count, COALESCE(GROUP_CONCAT(la.asset_id), '') AS asset_ids
+    FROM user_lightboxes l
+    LEFT JOIN user_lightbox_assets la ON la.lightbox_id = l.id
+    WHERE l.organization_id = ? AND l.owner_id = ?
+    GROUP BY l.id ORDER BY l.updated_at DESC LIMIT 50`).bind(user.organizationId, user.id).all<Record<string, unknown>>();
+  return rows.results.map(lightboxFromRow);
+}
+
+app.get("/api/discovery", async (c) => {
+  const user = await requestUser(c);
+  const fallbackOrg = user ? null : await c.env.DB.prepare("SELECT id FROM organizations WHERE status = 'active' ORDER BY created_at ASC LIMIT 1").first<{ id: string }>();
+  const organizationId = user?.organizationId ?? c.env.DEFAULT_ORGANIZATION_ID ?? fallbackOrg?.id ?? "org-demo";
+  const trendingRows = await c.env.DB.prepare(`SELECT metric_key AS query, SUM(count) AS search_count
+    FROM analytics_daily
+    WHERE metric_type = 'search' AND metric_key <> '' AND metric_date >= date('now', '-30 day')
+    GROUP BY metric_key HAVING search_count >= 2 ORDER BY search_count DESC LIMIT 8`).all<Record<string, unknown>>();
+  const trending = trendingRows.results.map((row) => ({ query: String(row.query), searchCount: Number(row.search_count ?? 0) }));
+  let savedSearches: SavedSearch[] = [];
+  let lightboxes: UserLightbox[] = [];
+  if (user) {
+    const rows = await c.env.DB.prepare("SELECT * FROM saved_searches WHERE organization_id = ? AND user_id = ? ORDER BY created_at DESC LIMIT 50").bind(user.organizationId, user.id).all<Record<string, unknown>>();
+    savedSearches = rows.results.map(savedSearchFromRow);
+    lightboxes = await listUserLightboxes(c, user);
+  }
+  const interestTokens = discoveryTokens([...savedSearches.map((search) => search.query || search.name), ...lightboxes.flatMap((box) => [box.name, box.description])]);
+  const assetRows = await c.env.DB.prepare(`SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id
+    WHERE a.organization_id = ? AND a.status = 'published'
+    ORDER BY a.human_verified DESC, a.created_at DESC LIMIT 24`).bind(organizationId).all<Record<string, unknown>>();
+  const recommendations = assetRows.results.map((row) => {
+    const asset = assetRowToDomain(row, c.env);
+    const score = scoreRecommendation(asset, interestTokens);
+    return { asset, ...score };
+  }).sort((left, right) => right.score - left.score).slice(0, 8).map(({ asset, reason }) => ({ asset, reason }));
+  const response: DiscoveryResponse = { trending, savedSearches, recommendations, personalized: Boolean(user && interestTokens.length) };
+  return c.json(response);
 });
 
 app.get("/api/saved-searches", async (c) => {
   const user = await requestUser(c);
   if (!user) return c.json({ error: "Authentication required" }, 401);
   const rows = await c.env.DB.prepare("SELECT * FROM saved_searches WHERE organization_id = ? AND user_id = ? ORDER BY created_at DESC LIMIT 50").bind(user.organizationId, user.id).all<Record<string, unknown>>();
-  return c.json({ results: rows.results.map((row) => ({ id: String(row.id), label: String(row.label), query: String(row.query), kind: row.kind, location: row.location, locationType: row.location_type, category: row.category, notifyOnNew: Boolean(row.notify_on_new), lastNotifiedAt: row.last_notified_at, createdAt: String(row.created_at) })) });
+  return c.json({ results: rows.results.map(savedSearchFromRow) });
 });
 
 app.post("/api/saved-searches", async (c) => {
@@ -3837,9 +4162,13 @@ app.post("/api/saved-searches", async (c) => {
   if (!user) return c.json({ error: "Authentication required" }, 401);
   const payload = savedSearchSchema.parse(await c.req.json());
   const id = crypto.randomUUID();
+  const label = payload.label ?? payload.name ?? "Saved search";
+  const kind = payload.kind ?? payload.mediaKind ?? "all";
+  const notifyOnNew = payload.notifyOnNew ?? payload.alertFrequency !== "none";
   await c.env.DB.prepare("INSERT INTO saved_searches (id, organization_id, user_id, label, query, kind, location, location_type, category, notify_on_new) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-    .bind(id, user.organizationId, user.id, payload.label, payload.query, payload.kind, payload.location ?? null, payload.locationType ?? null, payload.category ?? null, payload.notifyOnNew ? 1 : 0).run();
-  return c.json({ id }, 201);
+    .bind(id, user.organizationId, user.id, label, normalizeSavedQuery(payload.query), kind, payload.location ?? null, payload.locationType ?? null, payload.category ?? null, notifyOnNew ? 1 : 0).run();
+  const row = await c.env.DB.prepare("SELECT * FROM saved_searches WHERE id = ?").bind(id).first<Record<string, unknown>>();
+  return c.json(row ? savedSearchFromRow(row) : { id }, 201);
 });
 
 app.delete("/api/saved-searches/:id", async (c) => {
@@ -3852,51 +4181,78 @@ app.delete("/api/saved-searches/:id", async (c) => {
 app.get("/api/lightboxes", async (c) => {
   const user = await requestUser(c);
   if (!user) return c.json({ error: "Authentication required" }, 401);
-  const rows = await c.env.DB.prepare(`SELECT l.*, COUNT(la.asset_id) AS asset_count FROM buyer_lightboxes l
-    LEFT JOIN buyer_lightbox_assets la ON la.lightbox_id = l.id
-    WHERE l.organization_id = ? AND l.user_id = ? AND l.status = 'active' GROUP BY l.id ORDER BY l.updated_at DESC LIMIT 50`).bind(user.organizationId, user.id).all<Record<string, unknown>>();
-  return c.json({ results: rows.results.map((row) => ({ id: String(row.id), title: String(row.title), status: row.status, assetCount: Number(row.asset_count ?? 0), createdAt: String(row.created_at), updatedAt: String(row.updated_at) })) });
+  return c.json({ results: await listUserLightboxes(c, user) });
 });
 
 app.post("/api/lightboxes", async (c) => {
   const user = await requestUser(c);
   if (!user) return c.json({ error: "Authentication required" }, 401);
-  const payload = z.object({ title: z.string().trim().min(1).max(120) }).parse(await c.req.json());
+  const payload = z.object({ name: z.string().trim().min(1).max(120).optional(), title: z.string().trim().min(1).max(120).optional(), description: z.string().trim().max(500).default(""), visibility: z.enum(["private", "shared"]).default("private") }).refine((body) => body.name || body.title, { message: "Lightbox name is required" }).parse(await c.req.json());
   const id = crypto.randomUUID();
-  await c.env.DB.prepare("INSERT INTO buyer_lightboxes (id, organization_id, user_id, title) VALUES (?, ?, ?, ?)").bind(id, user.organizationId, user.id, payload.title).run();
-  return c.json({ id }, 201);
+  const name = payload.name ?? payload.title ?? "Untitled lightbox";
+  await c.env.DB.prepare("INSERT INTO user_lightboxes (id, organization_id, owner_id, name, description, visibility) VALUES (?, ?, ?, ?, ?, ?)").bind(id, user.organizationId, user.id, name, payload.description, payload.visibility).run();
+  const row = await c.env.DB.prepare("SELECT l.*, 0 AS asset_count, '' AS asset_ids FROM user_lightboxes l WHERE l.id = ?").bind(id).first<Record<string, unknown>>();
+  return c.json(row ? lightboxFromRow(row) : { id, name }, 201);
+});
+
+app.get("/api/lightboxes/shared/:token", async (c) => {
+  const tokenHash = await sha256Hex(c.req.param("token"));
+  const lightbox = await c.env.DB.prepare("SELECT * FROM user_lightboxes WHERE share_token_hash = ? AND visibility = 'shared'").bind(tokenHash).first<Record<string, unknown>>();
+  if (!lightbox) return c.json({ error: "Shared lightbox not found" }, 404);
+  const assets = await c.env.DB.prepare(`SELECT a.*, u.display_name AS contributor FROM user_lightbox_assets la
+    JOIN assets a ON a.id = la.asset_id JOIN users u ON u.id = a.owner_id
+    WHERE la.lightbox_id = ? AND a.status = 'published' ORDER BY la.added_at ASC`).bind(lightbox.id).all<Record<string, unknown>>();
+  return c.json({ id: String(lightbox.id), name: String(lightbox.name), visibility: "shared", results: assets.results.map((row) => assetRowToDomain(row, c.env)) });
 });
 
 app.get("/api/lightboxes/:id", async (c) => {
   const user = await requestUser(c);
   if (!user) return c.json({ error: "Authentication required" }, 401);
-  const lightbox = await c.env.DB.prepare("SELECT * FROM buyer_lightboxes WHERE id = ? AND organization_id = ? AND user_id = ?").bind(c.req.param("id"), user.organizationId, user.id).first<Record<string, unknown>>();
+  const lightbox = await c.env.DB.prepare("SELECT * FROM user_lightboxes WHERE id = ? AND organization_id = ? AND owner_id = ?").bind(c.req.param("id"), user.organizationId, user.id).first<Record<string, unknown>>();
   if (!lightbox) return c.json({ error: "Lightbox not found" }, 404);
-  const assets = await c.env.DB.prepare(`SELECT a.*, u.display_name AS contributor FROM buyer_lightbox_assets la
-    JOIN assets a ON a.id = la.asset_id JOIN users u ON u.id = a.owner_id WHERE la.lightbox_id = ? ORDER BY la.sort_order ASC`).bind(c.req.param("id")).all<Record<string, unknown>>();
-  return c.json({ id: String(lightbox.id), title: String(lightbox.title), status: lightbox.status, createdAt: String(lightbox.created_at), updatedAt: String(lightbox.updated_at), assets: assets.results.map((row) => assetRowToDomain(row, c.env)), assetCount: assets.results.length });
+  const assets = await c.env.DB.prepare(`SELECT a.*, u.display_name AS contributor FROM user_lightbox_assets la
+    JOIN assets a ON a.id = la.asset_id JOIN users u ON u.id = a.owner_id WHERE la.lightbox_id = ? ORDER BY la.added_at ASC`).bind(c.req.param("id")).all<Record<string, unknown>>();
+  return c.json({ ...lightboxFromRow({ ...lightbox, asset_count: assets.results.length, asset_ids: assets.results.map((row) => row.id).join(",") }), assets: assets.results.map((row) => assetRowToDomain(row, c.env)) });
 });
 
 app.post("/api/lightboxes/:id/assets", async (c) => {
   const user = await requestUser(c);
   if (!user) return c.json({ error: "Authentication required" }, 401);
   const payload = z.object({ assetId: z.string().min(1).max(120) }).parse(await c.req.json());
-  const lightbox = await c.env.DB.prepare("SELECT id FROM buyer_lightboxes WHERE id = ? AND organization_id = ? AND user_id = ?").bind(c.req.param("id"), user.organizationId, user.id).first<{ id: string }>();
+  const lightbox = await c.env.DB.prepare("SELECT id FROM user_lightboxes WHERE id = ? AND organization_id = ? AND owner_id = ?").bind(c.req.param("id"), user.organizationId, user.id).first<{ id: string }>();
   if (!lightbox) return c.json({ error: "Lightbox not found" }, 404);
   const asset = await c.env.DB.prepare("SELECT id FROM assets WHERE id = ? AND organization_id = ? AND status = 'published'").bind(payload.assetId, user.organizationId).first<{ id: string }>();
   if (!asset) return c.json({ error: "Asset not found" }, 404);
-  await c.env.DB.prepare("INSERT INTO buyer_lightbox_assets (lightbox_id, asset_id) VALUES (?, ?) ON CONFLICT(lightbox_id, asset_id) DO NOTHING").bind(lightbox.id, asset.id).run();
-  await c.env.DB.prepare("UPDATE buyer_lightboxes SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(lightbox.id).run();
+  await c.env.DB.prepare("INSERT INTO user_lightbox_assets (lightbox_id, asset_id) VALUES (?, ?) ON CONFLICT(lightbox_id, asset_id) DO NOTHING").bind(lightbox.id, asset.id).run();
+  await c.env.DB.prepare("UPDATE user_lightboxes SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(lightbox.id).run();
   return c.json({ ok: true }, 201);
+});
+
+app.post("/api/lightboxes/:id/share-link", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const lightbox = await c.env.DB.prepare("SELECT id FROM user_lightboxes WHERE id = ? AND organization_id = ? AND owner_id = ?").bind(c.req.param("id"), user.organizationId, user.id).first<{ id: string }>();
+  if (!lightbox) return c.json({ error: "Lightbox not found" }, 404);
+  const token = base64UrlToken();
+  await c.env.DB.prepare("UPDATE user_lightboxes SET visibility = 'shared', share_token_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(await sha256Hex(token), lightbox.id).run();
+  return c.json({ shareUrl: `/api/lightboxes/shared/${token}` }, 201);
 });
 
 app.delete("/api/lightboxes/:id/assets/:assetId", async (c) => {
   const user = await requestUser(c);
   if (!user) return c.json({ error: "Authentication required" }, 401);
-  const lightbox = await c.env.DB.prepare("SELECT id FROM buyer_lightboxes WHERE id = ? AND organization_id = ? AND user_id = ?").bind(c.req.param("id"), user.organizationId, user.id).first<{ id: string }>();
+  const lightbox = await c.env.DB.prepare("SELECT id FROM user_lightboxes WHERE id = ? AND organization_id = ? AND owner_id = ?").bind(c.req.param("id"), user.organizationId, user.id).first<{ id: string }>();
   if (!lightbox) return c.json({ error: "Lightbox not found" }, 404);
-  await c.env.DB.prepare("DELETE FROM buyer_lightbox_assets WHERE lightbox_id = ? AND asset_id = ?").bind(lightbox.id, c.req.param("assetId")).run();
+  await c.env.DB.prepare("DELETE FROM user_lightbox_assets WHERE lightbox_id = ? AND asset_id = ?").bind(lightbox.id, c.req.param("assetId")).run();
+  await c.env.DB.prepare("UPDATE user_lightboxes SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(lightbox.id).run();
   return c.json({ ok: true });
+});
+
+app.delete("/api/lightboxes/:id", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const result = await c.env.DB.prepare("DELETE FROM user_lightboxes WHERE id = ? AND organization_id = ? AND owner_id = ?").bind(c.req.param("id"), user.organizationId, user.id).run();
+  return Number(result.meta.changes ?? 0) ? c.json({ ok: true }) : c.json({ error: "Lightbox not found" }, 404);
 });
 
 const webhookSubscriptionSchema = z.object({ targetUrl: z.string().url().max(2048), events: z.array(z.string().trim().min(1).max(60)).min(1).max(20) });

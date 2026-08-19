@@ -32,6 +32,7 @@ function TurnstileChallenge({ onToken }: { onToken: (token: string) => void }) {
 
 type View = "explore" | "search" | "campaigns" | "contributors" | "contributor" | "buyer" | "review" | "governance" | "community" | "account" | "studio" | "rights" | "stakeholders" | "wordpress";
 type SidebarSection = { label: string; items: Array<{ view: View; label: string; icon: IconName; badge?: string }> };
+const gatedViews = new Set<View>(["campaigns", "contributor", "buyer", "review", "governance", "wordpress"]);
 const sidebarSections: SidebarSection[] = [
   { label: "Discover", items: [{ view: "explore", label: "Explore archive", icon: "compass" }, { view: "search", label: "Search workbench", icon: "search" }, { view: "community", label: "Community", icon: "users" }] },
   { label: "Workspaces", items: [{ view: "campaigns", label: "Campaign intelligence", icon: "sparkles", badge: "3A" }, { view: "studio", label: "Media studio", icon: "image" }, { view: "contributors", label: "Creator marketplace", icon: "briefcase" }, { view: "buyer", label: "Buyer ROI", icon: "grid" }] },
@@ -236,7 +237,7 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
   }
 
   function navigate(nextView: View) {
-    if (!sessionUser && ["campaigns", "contributor", "buyer", "review", "governance", "wordpress"].includes(nextView)) {
+    if (!sessionUser && gatedViews.has(nextView)) {
       setNotice("Sign in is required for this workspace.");
       return;
     }
@@ -324,16 +325,35 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
 
   const verifiedCount = useMemo(() => assets.filter((asset) => asset.humanVerified).length, [assets]);
   function openAsset(asset: Asset) { setSelectedAsset(asset); trackEvent({ type: "asset_view", assetId: asset.id }); }
+  useEffect(() => {
+    window.scrollTo(0, 0);
+    setMobileSidebarOpen(false);
+  }, [view]);
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key.toLowerCase() !== "k" || (!event.metaKey && !event.ctrlKey)) return;
+      event.preventDefault();
+      navigate("search");
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [sessionUser]);
   const currentViewLabel = sidebarSections.flatMap((section) => section.items).find((item) => item.view === view)?.label ?? "Explore archive";
 
   return <div className={`app-shell better-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
-    <BetterSidebar view={view} navigate={navigate} collapsed={sidebarCollapsed} mobileOpen={mobileSidebarOpen} onToggleCollapse={() => setSidebarCollapsed((value) => !value)} onCloseMobile={() => setMobileSidebarOpen(false)} />
+    <BetterSidebar view={view} navigate={navigate} collapsed={sidebarCollapsed} mobileOpen={mobileSidebarOpen} authenticated={Boolean(sessionUser)} onToggleCollapse={() => setSidebarCollapsed((value) => !value)} onCloseMobile={() => setMobileSidebarOpen(false)} />
     <header className="topbar">
       <button type="button" className="better-mobile-menu" aria-label="Open navigation" onClick={() => setMobileSidebarOpen(true)}><Icon name="menu" /></button>
       <button className="wordmark wordmark-button" onClick={() => navigate("explore")} aria-label="Veld Archive home"><span className="mark">V</span><span>veld<span className="muted">archive</span></span></button>
       <div className="better-context"><span>VELD ARCHIVE / WORKSPACE</span><strong>{currentViewLabel}</strong></div>
       <nav className="nav-links" aria-label="Primary navigation"><button onClick={() => navigate("explore")}>Explore</button><button className="stakeholder-nav-link" onClick={() => navigate("stakeholders")}>System overview <span>NEW</span></button><button className="rights-nav-link" onClick={() => navigate("rights")}>Rights guide <span>NEW</span></button><button className="campaign-nav" onClick={() => navigate("campaigns")}>Campaigns <span>3A</span></button><button onClick={() => navigate("contributors")}>Creators</button><button onClick={() => navigate("community")}>Community & collections</button><button className="studio-nav-link" onClick={() => navigate("studio")}>Media studio <span>NEW</span></button><button onClick={() => navigate("wordpress")}>WordPress <span>NEW</span></button><button onClick={() => navigate("contributor")}>Contributor insights</button><button onClick={() => navigate("buyer")}>Buyer ROI</button><button onClick={() => navigate("review")}>Editorial review</button><button className="governance-link" onClick={() => navigate("governance")}>Governance <span>NEW</span></button></nav>
-      <div className="top-actions">{import.meta.env.DEV && !sessionUser && <label className="role-switcher">Local role <select value={devRole} onChange={(event) => setDevRole(event.target.value as "contributor" | "admin")}><option value="contributor">Contributor</option><option value="admin">Admin</option></select></label>}{import.meta.env.DEV && !sessionUser && <button className="ghost-button local-dev-login" onClick={() => void devSignIn()}>Local sign in</button>}{!sessionUser && <a className="dark-button subscription-button" href={paystackSubscriptionUrl} target="_blank" rel="noopener noreferrer" data-paystack-plan={paystackSubscriptionPlanCode}>Subscribe · R1 200/month</a>}<button className="ghost-button" onClick={async () => { if (auth0) { await auth0.loginWithRedirect({ authorizationParams: { ...(auth0Audience ? { audience: auth0Audience } : {}), ...(auth0Organization ? { organization: auth0Organization } : {}) } }); return; } if (supabase) { setSupabaseAuthOpen(true); return; } if (!import.meta.env.DEV) { setNotice("An external identity provider is not configured for this deployment."); return; } await devSignIn(); }}>{auth0 ? "Sign in with Auth0" : supabase ? "Sign in with Supabase" : "Sign in"}</button>{sessionUser && <><button className="ghost-button" onClick={() => navigate("account")}>Account</button><button className="ghost-button" onClick={() => { void api("/api/auth/logout", { method: "POST" }).then(() => { setSessionUser(null); setCsrfToken(""); setNotice("Signed out."); if (auth0) auth0.logout({ logoutParams: { returnTo: window.location.origin } }); if (supabase) void supabase.auth.signOut(); }); }}>Sign out</button></>}</div>
+      <div className="top-actions">
+        {import.meta.env.DEV && !sessionUser && <label className="role-switcher">Local role <select value={devRole} onChange={(event) => setDevRole(event.target.value as "contributor" | "admin")}><option value="contributor">Contributor</option><option value="admin">Admin</option></select></label>}
+        {import.meta.env.DEV && !sessionUser && <button className="ghost-button local-dev-login" onClick={() => void devSignIn()}>Local sign in</button>}
+        {!sessionUser && <a className="dark-button subscription-button" href={paystackSubscriptionUrl} target="_blank" rel="noopener noreferrer" data-paystack-plan={paystackSubscriptionPlanCode}>Subscribe · R1 200/month</a>}
+        {!sessionUser && <button className="ghost-button" onClick={async () => { if (auth0) { await auth0.loginWithRedirect({ authorizationParams: { ...(auth0Audience ? { audience: auth0Audience } : {}), ...(auth0Organization ? { organization: auth0Organization } : {}) } }); return; } if (supabase) { setSupabaseAuthOpen(true); return; } if (!import.meta.env.DEV) { setNotice("An external identity provider is not configured for this deployment."); return; } await devSignIn(); }}>{auth0 ? "Sign in with Auth0" : supabase ? "Sign in with Supabase" : "Sign in"}</button>}
+        {sessionUser && <><button className="ghost-button" onClick={() => navigate("account")}>Account</button><button className="ghost-button" onClick={() => { void api("/api/auth/logout", { method: "POST" }).then(() => { setSessionUser(null); setCsrfToken(""); setNotice("Signed out."); if (auth0) auth0.logout({ logoutParams: { returnTo: window.location.origin } }); if (supabase) void supabase.auth.signOut(); }); }}>Sign out</button></>}
+      </div>
     </header>
     {supabase && supabaseAuthOpen && !sessionUser && <section className="auth-panel" aria-label="Supabase authentication"><div><span className="section-kicker">SUPABASE AUTH</span><h2>{supabaseAuthMode === "signup" ? "Create your archive account." : "Welcome back."}</h2><p>Email/password authentication is handled by Supabase; Veld receives only the verified access token.</p></div><form onSubmit={(event) => void submitSupabaseAuth(event)}><label>Email<input type="email" autoComplete="email" required value={supabaseEmail} onChange={(event) => setSupabaseEmail(event.target.value)} /></label><label>Password<input type="password" autoComplete={supabaseAuthMode === "signup" ? "new-password" : "current-password"} minLength={8} required value={supabasePassword} onChange={(event) => setSupabasePassword(event.target.value)} /></label><div className="modal-actions"><button type="submit" className="dark-button" disabled={supabaseAuthBusy}>{supabaseAuthBusy ? "Working…" : supabaseAuthMode === "signup" ? "Create account" : "Sign in"}</button><button type="button" className="ghost-button" onClick={() => setSupabaseAuthMode((mode) => mode === "signup" ? "signin" : "signup")}>{supabaseAuthMode === "signup" ? "Use existing account" : "Create an account"}</button><button type="button" className="ghost-button" onClick={() => setSupabaseAuthOpen(false)}>Close</button></div></form></section>}
     {sessionUser && <details className="notification-center"><summary>Alerts {notifications.some((item) => !item.read_at) && <span>{notifications.filter((item) => !item.read_at).length}</span>}</summary><div><strong>In-app alerts</strong>{notifications.length ? notifications.slice(0, 8).map((item) => <article className={item.read_at ? "read" : ""} key={item.id}><h3>{item.title}</h3><p>{item.body}</p><small>{new Date(item.created_at).toLocaleDateString("en-ZA")}</small>{!item.read_at && <button type="button" onClick={() => void markNotificationRead(item.id)}>Mark read</button>}</article>) : <p>No alerts yet. Saved-search matches will appear here.</p>}</div></details>}
@@ -359,10 +379,17 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
   </div>;
 }
 
-function BetterSidebar({ view, navigate, collapsed, mobileOpen, onToggleCollapse, onCloseMobile }: { view: View; navigate: (nextView: View) => void; collapsed: boolean; mobileOpen: boolean; onToggleCollapse: () => void; onCloseMobile: () => void }) {
+function BetterSidebar({ view, navigate, collapsed, mobileOpen, authenticated, onToggleCollapse, onCloseMobile }: { view: View; navigate: (nextView: View) => void; collapsed: boolean; mobileOpen: boolean; authenticated: boolean; onToggleCollapse: () => void; onCloseMobile: () => void }) {
+  const [hoverExpanded, setHoverExpanded] = useState(false);
+  const expanded = mobileOpen || !collapsed || hoverExpanded;
   return <>
     {mobileOpen && <button type="button" className="better-sidebar-backdrop" aria-label="Close navigation" onClick={onCloseMobile} />}
-    <aside className={`better-sidebar ${collapsed ? "is-collapsed" : ""} ${mobileOpen ? "is-mobile-open" : ""}`} aria-label="Archive workspace navigation">
+    <aside
+      className={`better-sidebar ${expanded ? "is-expanded" : "is-collapsed"} ${collapsed && hoverExpanded ? "is-hover-expanded" : ""} ${mobileOpen ? "is-mobile-open" : ""}`}
+      aria-label="Archive workspace navigation"
+      onMouseEnter={() => setHoverExpanded(true)}
+      onMouseLeave={() => setHoverExpanded(false)}
+    >
       <div className="better-sidebar-brand">
         <button type="button" className="wordmark wordmark-button" onClick={() => { navigate("explore"); onCloseMobile(); }} aria-label="Veld Archive home"><span className="mark">V</span><span className="better-brand-name">veld<span className="muted">archive</span></span></button>
         <button type="button" className="better-collapse-button" aria-label={collapsed ? "Expand navigation" : "Collapse navigation"} onClick={onToggleCollapse}><Icon name="chevron" className={collapsed ? "is-rotated" : ""} /></button>
@@ -371,7 +398,10 @@ function BetterSidebar({ view, navigate, collapsed, mobileOpen, onToggleCollapse
       <nav className="better-sidebar-nav">
         {sidebarSections.map((section) => <div className="better-nav-section" key={section.label}>
           <span className="better-nav-label">{section.label}</span>
-          {section.items.map((item) => <button type="button" key={item.view} className={`better-nav-item ${view === item.view ? "is-active" : ""}`} aria-current={view === item.view ? "page" : undefined} title={collapsed ? item.label : undefined} onClick={() => { navigate(item.view); onCloseMobile(); }}><span className="better-nav-icon"><Icon name={item.icon} /></span><span className="better-nav-text">{item.label}</span>{item.badge && <span className="better-nav-badge">{item.badge}</span>}</button>)}
+          {section.items.map((item) => {
+            const signInRequired = !authenticated && gatedViews.has(item.view);
+            return <button type="button" key={item.view} className={`better-nav-item ${view === item.view ? "is-active" : ""} ${signInRequired ? "is-gated" : ""}`} aria-current={view === item.view ? "page" : undefined} aria-label={signInRequired ? `${item.label}. Sign in required.` : item.label} title={!expanded ? item.label : undefined} onClick={() => { navigate(item.view); onCloseMobile(); }}><span className="better-nav-icon"><Icon name={item.icon} /></span><span className="better-nav-text">{item.label}</span>{item.badge && <span className="better-nav-badge">{item.badge}</span>}{signInRequired && <span className="better-nav-lock">Sign in</span>}</button>;
+          })}
         </div>)}
       </nav>
       <div className="better-sidebar-footer"><span className="better-status-dot" /><span className="better-sidebar-footer-copy"><strong>Archive service online</strong><small>Verified content pipeline</small></span></div>

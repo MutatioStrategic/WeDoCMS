@@ -479,11 +479,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .app-shell .manifesto p { color: #34443a !important; }
 .app-shell .thread-panel .thread-row small { color: #c3d0c2 !important; }
 
-/* Better ERP shell: a compact, icon-led navigation and a consistent action language. */
+/* Production web shell: compact navigation with evidence-led workspace context. */
 .better-shell { --better-ink: #17231d; --better-panel: #203129; --better-panel-soft: #2b4034; --better-accent: #d58a59; --better-paper: #f4f6f1; --better-muted: #66776b; min-height: 100vh; padding-left: 252px; overflow: visible; color: var(--better-ink); background: var(--better-paper); transition: padding-left .22s ease; }
 .better-shell.sidebar-collapsed { padding-left: 82px; }
-.better-sidebar { position: fixed; z-index: 50; inset: 0 auto 0 0; display: flex; width: 252px; flex-direction: column; padding: 19px 12px 13px; color: #e9eee9; background: var(--better-ink); border-right: 1px solid rgba(214, 224, 213, .08); box-shadow: 18px 0 36px rgba(18, 30, 23, .08); transition: width .22s ease, transform .22s ease; }
+.better-sidebar { position: fixed; z-index: 50; inset: 0 auto 0 0; display: flex; width: 252px; flex-direction: column; padding: 19px 12px 13px; color: #e9eee9; background: var(--better-ink); border-right: 1px solid rgba(214, 224, 213, .08); box-shadow: 18px 0 36px rgba(18, 30, 23, .08); transition: width .22s ease, transform .22s ease, box-shadow .22s ease; }
 .better-shell.sidebar-collapsed .better-sidebar { width: 82px; }
+.better-shell.sidebar-collapsed .better-sidebar.is-hover-expanded { width: 252px; box-shadow: 20px 0 42px rgba(18, 30, 23, .18); }
 .better-sidebar-brand { display: flex; min-height: 42px; align-items: center; justify-content: space-between; padding: 0 7px 17px; border-bottom: 1px solid rgba(214, 224, 213, .1); }
 .better-sidebar .wordmark { color: #f5f7f3; }
 .better-sidebar .wordmark .mark { color: var(--better-ink); background: var(--better-accent); }
@@ -505,18 +506,32 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .better-nav-item.is-active .better-nav-icon { color: var(--better-accent); }
 .better-nav-text { overflow: hidden; flex: 1; text-overflow: ellipsis; white-space: nowrap; }
 .better-nav-badge { padding: 3px 5px; color: #f6d8be; background: rgba(213,138,89,.15); border-radius: 4px; font: 9px 'DM Mono', monospace; }
+.better-nav-lock { padding: 3px 5px; color: #cad8cd; background: rgba(255,255,255,.075); border: 1px solid rgba(214,224,213,.1); border-radius: 4px; font: 8px 'DM Mono', monospace; text-transform: uppercase; letter-spacing: .06em; }
+.better-nav-item.is-gated:not(.is-active) { color: #879d8c; }
+.better-nav-item.is-gated .better-nav-icon { opacity: .72; }
 .better-sidebar-footer { display: flex; align-items: center; gap: 9px; margin-top: auto; padding: 13px 9px 2px; border-top: 1px solid rgba(214, 224, 213, .1); }
 .better-status-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: #7db77a; box-shadow: 0 0 0 4px rgba(125,183,122,.11); }
 .better-sidebar-footer-copy { display: grid; gap: 3px; min-width: 0; }
 .better-sidebar-footer-copy strong { color: #d5e1d6; font-size: 10px; font-weight: 600; white-space: nowrap; }
 .better-sidebar-footer-copy small { color: #78907e; font: 8px 'DM Mono', monospace; white-space: nowrap; }
-.better-shell.sidebar-collapsed .better-sidebar-brand { justify-content: center; }
+.better-shell.sidebar-collapsed .better-sidebar-brand { justify-content: space-between; padding-inline: 5px; }
 .better-shell.sidebar-collapsed .better-sidebar-brand .wordmark { display: grid; }
-.better-shell.sidebar-collapsed .better-brand-name, .better-shell.sidebar-collapsed .better-collapse-button, .better-shell.sidebar-collapsed .better-command-button span, .better-shell.sidebar-collapsed .better-command-button kbd, .better-shell.sidebar-collapsed .better-nav-label, .better-shell.sidebar-collapsed .better-nav-text, .better-shell.sidebar-collapsed .better-nav-badge, .better-shell.sidebar-collapsed .better-sidebar-footer-copy { display: none; }
+.better-shell.sidebar-collapsed .better-brand-name, .better-shell.sidebar-collapsed .better-command-button span, .better-shell.sidebar-collapsed .better-command-button kbd, .better-shell.sidebar-collapsed .better-nav-label, .better-shell.sidebar-collapsed .better-nav-text, .better-shell.sidebar-collapsed .better-nav-badge, .better-shell.sidebar-collapsed .better-nav-lock, .better-shell.sidebar-collapsed .better-sidebar-footer-copy { display: none; }
 .better-shell.sidebar-collapsed .better-command-button { justify-content: center; padding: 0; }
 .better-shell.sidebar-collapsed .better-nav-item { justify-content: center; padding: 0; }
 .better-shell.sidebar-collapsed .better-nav-icon { flex-basis: auto; }
 .better-shell.sidebar-collapsed .better-sidebar-footer { justify-content: center; }
+.better-shell.sidebar-collapsed .better-sidebar.is-hover-expanded .better-brand-name { display: inline; }
+.better-shell.sidebar-collapsed .better-sidebar.is-hover-expanded .better-command-button { justify-content: flex-start; padding: 0 11px; }
+.better-shell.sidebar-collapsed .better-sidebar.is-hover-expanded .better-command-button span { display: inline; }
+.better-shell.sidebar-collapsed .better-sidebar.is-hover-expanded .better-command-button kbd { display: inline-flex; }
+.better-shell.sidebar-collapsed .better-sidebar.is-hover-expanded .better-nav-item { justify-content: flex-start; padding: 0 10px; }
+.better-shell.sidebar-collapsed .better-sidebar.is-hover-expanded .better-nav-icon { flex-basis: 18px; }
+.better-shell.sidebar-collapsed .better-sidebar.is-hover-expanded .better-nav-label { display: block; }
+.better-shell.sidebar-collapsed .better-sidebar.is-hover-expanded .better-nav-text { display: block; }
+.better-shell.sidebar-collapsed .better-sidebar.is-hover-expanded .better-nav-badge, .better-shell.sidebar-collapsed .better-sidebar.is-hover-expanded .better-nav-lock { display: inline-flex; }
+.better-shell.sidebar-collapsed .better-sidebar.is-hover-expanded .better-sidebar-footer { justify-content: flex-start; }
+.better-shell.sidebar-collapsed .better-sidebar.is-hover-expanded .better-sidebar-footer-copy { display: grid; }
 .better-shell .topbar { position: sticky; z-index: 30; top: 0; height: 74px; justify-content: flex-start; gap: 22px; padding: 0 32px; background: rgba(244,246,241,.92); border-bottom: 1px solid rgba(23,35,29,.1); backdrop-filter: blur(14px); }
 .better-shell .topbar .wordmark { display: none; }
 .better-shell .nav-links { display: none; }

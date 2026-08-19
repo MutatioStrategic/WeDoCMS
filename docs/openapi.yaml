@@ -833,6 +833,15 @@ components:
         currency: { type: string, enum: [ZAR] }
         monetizationModel: { type: string, enum: [membership, individual_license, custom_quote] }
         allowed: { type: boolean }
-        checks: { type: array, items: { type: object, required: [label, passed, detail], additionalProperties: false } }
+        checks:
+          type: array
+          items:
+            type: object
+            required: [label, passed, detail]
+            properties:
+              label: { type: string }
+              passed: { type: boolean }
+              detail: { type: string }
+            additionalProperties: false
         blockingReasons: { type: array, items: { type: string } }
       additionalProperties: true
