@@ -13,6 +13,7 @@ const scenarios = [
 
 const results = [];
 let cookie = "";
+let csrfToken = "";
 function rememberCookie(response) {
   const values = typeof response.headers.getSetCookie === "function" ? response.headers.getSetCookie() : [response.headers.get("set-cookie") ?? ""];
   const session = values.find((value) => value.startsWith("va_session="));
@@ -25,10 +26,12 @@ const login = await fetch(`${baseUrl}/api/auth/dev-login`, {
   body: JSON.stringify({ role: "contributor" }),
 });
 rememberCookie(login);
-if (!login.ok || !cookie) throw new Error(`chaos smoke could not create an authenticated session: ${login.status}`);
+const loginBody = await login.json().catch(() => ({}));
+csrfToken = String(loginBody.csrfToken ?? "");
+if (!login.ok || !cookie || !csrfToken) throw new Error(`chaos smoke could not create an authenticated session: ${login.status}`);
 
 for (const [scenario, expectedStatus] of scenarios) {
-  const authenticatedHeaders = scenario === "fail-before-session" ? {} : { Cookie: cookie };
+  const authenticatedHeaders = scenario === "fail-before-session" ? {} : { Cookie: cookie, "X-CSRF-Token": csrfToken };
   const createResponse = await fetch(`${baseUrl}/api/uploads`, {
     method: "POST",
     headers: {

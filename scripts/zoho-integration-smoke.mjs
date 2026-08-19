@@ -131,6 +131,7 @@ const workerArgs = [
   "--var", "ZOHO_CRM_NAME_FIELD:Campaign_Name",
   "--var", "ZOHO_CRM_DESCRIPTION_FIELD:Description",
   "--var", "PAYMENT_WEBHOOK_SECRET:zoho-smoke-payment-secret",
+  "--var", "PAYMENT_PROVIDER:mock",
   "--var", `ZOHO_SOCIAL_FLOW_WEBHOOK_URL:${providerUrl}/flow/social`,
   "--var", `ZOHO_DESK_FLOW_WEBHOOK_URL:${providerUrl}/flow/desk`,
   "--var", `ZOHO_CAMPAIGNS_FLOW_WEBHOOK_URL:${providerUrl}/flow/campaigns`,
@@ -164,8 +165,8 @@ async function call(path, init = {}) {
 
 async function paymentWebhook(body) {
   const raw = JSON.stringify(body);
-  const signature = createHmac("sha512", "zoho-smoke-payment-secret").update(raw).digest("hex");
-  return call("/api/webhooks/payments", { method: "POST", headers: { "Content-Type": "application/json", "x-paystack-signature": signature }, body: raw });
+  const signature = createHmac("sha256", "zoho-smoke-payment-secret").update(raw).digest("hex");
+  return call("/api/webhooks/payments", { method: "POST", headers: { "Content-Type": "application/json", "x-payment-signature": signature }, body: raw });
 }
 
 async function runScheduledDispatch() {
@@ -230,7 +231,7 @@ try {
   assert(agreements.response.ok && buyerAgreementVersion, "buyer agreement version was not available for checkout");
   const checkout = await call("/api/checkout", { method: "POST", headers: mutationHeaders, body: JSON.stringify({ assetId: "asset-table-mountain", licenceType: "advertising", territory: "South Africa", durationDays: 90, buyerAgreementVersion, acceptBuyerTerms: true }) });
   assert(checkout.response.status === 201 && checkout.body.licenceId, `licence checkout failed: ${checkout.response.status}`);
-  const payment = await paymentWebhook({ event: "charge.success", data: { id: "zoho-smoke-payment-1", reference: "zoho-smoke-reference-1", amount: checkout.body.priceCents, currency: "ZAR", metadata: { licenceId: checkout.body.licenceId } } });
+  const payment = await paymentWebhook({ provider: "mock", eventId: "zoho-smoke-payment-1", type: "payment_succeeded", licenceId: checkout.body.licenceId, paymentReference: "zoho-smoke-reference-1", amountCents: checkout.body.priceCents, currency: "ZAR" });
   assert(payment.response.ok && payment.body.accepted, `signed payment webhook failed: ${payment.response.status}`);
 
   const crmQueue = await call(`/api/campaigns/${campaignId}/integrations/zoho/crm`, { method: "POST", headers: mutationHeaders, body: JSON.stringify({}) });
@@ -267,12 +268,16 @@ try {
   assert(social.response.status === 202 && social.body.jobId, `Social route did not queue an approved/licensed handoff: ${social.response.status} ${JSON.stringify(social.body)}`);
   await pollJob(social.body.jobId, "succeeded");
   assert(state.flowCalls.social === 1, "Social provider was not called exactly once");
+  const campaignsHandoff = await call(`/api/campaigns/${campaignId}/integrations/zoho/campaigns`, { method: "POST", headers: mutationHeaders });
+  assert(campaignsHandoff.response.status === 202 && campaignsHandoff.body.jobId, `Campaigns route did not queue: ${campaignsHandoff.response.status} ${JSON.stringify(campaignsHandoff.body)}`);
+  await pollJob(campaignsHandoff.body.jobId, "succeeded");
+  assert(state.flowCalls.campaigns === 1, "Zoho Campaigns provider was not called exactly once");
   const outbox = await call("/api/integrations/zoho/outbox");
-  assert(outbox.response.ok && outbox.body.results.length >= 4, "outbox endpoint did not expose correlated delivery jobs");
+  assert(outbox.response.ok && outbox.body.results.length >= 5, "outbox endpoint did not expose correlated delivery jobs");
 
-  const expectedPaths = ["/oauth/v2/token", "/crm/v8/settings/modules", "/crm/v8/settings/fields", "/crm/v8/Campaigns/upsert", "/flow/social", "/flow/desk", "/flow/analytics"];
+  const expectedPaths = ["/oauth/v2/token", "/crm/v8/settings/modules", "/crm/v8/settings/fields", "/crm/v8/Campaigns/upsert", "/flow/social", "/flow/desk", "/flow/campaigns", "/flow/analytics"];
   for (const path of expectedPaths) assert(state.requests.some((request) => request.path === path), `mock Zoho server did not receive ${path}`);
-  console.log(JSON.stringify({ ok: true, workerUrl, providerUrl, checks: ["auth", "oauth-state", "tenant-encryption-boundary", "crm-metadata", "crm-retry", "crm-idempotency", "desk-delivery", "analytics-unknown-reconciliation", "social-rights-guard", "outbox-listing"], providerRequests: state.requests.length, crmUpserts: state.crmUpserts, flowCalls: state.flowCalls }, null, 2));
+  console.log(JSON.stringify({ ok: true, workerUrl, providerUrl, checks: ["auth", "oauth-state", "tenant-encryption-boundary", "crm-metadata", "crm-retry", "crm-idempotency", "desk-delivery", "analytics-unknown-reconciliation", "social-delivery", "campaigns-delivery", "outbox-listing"], providerRequests: state.requests.length, crmUpserts: state.crmUpserts, flowCalls: state.flowCalls }, null, 2));
 } catch (error) {
   failures.push(error instanceof Error ? error.message : String(error));
   console.error(JSON.stringify({ ok: false, failures, workerOutput: workerOutput.slice(-12000), providerRequests: state.requests }, null, 2));

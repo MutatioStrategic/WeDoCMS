@@ -36,6 +36,7 @@ field label from being mistaken for an API name.
 - `POST /api/integrations/zoho/outbox/:id/retry`
 - `POST /api/campaigns/:id/integrations/zoho/social`
 - `POST /api/campaigns/:id/integrations/zoho/crm`
+- `POST /api/campaigns/:id/integrations/zoho/campaigns`
 - `POST /api/rights/cases/:id/integrations/zoho/desk`
 
 The Social route fails closed unless the campaign has an approved source, a
@@ -84,3 +85,12 @@ review; Zoho CRM is the relationship/reporting record; Zoho Desk is the service
 queue for rights cases. A webhook response is recorded as a handoff only and is
 never treated as proof that a social post was published or that a ticket was
 resolved.
+
+## Local endpoint smoke test
+
+Run `npm run test:zoho` to start an isolated Wrangler Worker with a temporary D1
+database and a local HTTP Zoho simulator. The test exercises OAuth state and
+single-use callbacks, encrypted tenant connection storage, CRM metadata, CRM
+retry and idempotency, signed licence settlement, rights/Desk delivery,
+analytics unknown-outcome reconciliation, Social delivery, Campaigns delivery,
+and the outbox listing. It does not contact Zoho or require Docker credentials.

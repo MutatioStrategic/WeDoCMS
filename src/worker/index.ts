@@ -3630,6 +3630,26 @@ app.post("/api/campaigns/:id/integrations/zoho/crm", async (c) => {
   }
 });
 
+app.post("/api/campaigns/:id/integrations/zoho/campaigns", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Campaign workspace access required" }, 403);
+  const campaign = await campaignForUser(c, c.req.param("id"), user);
+  if (!campaign) return c.json({ error: "Campaign not found" }, 404);
+  const source = await campaignBundleRows(c.env, String(campaign.id), user.organizationId);
+  if (!source.assets.length) return c.json({ error: "Approve at least one licensed asset before sending a Zoho Campaigns handoff", blocked: source.blocked }, 422);
+  if (source.blocked.length) return c.json({ error: "Zoho Campaigns handoff blocked by current rights state", blocked: source.blocked }, 422);
+  const sync = await zohoCampaignSync(c, campaign, source.assets.length);
+  const idempotencyKey = await zohoIdempotencyKey("campaigns", String(campaign.id), sync);
+  const previous = await completedZohoEvent(c.env, user.organizationId, "campaigns", "prepare_zoho_campaign", "campaign", String(campaign.id), idempotencyKey);
+  if (previous) return c.json({ ok: true, status: "already_handed_off", providerReference: previous.providerReference });
+  try {
+    const job = await queueZohoDelivery(c.env, { organizationId: user.organizationId, actorId: user.id, app: "campaigns", action: "prepare_zoho_campaign", entityType: "campaign", entityId: String(campaign.id), idempotencyKey, payload: sync });
+    return c.json({ ok: true, status: job.created ? "queued" : job.status === "succeeded" ? "already_handed_off" : "already_queued", jobId: job.id, idempotencyKey }, job.created ? 202 : 200);
+  } catch (error) {
+    return c.json({ error: error instanceof IntegrationError ? error.message : "Zoho Campaigns handoff failed" }, 503);
+  }
+});
+
 app.post("/api/rights/cases/:id/integrations/zoho/desk", async (c) => {
   const user = await requestUser(c);
   if (!user || !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Editorial access required" }, 403);
