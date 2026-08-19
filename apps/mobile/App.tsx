@@ -1,9 +1,9 @@
 import { StatusBar } from "expo-status-bar";
 import * as Haptics from "expo-haptics";
+import * as ImagePicker from "expo-image-picker";
 import {
   Activity,
   ArrowUpRight,
-  Bookmark,
   CheckCircle2,
   ChevronRight,
   Compass,
@@ -312,14 +312,34 @@ function CreateScreen() {
   const [tags, setTags] = useState("");
   const [kind, setKind] = useState<"image" | "video">("image");
   const [rights, setRights] = useState("verified");
+  const [selectedMedia, setSelectedMedia] = useState<ImagePicker.ImagePickerAsset | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
+  const pickMedia = async () => {
+    if (kind === "video") {
+      setMessage("Video submissions use the signed Stream upload in the contributor workspace.");
+      return;
+    }
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      setMessage("Photo library permission is required to attach an image.");
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      quality: 0.92,
+      allowsEditing: false,
+    });
+    if (!result.canceled) setSelectedMedia(result.assets[0] ?? null);
+  };
+
   const submit = async () => {
     if (!title.trim()) { setMessage("A title is required."); return; }
+    if (!selectedMedia) { setMessage("Choose an image before submitting."); return; }
     setSaving(true);
     setMessage(null);
-    const response = await apiPost<{ error?: string }>("/api/assets", {
+    const response = await apiPost<{ id?: string; error?: string }>("/api/assets", {
       kind,
       title: title.trim(),
       description: caption.trim(),
@@ -336,9 +356,27 @@ function CreateScreen() {
       artistLicenseUrl: "https://creativecommons.org/licenses/by/4.0/",
     });
     setSaving(false);
-    if (response.status === 201) {
+    if (response.status === 201 && response.body && "id" in response.body) {
+      const mediaType = selectedMedia.mimeType ?? "image/jpeg";
+      const fileResponse = await fetch(selectedMedia.uri);
+      const mediaBlob = await fileResponse.blob();
+      const upload = await apiPost<{ uploadId?: string; uploadUrl?: string; error?: string }>("/api/uploads", {
+        filename: selectedMedia.fileName ?? `veld-${Date.now()}.jpg`,
+        contentType: mediaType,
+        sizeBytes: selectedMedia.fileSize ?? mediaBlob.size,
+        assetId: response.body.id,
+      });
+      if (upload.status !== 201 || !upload.body?.uploadId || !upload.body.uploadUrl) {
+        setMessage(upload.body?.error ?? "The media upload session could not be created.");
+        setSaving(false);
+        return;
+      }
+      const putResponse = await fetch(upload.body.uploadUrl, { method: "PUT", headers: { "Content-Type": mediaType }, body: mediaBlob });
+      if (!putResponse.ok) { setMessage("The media upload failed before completion."); setSaving(false); return; }
+      const completion = await apiPost<{ error?: string }>(`/api/uploads/${upload.body.uploadId}/complete`, {});
+      if (completion.status >= 300) { setMessage(completion.body?.error ?? "The media upload could not be completed."); setSaving(false); return; }
       setMessage("Draft submitted for editorial review.");
-      setTitle(""); setCaption(""); setCity(""); setTags("");
+      setTitle(""); setCaption(""); setCity(""); setTags(""); setSelectedMedia(null);
     } else if (response.status === 401 || response.status === 403) {
       setMessage("Sign in with a contributor account to submit assets.");
     } else {
@@ -351,7 +389,7 @@ function CreateScreen() {
       <Text style={styles.eyebrow}>CONTRIBUTE</Text>
       <Text style={styles.screenTitle}>Add to the archive</Text>
       <Text style={styles.screenIntro}>Prepare metadata for editorial review.</Text>
-      <View style={styles.uploadDropzone}><UploadCloud color={COLORS.green} size={28} /><Text style={styles.dropzoneTitle}>Media attachment</Text><Text style={styles.dropzoneMeta}>Connect a signed upload from the contributor workspace</Text></View>
+      <Pressable style={styles.uploadDropzone} onPress={() => void pickMedia()}><UploadCloud color={COLORS.green} size={28} /><Text style={styles.dropzoneTitle}>{selectedMedia?.fileName ?? "Choose an image"}</Text><Text style={styles.dropzoneMeta}>{selectedMedia ? `${Math.round((selectedMedia.fileSize ?? 0) / 1024)} KB selected` : "Open photo library"}</Text></Pressable>
       <Field label="Title" value={title} onChangeText={setTitle} placeholder="Give this moment a name" />
       <Field label="Caption" value={caption} onChangeText={setCaption} placeholder="Add useful context" multiline />
       <Field label="City" value={city} onChangeText={setCity} placeholder="Where was this made?" />
@@ -378,7 +416,7 @@ function StatusScreen() {
   useEffect(() => { void load(); }, [load]);
   return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
     <View style={styles.topRow}><View><Text style={styles.eyebrow}>SYSTEM</Text><Text style={styles.screenTitle}>App status</Text></View><Pressable style={styles.avatarButton} onPress={() => void load()}><RefreshCw color={COLORS.ink} size={20} /></Pressable></View>
-    <View style={styles.statusHero}><View style={styles.statusIcon}><Activity color={COLORS.green} size={25} /></View><View style={{ flex: 1 }}><Text style={styles.cardTitle}>Veld Archive mobile</Text><Text style={styles.cardMeta}>Native Expo client · Metro runtime</Text></View><CheckCircle2 color={COLORS.green} size={22} /></View>
+    <View style={styles.statusHero}><View style={styles.statusIcon}><Activity color={COLORS.green} size={25} /></View><View style={{ flex: 1 }}><Text style={styles.cardTitle}>Veld Archive mobile</Text><Text style={styles.cardMeta}>Native Expo client - Metro runtime</Text></View><CheckCircle2 color={COLORS.green} size={22} /></View>
     {loading ? <LoadingState label="Checking services" /> : error ? <ErrorState message="The API could not be reached" onRetry={load} /> : <View style={styles.statusList}><StatusRow label="API health" value={health?.status ?? (health?.ok ? "healthy" : "available")} /><StatusRow label="Readiness" value={readiness?.status ?? "ready"} /><StatusRow label="Endpoint" value={API_BASE_URL.replace(/^https?:\/\//, "")} /><StatusRow label="Media review" value="Editorial gates active" /></View>}
     <View style={styles.offlineNote}><WifiOff color={COLORS.blue} size={18} /><Text style={styles.offlineText}>Offline caching will be added alongside authenticated sync.</Text></View>
   </ScrollView>;

@@ -7,6 +7,14 @@
     "scheme": "veldarchive",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Veld Archive needs access to selected photos for editorial submission."
+        }
+      ]
+    ],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "za.co.wedocms.veldarchive"
