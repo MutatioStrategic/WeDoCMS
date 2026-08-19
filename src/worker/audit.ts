@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { publishAuditAnalyticsEvent, type AuditAnalyticsPipeline } from "./audit-analytics";
 
 export const residencyRegionSchema = z.enum(["za", "eu"]);
 export type ResidencyRegion = z.infer<typeof residencyRegionSchema>;
@@ -14,6 +15,7 @@ const auditInputSchema = z.object({
   data: z.record(z.unknown()).default({}),
   residencyRegion: residencyRegionSchema,
   actorResidencyRegion: residencyRegionSchema,
+  organizationId: z.string().min(1).max(120).optional(),
 });
 
 export type AuditEventInput = z.input<typeof auditInputSchema>;
@@ -48,6 +50,7 @@ export type AuditBindings = {
   AUDIT_SIGNING_PRIVATE_JWK?: string;
   AUDIT_SIGNING_PUBLIC_JWK?: string;
   AUDIT_SIGNING_KEY_ID?: string;
+  AUDIT_ANALYTICS_PIPELINE?: AuditAnalyticsPipeline;
 };
 
 const GENESIS_HASH = "GENESIS-SHA256-0000000000000000000000000000000000000000000000000000000000000000";
@@ -180,7 +183,14 @@ export async function appendAuditEvent(env: AuditBindings, rawInput: AuditEventI
     record.streamId, Number(head.sequence), record.previousHash,
   ).run();
 
-  if (Number(result.meta.changes ?? 0) === 1) return { event: stored, created: true };
+  if (Number(result.meta.changes ?? 0) === 1) {
+    try {
+      await publishAuditAnalyticsEvent(env, stored, input.organizationId, redactAuditData);
+    } catch (error) {
+      console.warn(JSON.stringify({ event: "audit.analytics_publish_failed", eventId: stored.eventId, error: error instanceof Error ? error.message : "unknown-error" }));
+    }
+    return { event: stored, created: true };
+  }
   const concurrent = await env.DB.prepare("SELECT * FROM audit_log_events WHERE event_id = ?").bind(record.eventId).first<Record<string, unknown>>();
   if (concurrent) return { event: asStoredEvent(concurrent), created: false };
   throw new Error("AUDIT_CHAIN_CONFLICT");

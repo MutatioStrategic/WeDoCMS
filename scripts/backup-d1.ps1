@@ -13,16 +13,7 @@ $dumpPath = Join-Path $resolvedOutput "$DbName-$runId.sql"
 $manifestPath = Join-Path $resolvedOutput "$DbName-$runId.manifest.json"
 
 Write-Host "Exporting remote D1 database $DbName"
-$tableQuery = "SELECT name FROM sqlite_master WHERE type = 'table' AND sql NOT LIKE 'CREATE VIRTUAL TABLE%' AND name NOT LIKE '%_fts_%' ORDER BY name"
-$tableJson = (& npx wrangler d1 execute $DbName --remote --command $tableQuery --json | Out-String | ConvertFrom-Json)
-$tables = @($tableJson[0].results | ForEach-Object { [string]$_.name })
-if ($tables.Count -eq 0) { throw "No ordinary D1 tables were discovered for backup" }
-$exportArgs = @("d1", "export", $DbName, "--remote", "--skip-confirmation", "--output", $dumpPath)
-foreach ($table in $tables) {
-  $exportArgs += "--table"
-  $exportArgs += $table
-}
-& npx wrangler @exportArgs
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "export-d1.ps1") -DbName $DbName -OutputPath $dumpPath -Remote
 if ($LASTEXITCODE -ne 0) { throw "D1 export failed" }
 
 $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $dumpPath).Hash.ToLowerInvariant()

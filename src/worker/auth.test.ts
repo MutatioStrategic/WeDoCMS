@@ -64,4 +64,10 @@ describe("verified identity exchange", () => {
     expect(fetchMock).toHaveBeenCalledWith("https://tenant.example/userinfo", expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer access-token" }) }));
     vi.unstubAllGlobals();
   });
+
+  it("requires a configured JWT secret instead of accepting unsigned identity claims", async () => {
+    const header = encode({ alg: "none", typ: "JWT" });
+    const payload = encode({ sub: "untrusted-user", role: "admin" });
+    await expect(verifyExternalJwt({ APP_ENV: "production" } as never, `${header}.${payload}.`)).resolves.toBeNull();
+  });
 });

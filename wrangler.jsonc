@@ -4,6 +4,9 @@
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-08-13",
   "compatibility_flags": ["nodejs_compat"],
+  "secrets": {
+    "required": ["R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "REMOTE_VISION_TOKEN"]
+  },
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1
@@ -13,6 +16,9 @@
     "binding": "ASSETS",
     "not_found_handling": "single-page-application"
   },
+  "send_email": [
+    { "name": "EMAIL" }
+  ],
   "ai": {
     "binding": "AI"
   },
@@ -171,6 +177,12 @@
       "main": "src/worker/index.ts",
       "compatibility_date": "2026-08-13",
       "compatibility_flags": ["nodejs_compat"],
+      "secrets": {
+        "required": ["R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "REMOTE_VISION_TOKEN"]
+      },
+      "send_email": [
+        { "name": "EMAIL" }
+      ],
       "observability": {
         "enabled": true,
         "head_sampling_rate": 1

@@ -21,6 +21,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npx wrangler types
       - run: npm run typecheck
       - run: npm test -- --run
       - run: npm run build
@@ -43,6 +44,9 @@ jobs:
             cat worker.log
             exit 1
           fi
+          npm run test:contracts:openapi
+          npm run test:contracts:consumer
+          npm run test:contracts:provider
           npm run test:auth
           npm run test:penetration
           npm run test:payments

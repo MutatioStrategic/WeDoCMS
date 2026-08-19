@@ -34,6 +34,7 @@ export const sessionResponseSchema = z.union([
 ]);
 
 const releaseStatusSchema = z.enum(["unknown", "not_required", "pending", "verified"]);
+const mediaReferenceSchema = z.string().refine((value) => value.startsWith("/") || /^https?:\/\//i.test(value), "Media reference must be a same-origin path or HTTPS URL");
 
 export const assetSchema = z.object({
   id: z.string().min(1),
@@ -58,6 +59,23 @@ export const assetSchema = z.object({
   contributor: z.string(),
   workflowStage: z.enum(["ingestion", "ai_tagging", "curator_correction", "approval"]),
   aiTags: z.array(z.string()),
+  aiSuggestedMetadata: z.record(z.string(), z.unknown()).optional(),
+  visualLocationType: z.enum(["urban_street", "coastal_landscape", "market_scene", "indoor", "residential", "rural_landscape", "industrial", "event", "transport", "nature", "sports", "food", "other", "unknown"]).optional(),
+  primaryCategory: z.enum(["people", "lifestyle", "travel", "nature", "architecture", "food", "business", "transport", "arts_culture", "sport", "news_editorial", "objects", "other"]).optional(),
+  sceneAttributes: z.array(z.string()).optional(),
+  visibleText: z.string().optional(),
+  detectedLanguage: z.string().optional(),
+  textReadability: z.enum(["clear", "partial", "unreadable", "no_text"]).optional(),
+  ocrConfidence: z.number().min(0).max(1).nullable().optional(),
+  aiFieldConfidences: z.record(z.number().min(0).max(1)).optional(),
+  enrichmentValidation: z.object({ accepted: z.boolean().optional(), issues: z.array(z.string()).optional() }).passthrough().optional(),
+  geographicLocationSource: z.enum(["none", "seller", "exif", "evidence", "editor"]).optional(),
+  assetRevision: z.number().int().positive().optional(),
+  enrichedRevision: z.number().int().positive().nullable().optional(),
+  reviewedRevision: z.number().int().positive().nullable().optional(),
+  approvedRevision: z.number().int().positive().nullable().optional(),
+  indexedRevision: z.number().int().positive().nullable().optional(),
+  vectorIndexStatus: z.enum(["not_indexed", "pending", "indexed", "error"]).optional(),
   curatorNotes: z.string(),
   metadataReviewStatus: z.enum(["reviewed", "needs_context", "blocked"]).optional(),
   metadataReviewNote: z.string().optional(),
@@ -70,13 +88,16 @@ export const assetSchema = z.object({
   artistLicenseVersion: z.string().nullable().optional(),
   artistLicenseUrl: z.string().url().nullable().optional(),
   artistLicenseTerms: z.string().nullable().optional(),
+  previewUrl: mediaReferenceSchema.nullable().optional(),
+  streamUid: z.string().nullable().optional(),
+  streamEmbedUrl: z.string().url().nullable().optional(),
   monetizationModel: z.enum(["membership", "individual_license", "custom_quote"]).optional(),
   licensePriceCents: z.number().int().nonnegative().nullable().optional(),
 }).passthrough();
 
 export const searchResponseSchema = z.object({
   query: z.string(),
-  mode: z.enum(["keyword", "semantic-preview"]),
+  mode: z.enum(["keyword", "semantic-preview", "hybrid"]),
   results: z.array(assetSchema),
   facets: z.array(z.object({ label: z.string(), value: z.string(), count: z.number().int().nonnegative() })),
   nextCursor: z.string().nullable().optional(),
@@ -121,6 +142,11 @@ export const governanceActionRequestSchema = z.object({
   modelReleaseStatus: releaseStatusSchema.optional(),
   propertyReleaseStatus: releaseStatusSchema.optional(),
   aiTags: z.array(z.string().trim().min(1).max(80)).max(30).optional(),
+  visualLocationType: z.enum(["urban_street", "coastal_landscape", "market_scene", "indoor", "residential", "rural_landscape", "industrial", "event", "transport", "nature", "sports", "food", "other", "unknown"]).optional(),
+  sceneContext: z.enum(["animal_close_up", "plant_close_up", "garden", "field", "mountain", "street", "shoreline", "indoor_object", "unknown"]).optional(),
+  primaryCategory: z.enum(["people", "lifestyle", "travel", "nature", "architecture", "food", "business", "transport", "arts_culture", "sport", "news_editorial", "objects", "other"]).optional(),
+  sceneAttributes: z.array(z.enum(["indoor", "outdoor", "daylight", "night", "sunrise_sunset", "people_present", "no_people", "crowd", "single_person", "group", "vehicle", "building", "landscape", "close_up", "wide_view", "aerial", "food_present", "text_present", "copy_space"])).max(30).optional(),
+  visibleText: z.string().trim().max(2000).optional(),
   monetizationModel: z.enum(["membership", "individual_license", "custom_quote"]).optional(),
   licensePriceCents: z.number().int().nonnegative().max(100_000_000).nullable().optional(),
 });
@@ -138,6 +164,8 @@ export const uploadRequestSchema = z.object({
   contentType: z.string().regex(/^(image|video)\//),
   sizeBytes: z.number().int().positive().max(30_000_000_000),
   assetId: z.string().optional(),
+  idempotencyKey: z.string().trim().min(8).max(200).optional(),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
 });
 
 export const uploadResponseSchema = z.object({
@@ -147,6 +175,7 @@ export const uploadResponseSchema = z.object({
   uploadUrl: z.string().url(),
   expiresInSeconds: z.number().int().positive(),
   message: z.string(),
+  idempotent: z.boolean().optional(),
 });
 
 export const uploadCompleteResponseSchema = z.object({
@@ -165,6 +194,35 @@ export const licenceRequestSchema = z.object({
   productCode: z.enum(["standard", "enhanced", "editorial", "custom"]).optional(),
   territory: z.string().min(1).max(80),
   durationDays: z.number().int().positive().max(3650),
+});
+
+export const paymentWebhookRequestSchema = z.object({
+  provider: z.string().trim().min(2).max(80),
+  eventId: z.string().trim().min(4).max(240),
+  type: z.enum(["payment_succeeded", "payment_failed", "refund", "chargeback"]),
+  licenceId: z.string().min(1).max(120).optional(),
+  subscriptionId: z.string().min(1).max(120).optional(),
+  creditPurchaseId: z.string().min(1).max(120).optional(),
+  productType: z.enum(["licence", "photographer_subscription", "platform_subscription", "credit_purchase"]).default("licence"),
+  paymentReference: z.string().trim().max(240).optional(),
+  amountCents: z.number().int().positive().max(100_000_000),
+  currency: z.string().length(3),
+}).refine((value) => value.productType === "licence" ? Boolean(value.licenceId) : value.productType === "credit_purchase" ? Boolean(value.creditPurchaseId) : Boolean(value.subscriptionId), { message: "A product reference is required" });
+
+export const streamWebhookRequestSchema = z.object({
+  uid: z.string().trim().max(240).optional(),
+  readyToStream: z.boolean().optional(),
+  status: z.object({
+    state: z.string().trim().max(80).optional(),
+    pctComplete: z.string().trim().max(40).optional(),
+    errorReasonCode: z.string().trim().max(120).optional(),
+    errorReasonText: z.string().trim().max(500).optional(),
+  }).optional(),
+  meta: z.object({
+    filename: z.string().trim().max(240).optional(),
+    filetype: z.string().trim().max(120).optional(),
+    name: z.string().trim().max(240).optional(),
+  }).optional(),
 });
 
 export const contractResponseValidationErrorSchema = z.object({

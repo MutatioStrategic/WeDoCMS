@@ -2,23 +2,38 @@ export * from "./dam";
 export * from "./http";
 export * from "./payouts";
 export * from "./payments";
+export * from "./email";
+export * from "./payfast";
 export * from "./paystack-splits";
 export * from "./zoho";
 
 import { PayFastPayoutAdapter, PayoutProviderRegistry, SouthAfricanBankPayoutAdapter, StripeConnectPayoutAdapter } from "./payouts";
 import { JsonPaymentAdapter, PaymentProviderRegistry, PaystackPaymentAdapter } from "./payments";
+import { PayFastPaymentAdapter } from "./payfast";
 import { ZohoIntegration, type ZohoIntegrationEnvironment } from "./zoho";
+import { CloudflareEmailAdapter, EmailProviderRegistry, JsonEmailAdapter } from "./email";
 
 /** The environment values needed to compose the available integrations. */
 export type IntegrationEnvironment = {
   PAYMENT_PROVIDER?: string;
   PAYMENT_ENDPOINT?: string;
   PAYMENT_TOKEN?: string;
+  PAYFAST_MERCHANT_ID?: string;
+  PAYFAST_MERCHANT_KEY?: string;
+  PAYFAST_PASSPHRASE?: string;
+  PAYFAST_NOTIFY_URL?: string;
+  PAYFAST_PAYMENT_ENDPOINT?: string;
   STRIPE_SECRET_KEY?: string;
   PAYFAST_ENDPOINT?: string;
   PAYFAST_TOKEN?: string;
   ZA_BANK_ENDPOINT?: string;
   ZA_BANK_TOKEN?: string;
+  EMAIL_PROVIDER?: string;
+  EMAIL_ENDPOINT?: string;
+  EMAIL_TOKEN?: string;
+  EMAIL_FROM?: string;
+  EMAIL_FROM_NAME?: string;
+  EMAIL?: SendEmail;
 } & ZohoIntegrationEnvironment;
 
 /**
@@ -32,13 +47,23 @@ export class IntegrationContainer {
   readonly payments: PaymentProviderRegistry;
   readonly payouts: PayoutProviderRegistry;
   readonly zoho: ZohoIntegration;
+  readonly email: EmailProviderRegistry;
 
   constructor(environment: IntegrationEnvironment) {
     this.payments = new PaymentProviderRegistry();
     this.payouts = new PayoutProviderRegistry();
     this.zoho = new ZohoIntegration(environment);
+    this.email = new EmailProviderRegistry();
 
-    if (environment.PAYMENT_PROVIDER && environment.PAYMENT_ENDPOINT && environment.PAYMENT_TOKEN) {
+    if (environment.PAYMENT_PROVIDER === "payfast" && environment.PAYFAST_MERCHANT_ID && environment.PAYFAST_MERCHANT_KEY && environment.PAYFAST_NOTIFY_URL) {
+      this.payments.register(new PayFastPaymentAdapter({
+        merchantId: environment.PAYFAST_MERCHANT_ID,
+        merchantKey: environment.PAYFAST_MERCHANT_KEY,
+        passphrase: environment.PAYFAST_PASSPHRASE,
+        notifyUrl: environment.PAYFAST_NOTIFY_URL,
+        endpoint: environment.PAYFAST_PAYMENT_ENDPOINT,
+      }));
+    } else if (environment.PAYMENT_PROVIDER && environment.PAYMENT_ENDPOINT && environment.PAYMENT_TOKEN) {
       if (environment.PAYMENT_PROVIDER.toLowerCase() === "paystack") {
         this.payments.register(new PaystackPaymentAdapter({ endpoint: environment.PAYMENT_ENDPOINT, secretKey: environment.PAYMENT_TOKEN }));
       } else {
@@ -57,6 +82,16 @@ export class IntegrationContainer {
     }
     if (environment.ZA_BANK_ENDPOINT && environment.ZA_BANK_TOKEN) {
       this.payouts.register(new SouthAfricanBankPayoutAdapter({ endpoint: environment.ZA_BANK_ENDPOINT, token: environment.ZA_BANK_TOKEN }));
+    }
+    if (environment.EMAIL && environment.EMAIL_FROM) {
+      this.email.register(new CloudflareEmailAdapter(environment.EMAIL, { email: environment.EMAIL_FROM, name: environment.EMAIL_FROM_NAME ?? "Veld Archive" }));
+    } else if (environment.EMAIL_PROVIDER && environment.EMAIL_ENDPOINT && environment.EMAIL_TOKEN && environment.EMAIL_FROM) {
+      this.email.register(new JsonEmailAdapter({
+        provider: environment.EMAIL_PROVIDER,
+        endpoint: environment.EMAIL_ENDPOINT,
+        token: environment.EMAIL_TOKEN,
+        from: environment.EMAIL_FROM,
+      }));
     }
   }
 }

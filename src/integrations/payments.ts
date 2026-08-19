@@ -2,8 +2,11 @@ import { bearerHeaders, idempotencyHeaders, IntegrationError, readJson, type Htt
 
 export type PaymentSessionRequest = {
   idempotencyKey: string;
-  licenceId: string;
+  licenceId?: string;
   reference?: string;
+  referenceId?: string;
+  productType?: "licence" | "photographer_subscription" | "platform_subscription" | "credit_purchase";
+  recurring?: { interval: "month"; billingDay: number; startDate: string };
   amountCents: number;
   currency: string;
   buyer: { id: string; email: string };
@@ -23,7 +26,9 @@ export type PaymentSession = {
   provider: string;
   status: "created" | "pending";
   checkoutUrl: string;
+  checkoutForm?: { action: string; fields: Record<string, string> };
   providerReference?: string;
+  providerSubscriptionReference?: string;
   raw?: unknown;
 };
 
@@ -40,6 +45,8 @@ type JsonPaymentResponse = {
   status?: string;
   paymentReference?: string;
   payment_reference?: string;
+  subscriptionReference?: string;
+  subscription_reference?: string;
 };
 
 type PaystackInitializeResponse = {
@@ -75,7 +82,7 @@ export class JsonPaymentAdapter implements PaymentProvider {
         ...idempotencyHeaders(request.idempotencyKey),
       },
       body: JSON.stringify({
-        reference: request.reference ?? request.licenceId,
+        reference: request.reference ?? request.referenceId ?? request.licenceId,
         amount: request.amountCents,
         currency: request.currency.toUpperCase(),
         buyer: request.buyer,
@@ -87,17 +94,20 @@ export class JsonPaymentAdapter implements PaymentProvider {
           bearer_type: request.split.bearerType,
           subaccounts: request.split.subaccounts,
         } : undefined,
+        productType: request.productType ?? "licence",
+        recurring: request.recurring,
       }),
     });
     const value = await readJson<JsonPaymentResponse>(response, this.provider);
     const checkoutUrl = value.checkoutUrl ?? value.checkout_url ?? value.url;
     if (!value.id || !checkoutUrl) throw new IntegrationError(this.provider, "Provider returned no checkout session or hosted URL", { details: value });
     return {
-      id: request.licenceId,
+      id: request.reference ?? request.referenceId ?? request.licenceId ?? request.idempotencyKey,
       provider: this.provider,
       status: value.status === "created" ? "created" : "pending",
       checkoutUrl,
       providerReference: value.paymentReference ?? value.payment_reference ?? value.id,
+      providerSubscriptionReference: value.subscriptionReference ?? value.subscription_reference,
       raw: value,
     };
   }
@@ -124,7 +134,7 @@ export class PaystackPaymentAdapter implements PaymentProvider {
         email: request.buyer.email,
         amount: String(request.amountCents),
         currency: request.currency.toUpperCase(),
-        reference: request.reference ?? request.licenceId,
+        reference: request.reference ?? request.referenceId ?? request.licenceId,
         ...(request.planCode ? { plan: request.planCode } : {}),
         callback_url: request.successUrl,
         metadata: {

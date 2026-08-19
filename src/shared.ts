@@ -3,9 +3,19 @@ export type AssetStatus = "draft" | "processing" | "needs_review" | "published" 
 export type WorkflowStage = "ingestion" | "ai_tagging" | "curator_correction" | "approval";
 export type ReleaseStatus = "unknown" | "not_required" | "pending" | "verified";
 export type LicenceType = "editorial" | "commercial" | "advertising" | "social" | "broadcast" | "exclusive";
+export type LicenceDescription = {
+  label: string;
+  summary: string;
+  usage: string;
+  releaseNote: string;
+};
 export type MonetizationModel = "membership" | "individual_license" | "custom_quote";
 export type MetadataReviewStatus = "reviewed" | "needs_context" | "blocked";
 export type MetadataProvenance = "contributor" | "editor" | "ai_suggested";
+export type VisualLocationType = "urban_street" | "coastal_landscape" | "market_scene" | "indoor" | "residential" | "rural_landscape" | "industrial" | "event" | "transport" | "nature" | "sports" | "food" | "other" | "unknown";
+export type SceneContext = "animal_close_up" | "plant_close_up" | "garden" | "field" | "mountain" | "street" | "shoreline" | "indoor_object" | "unknown";
+export type PhotoCategory = "people" | "lifestyle" | "travel" | "nature" | "architecture" | "food" | "business" | "transport" | "arts_culture" | "sport" | "news_editorial" | "objects" | "other";
+export type AiMetadataSuggestion = Record<string, unknown>;
 
 export type MatchSignal = {
   field: "title" | "description" | "caption" | "location" | "subject" | "context" | "trust";
@@ -55,6 +65,24 @@ export type Asset = {
   contributor: string;
   workflowStage: WorkflowStage;
   aiTags: string[];
+  aiSuggestedMetadata?: AiMetadataSuggestion;
+  visualLocationType?: VisualLocationType;
+  sceneContext?: SceneContext;
+  primaryCategory?: PhotoCategory;
+  sceneAttributes?: string[];
+  visibleText?: string;
+  detectedLanguage?: string;
+  textReadability?: "clear" | "partial" | "unreadable" | "no_text";
+  ocrConfidence?: number | null;
+  aiFieldConfidences?: Record<string, number>;
+  enrichmentValidation?: { accepted?: boolean; issues?: string[]; [key: string]: unknown };
+  geographicLocationSource?: "none" | "seller" | "exif" | "evidence" | "editor";
+  assetRevision?: number;
+  enrichedRevision?: number | null;
+  reviewedRevision?: number | null;
+  approvedRevision?: number | null;
+  indexedRevision?: number | null;
+  vectorIndexStatus?: "not_indexed" | "pending" | "indexed" | "error";
   curatorNotes: string;
   metadataReviewStatus?: MetadataReviewStatus;
   metadataReviewNote?: string;
@@ -69,10 +97,13 @@ export type Asset = {
   artistLicenseUrl?: string | null;
   artistLicenseTerms?: string | null;
   artistLicenseSha256?: string | null;
+  previewUrl?: string | null;
+  posterUrl?: string | null;
+  streamUid?: string | null;
+  streamEmbedUrl?: string | null;
   releases?: ContributorRelease[];
   monetizationModel?: MonetizationModel;
   licensePriceCents?: number | null;
-  previewUrl?: string | null;
   mediaContentType?: string | null;
   mediaWidth?: number | null;
   mediaHeight?: number | null;
@@ -85,7 +116,7 @@ export type Asset = {
 
 export type SearchResponse = {
   query: string;
-  mode: "keyword" | "semantic-preview";
+  mode: "keyword" | "semantic-preview" | "hybrid";
   results: Asset[];
   facets: { label: string; value: string; count: number }[];
   nextCursor?: string | null;
@@ -97,10 +128,71 @@ export type ModerationQueueResponse = {
   counts: { needsReview: number; needsContext: number; total: number };
 };
 
-const STOP_WORDS = new Set(["the", "and", "for", "with", "from", "that", "this", "real", "verified", "after"]);
+const STOP_WORDS = new Set(["the", "and", "for", "with", "from", "that", "this", "real", "verified", "after", "before", "image", "photo", "photos", "media"]);
+const BROAD_VISUAL_TERMS = new Set(["landscape", "mountain", "mountains", "golden", "hour", "light", "scene", "story", "visual", "footage", "record", "records"]);
 
 function tokens(value: string): string[] {
   return value.toLowerCase().split(/[^a-z0-9]+/).filter((token) => token.length > 2 && !STOP_WORDS.has(token));
+}
+
+function storedList(row: Record<string, unknown>, key: string): string[] {
+  try {
+    const parsed = JSON.parse(String(row[key] ?? "[]"));
+    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function hybridSearchTerms(value: string): string[] {
+  return [...new Set(value.normalize("NFKC").toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [])]
+    .filter((token) => token.length > 1)
+    .slice(0, 20);
+}
+
+function hybridKeywordScore(row: Record<string, unknown>, query: string): number {
+  const queryTerms = hybridSearchTerms(query);
+  if (!queryTerms.length) return 0;
+  const text = (value: unknown): string => typeof value === "string" ? value : "";
+  const fields: Array<[string, number]> = [
+    [text(row.title), 3.2], [text(row.ocr_text), 3], [text(row.visual_location_type).replaceAll("_", " "), 2.8], [text(row.scene_context).replaceAll("_", " "), 2.4],
+    [text(row.primary_category).replaceAll("_", " "), 2.6], [storedList(row, "subject_tags").join(" "), 2.5],
+    [storedList(row, "ai_tags").join(" "), 2.1], [storedList(row, "scene_attributes").join(" "), 2],
+    [text(row.caption), 1.8], [text(row.description), 1.6],
+    [[row.country, row.province, row.city, row.locality, row.landmark].filter(Boolean).join(" "), 2.7],
+  ];
+  let weightedHits = 0;
+  for (const term of queryTerms) {
+    let strongest = 0;
+    for (const [value, weight] of fields) if (value.toLowerCase().includes(term)) strongest = Math.max(strongest, weight);
+    weightedHits += strongest;
+  }
+  const phrase = query.trim().toLowerCase();
+  const phraseBonus = phrase.length > 3 && fields.some(([value]) => value.toLowerCase().includes(phrase)) ? 0.2 : 0;
+  return Math.min(1, weightedHits / (queryTerms.length * 3.2) + phraseBonus);
+}
+
+export function rankHybridSearchRows(
+  semanticRows: Record<string, unknown>[],
+  keywordRows: Record<string, unknown>[],
+  query: string,
+  semanticScores: Map<string, number>,
+): Record<string, unknown>[] {
+  const merged = new Map<string, Record<string, unknown>>();
+  for (const row of [...semanticRows, ...keywordRows]) merged.set(String(row.id), row);
+  return [...merged.values()].sort((left, right) => {
+    const score = (row: Record<string, unknown>): number =>
+      (semanticScores.get(String(row.id)) ?? 0) * 0.58
+      + hybridKeywordScore(row, query) * 0.38
+      + (Boolean(row.human_verified) ? 0.04 : 0);
+    return score(right) - score(left);
+  }).slice(0, 60);
+}
+
+export function canApproveMetadataRevision(asset: { assetRevision?: number; reviewedRevision?: number | null; metadataReviewStatus?: MetadataReviewStatus }): boolean {
+  return Number(asset.assetRevision) > 0
+    && Number(asset.reviewedRevision) === Number(asset.assetRevision)
+    && asset.metadataReviewStatus === "reviewed";
 }
 
 /** Builds an evidence-led explanation without turning visual guesses into identity or cultural facts. */
@@ -110,9 +202,9 @@ export function buildMatchExplanation(asset: Asset, query = ""): MatchExplanatio
     { field: "title", label: "Title", value: asset.title, weight: 0.82 },
     { field: "description", label: "Description", value: asset.description, weight: 0.7 },
     { field: "caption", label: "Caption", value: asset.caption, weight: 0.74 },
-    { field: "location", label: "Location", value: [asset.country, asset.province, asset.city, asset.locality, asset.landmark].filter(Boolean).join(" "), weight: 0.9 },
+    { field: "location", label: "Evidence-backed location", value: [asset.country, asset.province, asset.city, asset.locality, asset.landmark].filter(Boolean).join(" "), weight: 0.9 },
     { field: "subject", label: "Subject tags", value: asset.subjectTags.join(" "), weight: 0.84 },
-    { field: "context", label: "Context tags", value: asset.culturalTags.join(" "), weight: 0.78 },
+    { field: "context", label: "Visual classification", value: [asset.visualLocationType?.replaceAll("_", " "), asset.sceneContext?.replaceAll("_", " "), asset.primaryCategory?.replaceAll("_", " "), ...(asset.sceneAttributes ?? []), ...asset.culturalTags].filter(Boolean).join(" "), weight: 0.78 },
   ];
   const matched = fields
     .map((field) => ({ ...field, hits: queryTokens.filter((token) => field.value.toLowerCase().includes(token)) }))
@@ -139,6 +231,9 @@ export function buildMatchExplanation(asset: Asset, query = ""): MatchExplanatio
   addMetadata("Location", [asset.city, asset.province, asset.country].filter(Boolean).join(", "));
   addMetadata("Landmark", asset.landmark);
   addMetadata("Subject tags", asset.subjectTags.join(", "));
+  addMetadata("Visible location type", [asset.visualLocationType, asset.sceneContext].filter(Boolean).map((value) => value!.replaceAll("_", " ")).join(", "));
+  addMetadata("Primary category", asset.primaryCategory?.replaceAll("_", " "));
+  addMetadata("Visible text", asset.visibleText);
   addMetadata("Context tags", asset.culturalTags.join(", "));
   return {
     matchConfidence,
@@ -151,6 +246,65 @@ export function buildMatchExplanation(asset: Asset, query = ""): MatchExplanatio
 
 export function withMatchExplanation(asset: Asset, query = ""): Asset {
   return { ...asset, matchExplanation: buildMatchExplanation(asset, query) };
+}
+
+function assetSearchText(asset: Asset): Array<[string, number]> {
+  return [
+    [asset.title, 3.2],
+    [asset.landmark ?? "", 3],
+    [[asset.city, asset.locality, asset.province, asset.country].filter(Boolean).join(" "), 2.7],
+    [asset.subjectTags.join(" "), 2.6],
+    [asset.culturalTags.join(" "), 2.5],
+    [asset.aiTags.join(" "), 2.1],
+    [asset.caption, 1.9],
+    [asset.description, 1.7],
+    [[asset.visualLocationType?.replaceAll("_", " "), asset.sceneContext?.replaceAll("_", " "), asset.primaryCategory?.replaceAll("_", " "), ...(asset.sceneAttributes ?? [])].filter(Boolean).join(" "), 1.6],
+  ];
+}
+
+export function searchRelevanceScore(asset: Asset, query = ""): { score: number; hits: number; phraseMatched: boolean; matchedTokens: string[] } {
+  const queryTokens = tokens(query);
+  if (!queryTokens.length) return { score: 1, hits: 0, phraseMatched: false, matchedTokens: [] };
+  const fields = assetSearchText(asset);
+  const fullText = fields.map(([value]) => value).join(" ").toLowerCase();
+  const phrase = query.trim().toLowerCase();
+  const phraseMatched = phrase.length > 3 && fullText.includes(phrase);
+  let weightedHits = 0;
+  let hits = 0;
+  const matchedTokens: string[] = [];
+  for (const token of queryTokens) {
+    let strongest = 0;
+    for (const [value, weight] of fields) if (value.toLowerCase().includes(token)) strongest = Math.max(strongest, weight);
+    if (strongest > 0) {
+      hits += 1;
+      matchedTokens.push(token);
+    }
+    weightedHits += strongest;
+  }
+  const score = Math.min(1, weightedHits / (queryTokens.length * 3.2) + (phraseMatched ? 0.18 : 0));
+  return { score, hits, phraseMatched, matchedTokens };
+}
+
+export function isRelevantSearchResult(asset: Asset, query = ""): boolean {
+  const queryTokens = tokens(query);
+  if (!queryTokens.length) return true;
+  const relevance = searchRelevanceScore(asset, query);
+  if (relevance.phraseMatched) return true;
+  const distinctiveTokens = queryTokens.filter((token) => !BROAD_VISUAL_TERMS.has(token));
+  if (distinctiveTokens.length > 0 && !distinctiveTokens.some((token) => relevance.matchedTokens.includes(token))) return false;
+  if (queryTokens.length === 1) return relevance.hits >= 1;
+  if (queryTokens.length <= 3) return relevance.hits >= 2 || relevance.score >= 0.52;
+  return relevance.hits >= 2 && relevance.score >= 0.24;
+}
+
+export function rankSearchAssets(assets: Asset[], query = ""): Asset[] {
+  return assets
+    .filter((asset) => isRelevantSearchResult(asset, query))
+    .sort((left, right) => {
+      const leftScore = searchRelevanceScore(left, query).score + (left.humanVerified ? 0.03 : 0);
+      const rightScore = searchRelevanceScore(right, query).score + (right.humanVerified ? 0.03 : 0);
+      return rightScore - leftScore;
+    });
 }
 
 export function confidenceLabel(value: number): "high" | "medium" | "low" {
@@ -340,6 +494,13 @@ export type SavedSearch = {
   query: string;
   mediaKind: "all" | "image" | "video";
   alertFrequency: "none" | "daily" | "weekly";
+  label?: string;
+  kind?: "all" | "image" | "video";
+  location?: string | null;
+  locationType?: string | null;
+  category?: string | null;
+  notifyOnNew?: boolean;
+  lastNotifiedAt?: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -373,6 +534,86 @@ export type RightsCase = {
   createdAt: string;
 };
 
+export type MediationMessage = {
+  id: string;
+  authorId: string;
+  authorName: string;
+  body: string;
+  visibility: "participants" | "facilitator_only" | "case_record";
+  createdAt: string;
+};
+
+export type NotificationItem = {
+  id: string;
+  type: string;
+  title: string;
+  body: string;
+  resourceType: string | null;
+  resourceId: string | null;
+  readAt: string | null;
+  createdAt: string;
+};
+
+export type BuyerLightbox = {
+  id: string;
+  title: string;
+  status: "active" | "archived";
+  assetCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type BuyerLightboxDetail = BuyerLightbox & { assets: Asset[] };
+
+export type WebhookSubscription = {
+  id: string;
+  targetUrl: string;
+  events: string[];
+  status: "active" | "disabled";
+  createdAt: string;
+};
+
+export type AssetVersionEvent = {
+  id: string;
+  assetRevision: number | null;
+  eventType: string;
+  actorName: string;
+  createdAt: string;
+  summary: string;
+};
+
+export type PayoutBatchSummary = {
+  id: string;
+  periodStart: string;
+  periodEnd: string;
+  currency: string;
+  totalCents: number;
+  status: string;
+  itemCount: number;
+  createdAt: string;
+};
+
+export type PayoutBatchItem = {
+  id: string;
+  contributorName: string;
+  amountCents: number;
+  currency: string;
+  status: string;
+  failureReason: string | null;
+};
+
+export type PhotoJobSummary = {
+  id: string;
+  assetId: string;
+  title: string;
+  operation: string;
+  status: string;
+  attempts: number;
+  errorClass: string | null;
+  lastError: string | null;
+  updatedAt: string;
+};
+
 const RELEASE_REQUIRED: Record<LicenceType, { model: boolean; property: boolean }> = {
   editorial: { model: false, property: false },
   commercial: { model: true, property: true },
@@ -381,6 +622,19 @@ const RELEASE_REQUIRED: Record<LicenceType, { model: boolean; property: boolean 
   broadcast: { model: true, property: true },
   exclusive: { model: true, property: true },
 };
+
+const LICENCE_DESCRIPTIONS: Record<LicenceType, LicenceDescription> = {
+  editorial: { label: "Editorial", summary: "Storytelling, news, documentary, and non-promotional publishing.", usage: "For editorial context rather than brand advertising or paid promotion.", releaseNote: "Model and property releases are not required by the standard editorial check." },
+  social: { label: "Social", summary: "Organic social posts and non-paid community or brand channels.", usage: "For unpaid social publishing; paid promotion may require Advertising instead.", releaseNote: "A model release is required; property release is not required by the standard check." },
+  commercial: { label: "Commercial", summary: "Brand, corporate, or promotional communications.", usage: "For commercial communications that are not classified as paid advertising.", releaseNote: "Model and property releases are required by the standard check." },
+  advertising: { label: "Advertising", summary: "Paid campaigns, boosted placements, and promotional media.", usage: "For media placed in paid advertising or promotional campaigns.", releaseNote: "Model and property releases are required by the standard check." },
+  broadcast: { label: "Broadcast", summary: "Television, streaming, cinema, or other broadcast distribution.", usage: "For scheduled or distributed audiovisual programming and broadcast channels.", releaseNote: "Model and property releases are required by the standard check." },
+  exclusive: { label: "Exclusive", summary: "Reserved use for the selected territory and duration.", usage: "For a separately confirmed exclusive arrangement; exclusivity terms must be honoured in the final licence.", releaseNote: "Model and property releases are required by the standard check." },
+};
+
+export function licenceDescription(licenceType: LicenceType): LicenceDescription {
+  return LICENCE_DESCRIPTIONS[licenceType];
+}
 
 function releasePasses(status: ReleaseStatus, required: boolean): boolean {
   return !required || status === "verified" || status === "not_required";
@@ -442,8 +696,24 @@ export class ArchiveDomain {
     return percent(value);
   }
 
+  rankHybridSearchRows(semanticRows: Record<string, unknown>[], keywordRows: Record<string, unknown>[], query: string, semanticScores: Map<string, number>): Record<string, unknown>[] {
+    return rankHybridSearchRows(semanticRows, keywordRows, query, semanticScores);
+  }
+
+  rankSearchAssets(assets: Asset[], query = ""): Asset[] {
+    return rankSearchAssets(assets, query);
+  }
+
+  canApproveMetadataRevision(asset: { assetRevision?: number; reviewedRevision?: number | null; metadataReviewStatus?: MetadataReviewStatus }): boolean {
+    return canApproveMetadataRevision(asset);
+  }
+
   evaluateLicenceRequest(asset: Asset, request: LicenceRequest): LicenceValidation {
     return evaluateLicenceRequest(asset, request);
+  }
+
+  licenceDescription(licenceType: LicenceType): LicenceDescription {
+    return licenceDescription(licenceType);
   }
 }
 

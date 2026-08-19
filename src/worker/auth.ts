@@ -5,6 +5,7 @@ export type AuthBindings = {
   DB: D1Database;
   APP_ENV?: string;
   SESSION_SECRET?: string;
+  DEMO_AUTH_ENABLED?: string;
   AUTH_JWT_SECRET?: string;
   AUTH_JWKS_URL?: string;
   AUTH_ISSUER?: string;
@@ -134,8 +135,9 @@ export function responseWithoutSession(response: Response, env: AuthBindings): R
 }
 
 function requiredSecret(env: AuthBindings): string {
-  if (!env.SESSION_SECRET || env.SESSION_SECRET.length < 32) throw new Error("SESSION_SECRET must be configured with at least 32 characters");
-  return env.SESSION_SECRET;
+  if (env.SESSION_SECRET && env.SESSION_SECRET.length >= 32) return env.SESSION_SECRET;
+  if (String(env.DEMO_AUTH_ENABLED) === "true") return "veld-archive-demo-session-secret-replace-before-production-use";
+  throw new Error("SESSION_SECRET must be configured with at least 32 characters");
 }
 
 export async function createSession(env: AuthBindings, userId: string, organizationId: string): Promise<{ token: string; csrfToken: string; sessionId: string; expiresAt: string }> {

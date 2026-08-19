@@ -347,7 +347,7 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
     {view === "buyer" && <AnalyticsDashboard role="buyer" onOpenAccount={() => navigate("account")} />}
     {view === "review" && <ReviewWorkspace items={reviewItems} api={api} onNotice={setNotice} onReload={loadReviewQueue} />}
     {view === "governance" && <><MarketplaceLegalDocuments api={api} /><GovernanceWorkspace api={api} onNotice={setNotice} /></>}
-    {view === "community" && <CommunityWorkspace api={api} onNotice={setNotice} />}
+    {view === "community" && <CommunityWorkspace api={api} onNotice={setNotice} sessionUser={sessionUser} />}
     {view === "account" && <><BuyerSubscriptionPanel api={api} onNotice={setNotice} /><AccountWorkspace api={api} auth0={auth0} onNotice={setNotice} /></>}
     {view === "studio" && <StudioWorkspace assets={assets} onNotice={setNotice} />}
     {view === "rights" && <RightsGuide />}
