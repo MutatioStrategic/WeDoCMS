@@ -114,6 +114,9 @@ jobs:
             --var SESSION_SECRET:ci-session-secret-that-is-long-enough-for-tests \
             --var PAYMENT_WEBHOOK_SECRET:ci-payment-webhook-secret-that-is-long-enough \
             --var CHAOS_TEST_TOKEN:ci-chaos-test-token \
+            --var R2_ACCOUNT_ID:ci-r2-account \
+            --var R2_ACCESS_KEY_ID:ci-r2-access-key \
+            --var R2_SECRET_ACCESS_KEY:ci-r2-secret-key \
             --var CHAOS_TESTING_ENABLED:true > worker.log 2>&1 &
           worker_pid=$!
           trap 'kill "$worker_pid"' EXIT
@@ -171,6 +174,7 @@ jobs:
           # The release gate fails on ZAP FAIL-NEW findings; documented low-risk
           # passive warnings remain visible in the uploaded report.
           fail_action: false
+          allow_issue_writing: false
       - name: Stop local Worker
         if: always()
         shell: bash
