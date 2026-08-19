@@ -87,7 +87,7 @@ export const zohoDeskCaseSchema = z.object({
   publicUrl: z.string().url().optional(),
 }).strict();
 
-type ZohoTokenResponse = { access_token?: string; api_domain?: string; expires_in?: number };
+export type ZohoTokenResponse = { access_token?: string; refresh_token?: string; api_domain?: string; expires_in?: number; scope?: string };
 
 /**
  * Server-side Zoho composition boundary.
@@ -201,6 +201,26 @@ export class ZohoIntegration {
       source: "veld-archive",
       payload,
     }, idempotencyKey);
+  }
+
+  async exchangeAuthorizationCode(code: string, redirectUri: string): Promise<ZohoTokenResponse> {
+    const { ZOHO_ACCOUNTS_URL, ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET } = this.config;
+    if (!ZOHO_CLIENT_ID || !ZOHO_CLIENT_SECRET) throw new IntegrationError(this.provider, "Zoho OAuth client credentials are not configured");
+    const body = new URLSearchParams({ code, client_id: ZOHO_CLIENT_ID, client_secret: ZOHO_CLIENT_SECRET, grant_type: "authorization_code", redirect_uri: redirectUri });
+    const response = await this.fetcher(joinUrl(ZOHO_ACCOUNTS_URL ?? "https://accounts.zoho.com", "/oauth/v2/token"), { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
+    return readJson<ZohoTokenResponse>(response, this.provider);
+  }
+
+  async getCrmModules(): Promise<Record<string, unknown>> {
+    const token = await this.getAccessToken();
+    const response = await this.fetcher(joinUrl(this.apiDomain ?? "https://www.zohoapis.com", "/crm/v8/settings/modules"), { headers: { Authorization: `Zoho-oauthtoken ${token}` } });
+    return readJson<Record<string, unknown>>(response, this.provider);
+  }
+
+  async getCrmFields(moduleName = this.config.ZOHO_CRM_MODULE?.trim() || "Campaigns"): Promise<Record<string, unknown>> {
+    const token = await this.getAccessToken();
+    const response = await this.fetcher(joinUrl(this.apiDomain ?? "https://www.zohoapis.com", `/crm/v8/settings/fields?module=${encodeURIComponent(moduleName)}`), { headers: { Authorization: `Zoho-oauthtoken ${token}` } });
+    return readJson<Record<string, unknown>>(response, this.provider);
   }
 
   private async sendFlow(app: string, endpoint: string | undefined, body: unknown, idempotencyKey: string): Promise<{ providerReference?: string; raw?: unknown }> {

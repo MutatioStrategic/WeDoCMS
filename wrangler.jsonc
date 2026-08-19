@@ -91,6 +91,10 @@
       {
         "queue": "veld-archive-photo-enrichment",
         "binding": "PHOTO_ENRICHMENT_QUEUE"
+      },
+      {
+        "queue": "veld-archive-zoho-integrations",
+        "binding": "ZOHO_INTEGRATION_QUEUE"
       }
     ],
     "consumers": [
@@ -106,6 +110,13 @@
         "max_batch_timeout": 5,
         "max_retries": 5,
         "dead_letter_queue": "veld-archive-photo-enrichment-dlq"
+      },
+      {
+        "queue": "veld-archive-zoho-integrations",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "dead_letter_queue": "veld-archive-zoho-integrations-dlq"
       }
     ]
   },
@@ -247,6 +258,10 @@
           {
             "queue": "veld-archive-photo-enrichment",
             "binding": "PHOTO_ENRICHMENT_QUEUE"
+          },
+          {
+            "queue": "veld-archive-zoho-integrations",
+            "binding": "ZOHO_INTEGRATION_QUEUE"
           }
         ],
         "consumers": [
@@ -262,6 +277,13 @@
             "max_batch_timeout": 5,
             "max_retries": 5,
             "dead_letter_queue": "veld-archive-photo-enrichment-dlq"
+          },
+          {
+            "queue": "veld-archive-zoho-integrations",
+            "max_batch_size": 10,
+            "max_batch_timeout": 5,
+            "max_retries": 3,
+            "dead_letter_queue": "veld-archive-zoho-integrations-dlq"
           }
         ]
       },

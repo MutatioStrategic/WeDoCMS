@@ -46,6 +46,18 @@ import {
   verifyExternalJwtWithProvider,
   type RequestUser,
 } from "./auth";
+import {
+  decryptZohoSecret,
+  dispatchDueZohoOutbox,
+  dispatchZohoOutboxJob,
+  enqueueZohoOutbox,
+  encryptZohoSecret,
+  sha256Hex as zohoSha256Hex,
+  type ZohoOutboxApp,
+  type ZohoOutboxBindings,
+  type ZohoOutboxJobMessage,
+  type ZohoOutboxInput,
+} from "./zoho-outbox";
 import { allowedOrigin, applySecurityHeaders, enforceRateLimit, scanMediaObject, type SecurityBindings } from "./security";
 import { discoveryTokens, isDemoAssetRow, isProductionDemoAssetRow, normalizeSavedQuery, scoreRecommendation } from "./discovery";
 import { parseCampaignBrief, rankCampaignAssets, type BrandKit, type CampaignBrief, type CampaignStage } from "../campaign-intelligence";
@@ -113,9 +125,11 @@ type SecretBindings = {
   ZOHO_ACCOUNTS_URL?: string;
   ZOHO_CLIENT_ID?: string;
   ZOHO_CLIENT_SECRET?: string;
+  ZOHO_OAUTH_SCOPES?: string;
   ZOHO_REFRESH_TOKEN?: string;
   ZOHO_ACCESS_TOKEN?: string;
   ZOHO_API_DOMAIN?: string;
+  ZOHO_OAUTH_SCOPES?: string;
   ZOHO_CRM_MODULE?: string;
   ZOHO_CRM_EXTERNAL_FIELD?: string;
   ZOHO_CRM_NAME_FIELD?: string;
@@ -129,6 +143,7 @@ type SecretBindings = {
   ZOHO_DESK_FLOW_WEBHOOK_URL?: string;
   ZOHO_CAMPAIGNS_FLOW_WEBHOOK_URL?: string;
   ZOHO_ANALYTICS_FLOW_WEBHOOK_URL?: string;
+  ZOHO_TOKEN_ENCRYPTION_KEY?: string;
   SESSION_SECRET?: string;
   AUTH_JWT_SECRET?: string;
   AUTH_JWKS_URL?: string;
@@ -174,7 +189,7 @@ type SecretStoreBinding = { get(): Promise<string> };
 type WorkersAiBinding = {
   run(model: string, input: Record<string, unknown>): Promise<unknown>;
 };
-type Bindings = Omit<Cloudflare.Env, "AI"> & AuditBindings & SecretBindings & { AI?: WorkersAiBinding };
+type Bindings = Omit<Cloudflare.Env, "AI" | "ZOHO_INTEGRATION_QUEUE"> & AuditBindings & SecretBindings & { AI?: WorkersAiBinding; ZOHO_INTEGRATION_QUEUE?: Queue<ZohoOutboxJobMessage> };
 
 type Variables = { trace: TraceContext };
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -1488,6 +1503,7 @@ app.post("/api/campaigns", async (c) => {
     c.env.DB.prepare("INSERT INTO campaigns (id, organization_id, owner_id, name, brief_text, brief_json, brand_kit_json, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(id, user.organizationId, user.id, payload.name, briefText, JSON.stringify(briefFields), JSON.stringify(payload.brandKit), payload.status),
     c.env.DB.prepare("INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, metadata_json) VALUES (?, ?, 'campaign_created', 'campaign', ?, ?)").bind(crypto.randomUUID(), user.id, id, JSON.stringify({ name: payload.name, platforms: briefFields.platforms ?? [], usageRights: briefFields.usageRights ?? null })),
   ]);
+  await queueZohoDomainEventBestEffort(c.env, { organizationId: user.organizationId, actorId: user.id, app: "crm", action: "upsert_campaign", entityType: "campaign", entityId: id, eventName: "campaign.created", payload: { id, name: payload.name, brief: briefText, status: payload.status, approvedAssetCount: 0, platforms: briefFields.platforms ?? [], usageRights: briefFields.usageRights ?? "editorial", publicUrl: `${zohoPublicUrl(c, c.env)}/?campaign=${encodeURIComponent(id)}` } });
   return c.json({ id, name: payload.name, brief: briefText, briefFields, brandKit: payload.brandKit, status: payload.status, assetCounts: { shortlisted: 0, approved: 0, needsReview: 0, rejected: 0 } }, 201);
 });
 
@@ -2233,6 +2249,8 @@ app.post("/api/webhooks/payments", async (c) => {
       await c.env.DB.prepare("UPDATE payment_split_allocations SET status = 'reversed', updated_at = CURRENT_TIMESTAMP WHERE licence_id = ?").bind(payload.licenceId).run();
     }
     await c.env.DB.prepare("UPDATE payment_webhook_events SET status = 'processed', processed_at = CURRENT_TIMESTAMP WHERE id = ?").bind(eventId).run();
+    const correlated = await c.env.DB.prepare("SELECT organization_id, buyer_id, asset_id, campaign_id FROM licences WHERE id = ? LIMIT 1").bind(payload.licenceId).first<{ organization_id: string; buyer_id: string; asset_id: string; campaign_id: string | null }>();
+    if (correlated) await queueZohoDomainEventBestEffort(c.env, { organizationId: correlated.organization_id, actorId: correlated.buyer_id, app: "analytics", action: "ingest_licence_payment_event", entityType: "licence", entityId: payload.licenceId, eventName: `licence.${payload.type}`, payload: { contractVersion: "1.0", eventName: `licence.${payload.type}`, licenceId: payload.licenceId, assetId: correlated.asset_id, campaignId: correlated.campaign_id, provider: payload.provider, providerEventId: payload.eventId, providerReference: payload.paymentReference ?? null, status: payload.type === "payment_succeeded" ? "paid" : payload.type === "chargeback" ? "cancelled" : "refunded", amountCents: payload.amountCents, currency: payload.currency.toUpperCase(), occurredAt: new Date().toISOString() } });
     return c.json({ accepted: true, eventId, transactionId, type: payload.type });
   } catch (error) {
     await c.env.DB.prepare("UPDATE payment_webhook_events SET status = 'failed', failure_reason = ? WHERE id = ?").bind(error instanceof Error ? error.message : "payment_event_failed", eventId).run();
@@ -3382,6 +3400,37 @@ const zohoSocialHandoffSchema = z.object({
   scheduleAt: z.string().datetime({ offset: true }).optional(),
 });
 
+const zohoOAuthScopes = [
+  "ZohoCRM.modules.ALL",
+  "ZohoCRM.settings.modules.READ",
+  "ZohoCRM.settings.fields.READ",
+];
+
+function zohoOAuthRedirectUri(env: Bindings): string {
+  return `${String(env.APP_PUBLIC_URL ?? "").replace(/\/$/, "")}/api/integrations/zoho/oauth/callback`;
+}
+
+function zohoOutboxBindings(env: Bindings): ZohoOutboxBindings {
+  return env as unknown as ZohoOutboxBindings;
+}
+
+async function queueZohoDelivery(env: Bindings, input: ZohoOutboxInput): Promise<{ id: string; status: string; created: boolean }> {
+  return enqueueZohoOutbox(zohoOutboxBindings(env), input);
+}
+
+async function queueZohoDomainEventBestEffort(env: Bindings, input: Omit<ZohoOutboxInput, "idempotencyKey"> & { eventName: string }): Promise<void> {
+  const configured = input.app === "crm"
+    ? Boolean(env.ZOHO_CLIENT_ID && env.ZOHO_CLIENT_SECRET && (env.ZOHO_REFRESH_TOKEN || await env.DB.prepare("SELECT id FROM zoho_connections WHERE organization_id = ? AND status = 'active' LIMIT 1").bind(input.organizationId).first()))
+    : Boolean(({ social: env.ZOHO_SOCIAL_FLOW_WEBHOOK_URL, desk: env.ZOHO_DESK_FLOW_WEBHOOK_URL, campaigns: env.ZOHO_CAMPAIGNS_FLOW_WEBHOOK_URL, analytics: env.ZOHO_ANALYTICS_FLOW_WEBHOOK_URL } as Record<string, string | undefined>)[input.app]);
+  if (!configured) return;
+  try {
+    const idempotencyKey = await zohoIdempotencyKey(input.app, `${input.entityId}:${input.eventName}`, input.payload);
+    await queueZohoDelivery(env, { ...input, idempotencyKey });
+  } catch (error) {
+    logEvent("error", "zoho.domain_event_enqueue_failed", traceContext(new Request("https://internal/zoho-domain-event")), { app: input.app, eventName: input.eventName, entityId: input.entityId, error: error instanceof Error ? error.message : "unknown" });
+  }
+}
+
 function zohoPublicUrl(c: any, env: Bindings): string {
   return String(env.APP_PUBLIC_URL ?? new URL(c.req.url).origin).replace(/\/$/, "");
 }
@@ -3425,7 +3474,109 @@ async function completedZohoEvent(env: Bindings, organizationId: string, app: st
 app.get("/api/integrations/zoho/status", async (c) => {
   const user = await requestUser(c);
   if (!user) return c.json({ error: "Authentication required" }, 401);
-  return c.json(new IntegrationContainer(c.env).zoho.status());
+  const [status, connection, contract] = await Promise.all([
+    Promise.resolve(new IntegrationContainer(c.env).zoho.status()),
+    c.env.DB.prepare("SELECT id, account_server, api_domain, scopes_json, status, last_validated_at, last_error, updated_at FROM zoho_connections WHERE organization_id = ? AND status <> 'revoked' LIMIT 1").bind(user.organizationId).first<Record<string, unknown>>(),
+    c.env.DB.prepare("SELECT module_api_name, validation_status, validation_errors_json, validated_at FROM zoho_contract_metadata WHERE organization_id = ? ORDER BY validated_at DESC LIMIT 1").bind(user.organizationId).first<Record<string, unknown>>(),
+  ]);
+  return c.json({ ...status, connection: connection ? { id: String(connection.id), accountServer: String(connection.account_server), apiDomain: connection.api_domain ? String(connection.api_domain) : null, scopes: JSON.parse(String(connection.scopes_json ?? "[]")), status: String(connection.status), lastValidatedAt: connection.last_validated_at ?? null, lastError: connection.last_error ?? null, updatedAt: connection.updated_at } : null, crmContract: contract ? { moduleApiName: String(contract.module_api_name), status: String(contract.validation_status), errors: JSON.parse(String(contract.validation_errors_json ?? "[]")), validatedAt: contract.validated_at } : null });
+});
+
+app.post("/api/integrations/zoho/connect/start", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Organisation administration required" }, 403);
+  if (!c.env.ZOHO_CLIENT_ID || !c.env.ZOHO_CLIENT_SECRET || !c.env.ZOHO_TOKEN_ENCRYPTION_KEY) return c.json({ error: "Zoho OAuth client and token encryption secrets are not configured" }, 503);
+  const accountServer = String(c.env.ZOHO_ACCOUNTS_URL ?? "https://accounts.zoho.com").replace(/\/$/, "");
+  const scopes = (c.env.ZOHO_OAUTH_SCOPES ?? zohoOAuthScopes.join(",")).split(",").map((scope) => scope.trim()).filter(Boolean);
+  const rawState = `${crypto.randomUUID()}-${crypto.randomUUID()}`;
+  const stateHash = await zohoSha256Hex(rawState);
+  const returnPath = new URL(c.req.url).searchParams.get("returnPath") || "/settings";
+  await c.env.DB.prepare(`INSERT INTO zoho_oauth_states (id, organization_id, actor_id, state_hash, account_server, scopes_json, return_path, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '+10 minutes'))`).bind(crypto.randomUUID(), user.organizationId, user.id, stateHash, accountServer, JSON.stringify(scopes), returnPath.slice(0, 200)).run();
+  const authorization = new URL(`${accountServer}/oauth/v2/auth`);
+  authorization.search = new URLSearchParams({ scope: scopes.join(","), client_id: c.env.ZOHO_CLIENT_ID, response_type: "code", access_type: "offline", prompt: "consent", redirect_uri: zohoOAuthRedirectUri(c.env), state: rawState }).toString();
+  return c.json({ authorizationUrl: authorization.toString(), expiresInSeconds: 600 }, 201);
+});
+
+app.get("/api/integrations/zoho/oauth/callback", async (c) => {
+  const code = c.req.query("code");
+  const state = c.req.query("state");
+  if (!code || !state) return c.json({ error: "Zoho OAuth code and state are required" }, 400);
+  const stateHash = await zohoSha256Hex(state);
+  const oauthState = await c.env.DB.prepare(`SELECT * FROM zoho_oauth_states WHERE state_hash = ? AND consumed_at IS NULL AND expires_at > CURRENT_TIMESTAMP LIMIT 1`).bind(stateHash).first<Record<string, unknown>>();
+  if (!oauthState) return c.json({ error: "Zoho OAuth state is invalid or expired" }, 400);
+  const user = await requestUser(c);
+  if (!user || user.id !== String(oauthState.actor_id) || user.organizationId !== String(oauthState.organization_id)) return c.json({ error: "The Zoho OAuth callback must be completed by the initiating user" }, 403);
+  if (!c.env.ZOHO_TOKEN_ENCRYPTION_KEY || !c.env.ZOHO_CLIENT_ID || !c.env.ZOHO_CLIENT_SECRET) return c.json({ error: "Zoho OAuth storage is not configured" }, 503);
+  try {
+    const token = await new IntegrationContainer({ ...c.env, ZOHO_ACCOUNTS_URL: String(oauthState.account_server) }).zoho.exchangeAuthorizationCode(code, zohoOAuthRedirectUri(c.env));
+    if (!token.refresh_token) return c.json({ error: "Zoho did not return a refresh token; reconnect with offline access" }, 502);
+    const encrypted = await encryptZohoSecret(token.refresh_token, c.env.ZOHO_TOKEN_ENCRYPTION_KEY);
+    const existing = await c.env.DB.prepare("SELECT id FROM zoho_connections WHERE organization_id = ? AND status <> 'revoked' LIMIT 1").bind(user.organizationId).first<{ id: string }>();
+    if (existing) {
+      await c.env.DB.prepare(`UPDATE zoho_connections SET account_server = ?, api_domain = ?, scopes_json = ?, refresh_token_ciphertext = ?, refresh_token_iv = ?, status = 'active', last_error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+        .bind(String(oauthState.account_server), token.api_domain ?? null, oauthState.scopes_json, encrypted.ciphertext, encrypted.iv, existing.id).run();
+    } else {
+      await c.env.DB.prepare(`INSERT INTO zoho_connections (id, organization_id, created_by, account_server, api_domain, scopes_json, refresh_token_ciphertext, refresh_token_iv)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(crypto.randomUUID(), user.organizationId, user.id, String(oauthState.account_server), token.api_domain ?? null, oauthState.scopes_json, encrypted.ciphertext, encrypted.iv).run();
+    }
+    await c.env.DB.prepare("UPDATE zoho_oauth_states SET consumed_at = CURRENT_TIMESTAMP WHERE id = ?").bind(oauthState.id).run();
+    return c.redirect(`${String(c.env.APP_PUBLIC_URL ?? new URL(c.req.url).origin)}${String(oauthState.return_path ?? "/settings")}?zoho=connected`);
+  } catch (error) {
+    await c.env.DB.prepare("UPDATE zoho_connections SET status = 'error', last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE organization_id = ? AND status <> 'revoked'").bind(error instanceof Error ? error.message : "Zoho OAuth exchange failed", user.organizationId).run().catch(() => undefined);
+    return c.json({ error: error instanceof IntegrationError ? error.message : "Zoho OAuth exchange failed" }, 502);
+  }
+});
+
+app.post("/api/integrations/zoho/crm/validate", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Organisation administration required" }, 403);
+  const connection = await c.env.DB.prepare("SELECT account_server, api_domain, refresh_token_ciphertext, refresh_token_iv FROM zoho_connections WHERE organization_id = ? AND status = 'active' LIMIT 1").bind(user.organizationId).first<Record<string, unknown>>();
+  let integrationEnv = c.env;
+  if (connection && c.env.ZOHO_TOKEN_ENCRYPTION_KEY) {
+    const refreshToken = await decryptZohoSecret(String(connection.refresh_token_ciphertext), String(connection.refresh_token_iv), c.env.ZOHO_TOKEN_ENCRYPTION_KEY);
+    integrationEnv = { ...c.env, ZOHO_ACCOUNTS_URL: String(connection.account_server), ZOHO_API_DOMAIN: connection.api_domain ? String(connection.api_domain) : undefined, ZOHO_REFRESH_TOKEN: refreshToken };
+  }
+  try {
+    const zoho = new IntegrationContainer(integrationEnv).zoho;
+    const moduleName = c.env.ZOHO_CRM_MODULE?.trim() || "Campaigns";
+    const [modulesResponse, fieldsResponse] = await Promise.all([zoho.getCrmModules(), zoho.getCrmFields(moduleName)]);
+    const modules = Array.isArray(modulesResponse.modules) ? modulesResponse.modules as Array<Record<string, unknown>> : [];
+    const fields = Array.isArray(fieldsResponse.fields) ? fieldsResponse.fields as Array<Record<string, unknown>> : [];
+    const moduleExists = modules.some((module) => String(module.api_name ?? module.apiName ?? "") === moduleName);
+    const fieldNames = new Set(fields.map((field) => String(field.api_name ?? field.apiName ?? "")));
+    const required = [c.env.ZOHO_CRM_EXTERNAL_FIELD, c.env.ZOHO_CRM_NAME_FIELD?.trim() || "Campaign_Name", c.env.ZOHO_CRM_DESCRIPTION_FIELD?.trim() || "Description"].filter((value): value is string => Boolean(value?.trim()));
+    const errors = [...(!moduleExists ? [`CRM module '${moduleName}' was not returned by Zoho`] : []), ...required.filter((field) => !fieldNames.has(field)).map((field) => `CRM field '${field}' was not returned by Zoho`), ...[c.env.ZOHO_CRM_STATUS_FIELD, c.env.ZOHO_CRM_APPROVED_ASSETS_FIELD, c.env.ZOHO_CRM_PLATFORMS_FIELD, c.env.ZOHO_CRM_USAGE_RIGHTS_FIELD, c.env.ZOHO_CRM_URL_FIELD].filter(Boolean).map(String).filter((field) => !fieldNames.has(field)).map((field) => `Optional CRM field '${field}' was not returned by Zoho`)];
+    const validationStatus = errors.length ? "invalid" : "valid";
+    if (connection) {
+      const connectionRow = await c.env.DB.prepare("SELECT id FROM zoho_connections WHERE organization_id = ? AND status = 'active' LIMIT 1").bind(user.organizationId).first<{ id: string }>();
+      if (connectionRow) await c.env.DB.prepare(`INSERT INTO zoho_contract_metadata (id, connection_id, organization_id, module_api_name, metadata_json, validation_status, validation_errors_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(connection_id, module_api_name) DO UPDATE SET metadata_json = excluded.metadata_json, validation_status = excluded.validation_status, validation_errors_json = excluded.validation_errors_json, validated_at = CURRENT_TIMESTAMP`).bind(crypto.randomUUID(), connectionRow.id, user.organizationId, moduleName, JSON.stringify({ modules: modulesResponse, fields: fieldsResponse }), validationStatus, JSON.stringify(errors)).run();
+    }
+    return c.json({ status: validationStatus, module: moduleName, errors, fieldCount: fields.length, checkedAt: new Date().toISOString() }, errors.length ? 422 : 200);
+  } catch (error) {
+    return c.json({ error: error instanceof IntegrationError ? error.message : "Zoho CRM metadata validation failed" }, 502);
+  }
+});
+
+app.get("/api/integrations/zoho/outbox", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Organisation administration required" }, 403);
+  const rows = await c.env.DB.prepare(`SELECT id, app, action, entity_type, entity_id, idempotency_key, status, attempts, next_attempt_at, provider_reference, last_error, created_at, updated_at
+    FROM zoho_outbox_jobs WHERE organization_id = ? ORDER BY created_at DESC LIMIT 100`).bind(user.organizationId).all<Record<string, unknown>>();
+  return c.json({ results: rows.results.map((row) => ({ id: String(row.id), app: String(row.app), action: String(row.action), entityType: String(row.entity_type), entityId: String(row.entity_id), idempotencyKey: String(row.idempotency_key), status: String(row.status), attempts: Number(row.attempts ?? 0), nextAttemptAt: row.next_attempt_at, providerReference: row.provider_reference ?? null, lastError: row.last_error ?? null, createdAt: row.created_at, updatedAt: row.updated_at })) });
+});
+
+app.post("/api/integrations/zoho/outbox/:id/retry", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Organisation administration required" }, 403);
+  const job = await c.env.DB.prepare("SELECT id, status FROM zoho_outbox_jobs WHERE id = ? AND organization_id = ?").bind(c.req.param("id"), user.organizationId).first<{ id: string; status: string }>();
+  if (!job) return c.json({ error: "Zoho outbox job not found" }, 404);
+  if (!["failed", "unknown"].includes(job.status)) return c.json({ error: "Only failed or unknown jobs can be manually retried", status: job.status }, 409);
+  await c.env.DB.prepare("UPDATE zoho_outbox_jobs SET status = 'pending', next_attempt_at = CURRENT_TIMESTAMP, last_error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?").bind(job.id, user.organizationId).run();
+  try { await c.env.ZOHO_INTEGRATION_QUEUE?.send({ type: "zoho.outbox", jobId: job.id }); } catch { /* scheduled dispatcher will pick it up */ }
+  return c.json({ id: job.id, status: "pending" }, 202);
 });
 
 app.post("/api/campaigns/:id/integrations/zoho/social", async (c) => {
@@ -3453,11 +3604,9 @@ app.post("/api/campaigns/:id/integrations/zoho/social", async (c) => {
   const previous = await completedZohoEvent(c.env, user.organizationId, "social", "create_reviewable_social_draft", "campaign", String(campaign.id), idempotencyKey);
   if (previous) return c.json({ ok: true, status: "already_handed_off", providerReference: previous.providerReference, channels: social.channels, approvedAssetCount: approved.results.length });
   try {
-    const result = await new IntegrationContainer(c.env).zoho.sendSocialDraft(social, idempotencyKey);
-    await recordZohoIntegrationEvent(c.env, { id: crypto.randomUUID(), organizationId: user.organizationId, actorId: user.id, app: "social", action: "create_reviewable_social_draft", entityType: "campaign", entityId: String(campaign.id), idempotencyKey, status: "succeeded", providerReference: result.providerReference, metadata: { approvedAssetCount: approved.results.length, channels: social.channels, scheduled: Boolean(social.scheduleAt) } });
-    return c.json({ ok: true, status: "handoff_sent", providerReference: result.providerReference, channels: social.channels, approvedAssetCount: approved.results.length });
+    const job = await queueZohoDelivery(c.env, { organizationId: user.organizationId, actorId: user.id, app: "social", action: "create_reviewable_social_draft", entityType: "campaign", entityId: String(campaign.id), idempotencyKey, payload: social });
+    return c.json({ ok: true, status: job.created ? "queued" : job.status === "succeeded" ? "already_handed_off" : "already_queued", jobId: job.id, idempotencyKey, channels: social.channels, approvedAssetCount: approved.results.length }, job.created ? 202 : 200);
   } catch (error) {
-    await recordZohoIntegrationEvent(c.env, { id: crypto.randomUUID(), organizationId: user.organizationId, actorId: user.id, app: "social", action: "create_reviewable_social_draft", entityType: "campaign", entityId: String(campaign.id), idempotencyKey, status: "failed", metadata: { approvedAssetCount: approved.results.length }, errorMessage: error instanceof Error ? error.message : "Zoho Social handoff failed" });
     return c.json({ error: error instanceof IntegrationError ? error.message : "Zoho Social handoff failed" }, 503);
   }
 });
@@ -3473,11 +3622,9 @@ app.post("/api/campaigns/:id/integrations/zoho/crm", async (c) => {
   const previous = await completedZohoEvent(c.env, user.organizationId, "crm", "upsert_campaign", "campaign", String(campaign.id), idempotencyKey);
   if (previous) return c.json({ ok: true, status: "already_synced", providerReference: previous.providerReference });
   try {
-    const result = await new IntegrationContainer(c.env).zoho.syncCampaignToCrm(sync);
-    await recordZohoIntegrationEvent(c.env, { id: crypto.randomUUID(), organizationId: user.organizationId, actorId: user.id, app: "crm", action: "upsert_campaign", entityType: "campaign", entityId: String(campaign.id), idempotencyKey, status: "succeeded", providerReference: result.providerReference, metadata: { approvedAssetCount: sync.approvedAssetCount } });
-    return c.json({ ok: true, status: "synced", providerReference: result.providerReference });
+    const job = await queueZohoDelivery(c.env, { organizationId: user.organizationId, actorId: user.id, app: "crm", action: "upsert_campaign", entityType: "campaign", entityId: String(campaign.id), idempotencyKey, payload: sync });
+    return c.json({ ok: true, status: job.created ? "queued" : job.status === "succeeded" ? "already_synced" : "already_queued", jobId: job.id, idempotencyKey });
   } catch (error) {
-    await recordZohoIntegrationEvent(c.env, { id: crypto.randomUUID(), organizationId: user.organizationId, actorId: user.id, app: "crm", action: "upsert_campaign", entityType: "campaign", entityId: String(campaign.id), idempotencyKey, status: "failed", metadata: {}, errorMessage: error instanceof Error ? error.message : "Zoho CRM sync failed" });
     return c.json({ error: error instanceof IntegrationError ? error.message : "Zoho CRM sync failed" }, 503);
   }
 });
@@ -3493,11 +3640,9 @@ app.post("/api/rights/cases/:id/integrations/zoho/desk", async (c) => {
   const previous = await completedZohoEvent(c.env, user.organizationId, "desk", "create_rights_case_ticket", "takedown_request", desk.id, idempotencyKey);
   if (previous) return c.json({ ok: true, status: "already_handed_off", providerReference: previous.providerReference });
   try {
-    const result = await new IntegrationContainer(c.env).zoho.sendDeskCase(desk, idempotencyKey);
-    await recordZohoIntegrationEvent(c.env, { id: crypto.randomUUID(), organizationId: user.organizationId, actorId: user.id, app: "desk", action: "create_rights_case_ticket", entityType: "takedown_request", entityId: desk.id, idempotencyKey, status: "succeeded", providerReference: result.providerReference, metadata: { reason: desk.reason } });
-    return c.json({ ok: true, status: "handoff_sent", providerReference: result.providerReference });
+    const job = await queueZohoDelivery(c.env, { organizationId: user.organizationId, actorId: user.id, app: "desk", action: "create_rights_case_ticket", entityType: "takedown_request", entityId: desk.id, idempotencyKey, payload: desk });
+    return c.json({ ok: true, status: job.created ? "queued" : job.status === "succeeded" ? "already_handed_off" : "already_queued", jobId: job.id, idempotencyKey });
   } catch (error) {
-    await recordZohoIntegrationEvent(c.env, { id: crypto.randomUUID(), organizationId: user.organizationId, actorId: user.id, app: "desk", action: "create_rights_case_ticket", entityType: "takedown_request", entityId: desk.id, idempotencyKey, status: "failed", metadata: { reason: desk.reason }, errorMessage: error instanceof Error ? error.message : "Zoho Desk handoff failed" });
     return c.json({ error: error instanceof IntegrationError ? error.message : "Zoho Desk handoff failed" }, 503);
   }
 });
@@ -3645,6 +3790,7 @@ app.post("/api/rights/takedown", async (c) => {
   const dueAt = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString();
   const status = payload.mediationRequested ? "mediation" : "lodged";
   await c.env.DB.prepare(`INSERT INTO takedown_requests (id, organization_id, asset_id, requester_id, reason, summary, status, response_due_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, user.organizationId, asset.id, requesterId, payload.reason, payload.summary, status, dueAt).run();
+  await queueZohoDomainEventBestEffort(c.env, { organizationId: user.organizationId, actorId: user.id, app: "desk", action: "create_rights_case_ticket", entityType: "takedown_request", entityId: id, eventName: "rights.case.created", payload: { id, assetId: asset.id, assetTitle: asset.title, reason: payload.reason, summary: payload.summary, status, responseDueAt: dueAt, publicUrl: `${zohoPublicUrl(c, c.env)}/rights` } });
   if (payload.mediationRequested) await c.env.DB.prepare(`INSERT INTO mediation_sessions (id, takedown_request_id) VALUES (?, ?)`).bind(`med-${crypto.randomUUID()}`, id).run();
   await c.env.DB.prepare(`INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, metadata_json) VALUES (?, ?, ?, ?, ?, ?)`).bind(crypto.randomUUID(), requesterId, "rights_case_lodged", "takedown_request", id, JSON.stringify({ reason: payload.reason, mediationRequested: payload.mediationRequested })).run();
   await c.env.DB.prepare("INSERT INTO rights_case_events (id, organization_id, case_id, actor_id, event_type, payload_json) VALUES (?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), user.organizationId, id, requesterId, "lodged", JSON.stringify({ reason: payload.reason })).run();
@@ -3966,12 +4112,16 @@ app.onError((error, c) => {
   return c.json(validateContractResponse("error response", errorResponseSchema, body), validation ? 400 : 500);
 });
 
-type QueueMessage = R2EventMessage | PhotoEnrichmentJob;
+type QueueMessage = R2EventMessage | PhotoEnrichmentJob | ZohoOutboxJobMessage;
 
 function isPhotoEnrichmentJob(message: QueueMessage): message is PhotoEnrichmentJob {
   if (!("type" in message)) return false;
   const candidate = message as { type?: unknown; assetId?: unknown; operation?: unknown };
   return candidate.type === "photo.enrich" && typeof candidate.assetId === "string" && typeof candidate.operation === "string";
+}
+
+function isZohoOutboxJob(message: QueueMessage): message is ZohoOutboxJobMessage {
+  return "type" in message && (message as { type?: unknown }).type === "zoho.outbox" && typeof (message as { jobId?: unknown }).jobId === "string";
 }
 
 const worker: ExportedHandler<Bindings, QueueMessage> = {
@@ -3981,8 +4131,10 @@ const worker: ExportedHandler<Bindings, QueueMessage> = {
     try {
       await catchUpR2Replication(env, trace);
       const requeued = await retryQueuedPhotoJobs(photoPipeline(env));
+      const zohoJobs = await dispatchDueZohoOutbox(zohoOutboxBindings(env), 25);
       await runMaintenance(env);
       recordMetric(env, "photo_jobs_requeued", trace, requeued, ["cron"]);
+      recordMetric(env, "zoho_outbox_dispatched", trace, zohoJobs, ["cron"]);
     } catch (error) {
       logEvent("error", "r2.replication.failed", trace, {
         error: error instanceof Error ? error.message : "unknown-error",
@@ -3995,7 +4147,9 @@ const worker: ExportedHandler<Bindings, QueueMessage> = {
     for (const message of batch.messages) {
       const trace = traceContext(new Request(`https://internal/queue/${message.id}`));
       try {
-        if (isPhotoEnrichmentJob(message.body)) {
+        if (isZohoOutboxJob(message.body)) {
+          await dispatchZohoOutboxJob(zohoOutboxBindings(env), message.body.jobId);
+        } else if (isPhotoEnrichmentJob(message.body)) {
           await processPhotoJob(photoPipeline(env), message.body, trace);
         } else {
           await replicateR2Event(env, message.body, trace);
