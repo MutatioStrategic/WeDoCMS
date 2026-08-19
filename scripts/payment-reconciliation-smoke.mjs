@@ -8,4 +8,5 @@ const reconciliation = await fetch(`${baseUrl}/api/ops/reconciliation/payments`,
 if (!reconciliation.ok) throw new Error(`Payment reconciliation failed: ${reconciliation.status}`);
 const report = await reconciliation.json();
 if (typeof report.discrepancyCount !== "number") throw new Error("Reconciliation report has no discrepancy count");
+if (report.discrepancyCount !== 0) throw new Error(`Payment reconciliation found ${report.discrepancyCount} discrepancy(ies)`);
 console.log(JSON.stringify({ ok: true, discrepancyCount: report.discrepancyCount }, null, 2));

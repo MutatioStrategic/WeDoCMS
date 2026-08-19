@@ -13,7 +13,7 @@ $dumpPath = Join-Path $resolvedOutput "$DbName-$runId.sql"
 $manifestPath = Join-Path $resolvedOutput "$DbName-$runId.manifest.json"
 
 Write-Host "Exporting remote D1 database $DbName"
-& npx wrangler d1 export $DbName --remote --skip-confirmation --output $dumpPath
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "export-d1.ps1") -DbName $DbName -OutputPath $dumpPath -Remote
 if ($LASTEXITCODE -ne 0) { throw "D1 export failed" }
 
 $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $dumpPath).Hash.ToLowerInvariant()

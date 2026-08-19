@@ -70,6 +70,27 @@ paths:
         - name: status
           in: query
           schema: { type: string, enum: [published, needs_review, all], default: published }
+        - name: sort
+          in: query
+          schema: { type: string, enum: [relevance, newest, popular, random], default: relevance }
+        - name: orientation
+          in: query
+          schema: { type: string, enum: [all, landscape, portrait, square], default: all }
+        - name: usage
+          in: query
+          schema: { type: string, enum: [all, commercial, editorial], default: all }
+        - name: people
+          in: query
+          schema: { type: string, enum: [all, with_people, without_people], default: all }
+        - name: ai
+          in: query
+          schema: { type: string, enum: [all, ai_generated, not_ai_generated], default: all }
+        - name: exclude
+          in: query
+          schema: { type: string, maxLength: 240 }
+        - name: cursor
+          in: query
+          schema: { type: string, pattern: '^\\d+$' }
       responses:
         '200':
           description: Explainable search results
@@ -135,6 +156,242 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/lightboxes:
+    get:
+      operationId: listLightboxes
+      summary: List the current user's lightboxes
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Tenant-scoped lightboxes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/Lightbox' } }
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    post:
+      operationId: createLightbox
+      summary: Create a private lightbox
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 120 }
+                description: { type: string, maxLength: 500 }
+                visibility: { type: string, enum: [private, shared], default: private }
+              additionalProperties: false
+      responses:
+        '201':
+          description: Lightbox created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Lightbox' }
+        '409':
+          description: Duplicate lightbox name
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/lightboxes/{id}/assets:
+    post:
+      operationId: saveAssetToLightbox
+      summary: Save a published asset to a lightbox
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [assetId]
+              properties:
+                assetId: { type: string }
+              additionalProperties: false
+      responses:
+        '200': { description: Asset saved (idempotent) }
+        '404':
+          description: Lightbox or published asset not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/lightboxes/{id}/assets/{assetId}:
+    delete:
+      operationId: removeAssetFromLightbox
+      summary: Remove an asset from a lightbox
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: assetId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Asset removed }
+  /api/lightboxes/{id}:
+    delete:
+      operationId: deleteLightbox
+      summary: Delete an owned lightbox
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Lightbox deleted }
+        '404':
+          description: Lightbox not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/lightboxes/{id}/share-link:
+    post:
+      operationId: createLightboxShareLink
+      summary: Create or rotate a public lightbox share link
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '201': { description: Share link created }
+        '404': { description: Lightbox not found }
+  /api/lightboxes/{id}/members:
+    post:
+      operationId: addLightboxMember
+      summary: Add an organization member as viewer or editor
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '201': { description: Member added }
+        '422': { description: Member is outside the organization }
+  /api/lightboxes/shared/{token}:
+    get:
+      operationId: viewSharedLightbox
+      summary: View a published shared lightbox without authentication
+      parameters:
+        - { name: token, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Shared lightbox and published assets }
+        '404': { description: Shared lightbox not found }
+  /api/search/visual:
+    post:
+      operationId: visualSearch
+      summary: Find visually related published photography from an uploaded image
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image]
+              properties:
+                image: { type: string, format: binary }
+      responses:
+        '200': { description: Related assets returned }
+        '413': { description: Image exceeds 10 MB limit }
+        '503': { description: Visual search is not configured }
+  /api/discovery:
+    get:
+      operationId: getDiscovery
+      summary: Return privacy-thresholded trends and optional personalized discovery
+      responses:
+        '200':
+          description: Public trends plus tenant-scoped saved searches and recommendations when authenticated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [trending, savedSearches, recommendations, personalized]
+                properties:
+                  trending:
+                    type: array
+                    items:
+                      type: object
+                      required: [query, searchCount]
+                      properties: { query: { type: string }, searchCount: { type: integer, minimum: 3 } }
+                  savedSearches: { type: array, items: { $ref: '#/components/schemas/SavedSearch' } }
+                  recommendations:
+                    type: array
+                    items:
+                      type: object
+                      required: [asset, reason]
+                      properties: { asset: { $ref: '#/components/schemas/Asset' }, reason: { type: string } }
+                  personalized: { type: boolean }
+  /api/saved-searches:
+    post:
+      operationId: createSavedSearch
+      summary: Save a tenant-scoped search and optional in-app alert cadence
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SavedSearchInput' }
+      responses:
+        '201':
+          description: Saved search created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SavedSearch' }
+        '409':
+          description: Duplicate saved-search name
+  /api/saved-searches/{id}:
+    patch:
+      operationId: updateSavedSearch
+      summary: Update an owned saved search or alert cadence
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SavedSearchInput' }
+      responses:
+        '200':
+          description: Saved search updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SavedSearch' }
+    delete:
+      operationId: deleteSavedSearch
+      summary: Delete an owned saved search
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Saved search deleted }
+        '404': { description: Saved search not found }
+  /api/ops/readiness:
+    get:
+      operationId: getProductionReadiness
+      summary: Return the admin-only fail-closed production readiness gate
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Readiness checks without secret values
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ready, checkedAt, checks]
+                properties:
+                  ready: { type: boolean }
+                  checkedAt: { type: string, format: date-time }
+                  checks:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, ready, detail]
+                      properties: { id: { type: string }, ready: { type: boolean }, detail: { type: string } }
+        '403': { description: Admin access required }
   /api/governance/assets/{id}/action:
     post:
       operationId: runGovernanceAction
@@ -382,6 +639,36 @@ components:
         user: { $ref: '#/components/schemas/SessionUser' }
         csrfToken: { type: string }
       additionalProperties: false
+    SavedSearchInput:
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        query: { type: string, minLength: 2, maxLength: 240 }
+        mediaKind: { type: string, enum: [all, image, video], default: all }
+        alertFrequency: { type: string, enum: [none, daily, weekly], default: none }
+      additionalProperties: false
+    SavedSearch:
+      allOf:
+        - $ref: '#/components/schemas/SavedSearchInput'
+        - type: object
+          required: [id, name, query, mediaKind, alertFrequency, createdAt, updatedAt]
+          properties:
+            id: { type: string }
+            createdAt: { type: string, format: date-time }
+            updatedAt: { type: string, format: date-time }
+    Lightbox:
+      type: object
+      required: [id, name, description, visibility, assetIds, assetCount, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        visibility: { type: string, enum: [private, shared] }
+        assetIds: { type: array, items: { type: string } }
+        assetCount: { type: integer, minimum: 0 }
+        createdAt: { type: string }
+        updatedAt: { type: string }
+      additionalProperties: false
     ExchangeRequest:
       type: object
       properties:
@@ -546,6 +833,15 @@ components:
         currency: { type: string, enum: [ZAR] }
         monetizationModel: { type: string, enum: [membership, individual_license, custom_quote] }
         allowed: { type: boolean }
-        checks: { type: array, items: { type: object, required: [label, passed, detail], additionalProperties: false } }
+        checks:
+          type: array
+          items:
+            type: object
+            required: [label, passed, detail]
+            properties:
+              label: { type: string }
+              passed: { type: boolean }
+              detail: { type: string }
+            additionalProperties: false
         blockingReasons: { type: array, items: { type: string } }
       additionalProperties: true

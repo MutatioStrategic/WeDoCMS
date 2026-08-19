@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000" role="img" aria-labelledby="title desc">
+  <title id="title">How AI search helps a buyer find the right photo faster</title>
+  <desc id="desc">A child-friendly diagram showing a seller uploading a photo, AI creating a meaning card, a human checking it, and a vector database matching the card to a buyer's plain-language search.</desc>
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fffaf2"/>
+      <stop offset="1" stop-color="#f4eee3"/>
+    </linearGradient>
+    <linearGradient id="violetCard" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#eee8ff"/>
+      <stop offset="1" stop-color="#dcd1ff"/>
+    </linearGradient>
+    <linearGradient id="blueCard" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e6f3ff"/>
+      <stop offset="1" stop-color="#cde7fb"/>
+    </linearGradient>
+    <linearGradient id="greenCard" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e9f7ed"/>
+      <stop offset="1" stop-color="#ccebd6"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#2d2438" flood-opacity="0.12"/>
+    </filter>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#6d5a78"/>
+    </marker>
+    <marker id="softArrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#a08eb0"/>
+    </marker>
+    <style>
+      .ink { fill: #241d2b; font-family: Arial, Helvetica, sans-serif; }
+      .muted { fill: #6e6372; font-family: Arial, Helvetica, sans-serif; }
+      .eyebrow { fill: #805b87; font: 700 16px Arial, Helvetica, sans-serif; letter-spacing: 2.8px; }
+      .title { fill: #241d2b; font: 700 42px Georgia, serif; }
+      .subtitle { fill: #6e6372; font: 400 20px Arial, Helvetica, sans-serif; }
+      .laneTitle { fill: #241d2b; font: 700 22px Arial, Helvetica, sans-serif; }
+      .laneNote { fill: #756a79; font: 400 16px Arial, Helvetica, sans-serif; }
+      .nodeTitle { fill: #241d2b; font: 700 20px Arial, Helvetica, sans-serif; }
+      .nodeText { fill: #5f5466; font: 400 16px Arial, Helvetica, sans-serif; }
+      .small { fill: #715f74; font: 700 13px Arial, Helvetica, sans-serif; letter-spacing: 1.2px; }
+      .analogy { fill: #604c6c; font: 700 17px Arial, Helvetica, sans-serif; }
+      .arrowText { fill: #78677d; font: 700 13px Arial, Helvetica, sans-serif; letter-spacing: 1px; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="1000" fill="url(#paper)"/>
+  <circle cx="1480" cy="80" r="180" fill="#efe3f0" opacity="0.55"/>
+  <circle cx="100" cy="940" r="220" fill="#e2f0e7" opacity="0.5"/>
+
+  <text x="90" y="72" class="eyebrow">VELD ARCHIVE · AI SEARCH EXPLAINED</text>
+  <text x="90" y="126" class="title">Find the right photo faster.</text>
+  <text x="90" y="164" class="subtitle">The system turns pictures and buyer words into the same kind of “meaning card”.</text>
+
+  <rect x="90" y="204" width="1420" height="118" rx="28" fill="#fff" stroke="#e5d9e4" filter="url(#shadow)"/>
+  <circle cx="146" cy="263" r="30" fill="#f1e5f3"/>
+  <path d="M130 269 l11 -12 10 9 8 -7 14 17 h-43z" fill="none" stroke="#805b87" stroke-width="3" stroke-linejoin="round"/>
+  <circle cx="158" cy="248" r="4" fill="#805b87"/>
+  <text x="200" y="251" class="analogy">Think of a photo like a book.</text>
+  <text x="200" y="280" class="nodeText">The separate vector database is like a shelf of tiny cards that say what each book is about.</text>
+  <rect x="1120" y="235" width="320" height="56" rx="28" fill="#f5eff8"/>
+  <text x="1280" y="270" text-anchor="middle" class="analogy">Same meaning → quicker match</text>
+
+  <rect x="90" y="366" width="1420" height="264" rx="30" fill="#fbf4e9" stroke="#eadbc7"/>
+  <text x="124" y="410" class="laneTitle">1. Onboard the photo</text>
+  <text x="124" y="438" class="laneNote">A seller gives the system a photo, like putting a new book into the library.</text>
+
+  <g filter="url(#shadow)">
+    <rect x="124" y="474" width="230" height="112" rx="20" fill="#f7e5df" stroke="#e9c6ba"/>
+    <rect x="388" y="474" width="250" height="112" rx="20" fill="#e9f3f9" stroke="#c8dfed"/>
+    <rect x="672" y="474" width="250" height="112" rx="20" fill="url(#violetCard)" stroke="#cfc0f1"/>
+    <rect x="956" y="474" width="230" height="112" rx="20" fill="url(#greenCard)" stroke="#bbddc8"/>
+    <rect x="1220" y="458" width="250" height="144" rx="22" fill="#fff" stroke="#bba7d1" stroke-width="3"/>
+  </g>
+
+  <text x="148" y="510" class="small">SELLER</text>
+  <text x="148" y="537" class="nodeTitle">Upload a photo</text>
+  <text x="148" y="562" class="nodeText">A beach, a family,</text>
+  <text x="148" y="582" class="nodeText">a place, a story.</text>
+
+  <text x="412" y="510" class="small">SAFE STORAGE</text>
+  <text x="412" y="537" class="nodeTitle">Keep the original</text>
+  <text x="412" y="562" class="nodeText">Private original +</text>
+  <text x="412" y="582" class="nodeText">shareable preview.</text>
+
+  <text x="696" y="510" class="small">AI PHOTO READER</text>
+  <text x="696" y="537" class="nodeTitle">Make suggestions</text>
+  <text x="696" y="562" class="nodeText">“beach”, “family”,</text>
+  <text x="696" y="582" class="nodeText">“warm light”.</text>
+
+  <text x="980" y="510" class="small">HUMAN CHECK</text>
+  <text x="980" y="537" class="nodeTitle">Check the facts</text>
+  <text x="980" y="562" class="nodeText">A person corrects</text>
+  <text x="980" y="582" class="nodeText">the AI before publish.</text>
+
+  <text x="1245" y="490" class="small">MEANING CARD</text>
+  <text x="1245" y="520" class="nodeTitle">Ready for the shelf</text>
+  <text x="1245" y="548" class="nodeText">Photo + words + place</text>
+  <text x="1245" y="572" class="nodeText">+ rights + meaning.</text>
+
+  <path d="M354 530 H382" fill="none" stroke="#6d5a78" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M638 530 H666" fill="none" stroke="#6d5a78" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M922 530 H950" fill="none" stroke="#6d5a78" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M1186 530 H1214" fill="none" stroke="#6d5a78" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <rect x="90" y="672" width="1420" height="240" rx="30" fill="#eef6fb" stroke="#d0e4ef"/>
+  <text x="124" y="716" class="laneTitle">2. Help the buyer find it</text>
+  <text x="124" y="744" class="laneNote">The buyer does not need to know the exact title or tag. They can simply describe what they need.</text>
+
+  <g filter="url(#shadow)">
+    <rect x="124" y="782" width="290" height="92" rx="20" fill="#fff" stroke="#c8dfed"/>
+    <rect x="484" y="782" width="290" height="92" rx="20" fill="#fff" stroke="#c8dfed"/>
+    <rect x="844" y="760" width="300" height="136" rx="22" fill="#eee8ff" stroke="#cfc0f1" stroke-width="3"/>
+    <rect x="1214" y="782" width="256" height="92" rx="20" fill="url(#greenCard)" stroke="#bbddc8"/>
+  </g>
+
+  <text x="148" y="816" class="small">BUYER</text>
+  <text x="148" y="843" class="nodeTitle">“I need a warm</text>
+  <text x="148" y="866" class="nodeText">beach family photo.”</text>
+
+  <text x="508" y="816" class="small">AI SEARCH HELPER</text>
+  <text x="508" y="843" class="nodeTitle">Understand the idea</text>
+  <text x="508" y="866" class="nodeText">Words become a meaning card.</text>
+
+  <text x="868" y="795" class="small">VECTOR DATABASE</text>
+  <text x="868" y="826" class="nodeTitle">Look along the meaning shelf</text>
+  <text x="868" y="853" class="nodeText">It finds cards that are close in meaning,</text>
+  <text x="868" y="876" class="nodeText">even when the words are not identical.</text>
+
+  <text x="1238" y="816" class="small">RESULT</text>
+  <text x="1238" y="843" class="nodeTitle">Best matches first</text>
+  <text x="1238" y="866" class="nodeText">Preview, facts and rights.</text>
+
+  <path d="M414 828 H478" fill="none" stroke="#6d5a78" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M774 828 H838" fill="none" stroke="#6d5a78" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M1144 828 H1208" fill="none" stroke="#6d5a78" stroke-width="3" marker-end="url(#arrow)"/>
+  <text x="444" y="808" text-anchor="middle" class="arrowText">TRANSLATE</text>
+  <text x="804" y="808" text-anchor="middle" class="arrowText">MATCH</text>
+  <text x="1176" y="808" text-anchor="middle" class="arrowText">SHOW</text>
+
+  <path d="M1345 602 C1345 650 995 652 995 752" fill="none" stroke="#a08eb0" stroke-width="3" stroke-dasharray="8 8" marker-end="url(#softArrow)"/>
+  <rect x="1076" y="646" width="270" height="34" rx="17" fill="#fff" stroke="#e0d6e4"/>
+  <text x="1211" y="668" text-anchor="middle" class="arrowText">THE CARD IS ON THE SHELF</text>
+
+  <text x="90" y="946" class="muted" style="font-size:15px">The original stays protected. AI speeds up discovery; human review keeps the published facts trustworthy.</text>
+  <rect x="90" y="962" width="1420" height="26" rx="13" fill="#f1e9f3"/>
+  <text x="800" y="980" text-anchor="middle" class="small">CLOUDFLARE WORKER  ·  R2 MEDIA  ·  D1 FACTS  ·  WORKERS AI  ·  VECTORIZE SEARCH</text>
+</svg>

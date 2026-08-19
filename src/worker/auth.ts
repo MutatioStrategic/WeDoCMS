@@ -1,12 +1,24 @@
 import { z } from "zod";
+import { jwtVerify, createRemoteJWKSet } from "jose";
 
 export type AuthBindings = {
   DB: D1Database;
   APP_ENV?: string;
   SESSION_SECRET?: string;
+  DEMO_AUTH_ENABLED?: string;
   AUTH_JWT_SECRET?: string;
+  AUTH_JWKS_URL?: string;
   AUTH_ISSUER?: string;
   AUTH_AUDIENCE?: string;
+  AUTH_ROLES_CLAIM?: string;
+  AUTH_USERINFO_URL?: string;
+  AUTH_PROVIDER?: "auth0" | "supabase" | "both" | string;
+  SUPABASE_URL?: string;
+  SUPABASE_JWT_SECRET?: string;
+  SUPABASE_JWKS_URL?: string;
+  SUPABASE_ISSUER?: string;
+  SUPABASE_AUDIENCE?: string;
+  SUPABASE_ROLES_CLAIM?: string;
   AUTH_COOKIE_DOMAIN?: string;
 };
 
@@ -43,12 +55,30 @@ const jwtClaimsSchema = z.object({
   name: z.string().trim().min(1).max(180).optional(),
   org_id: z.string().min(1).max(120).optional(),
   org_name: z.string().trim().min(1).max(180).optional(),
-  role: z.enum(["buyer", "contributor", "editor", "admin"]).optional(),
+  role: z.string().trim().min(1).max(80).optional(),
+  roles: z.array(z.string().trim().min(1).max(80)).max(50).optional(),
   iss: z.string().optional(),
   aud: z.union([z.string(), z.array(z.string())]).optional(),
   exp: z.number().optional(),
   nbf: z.number().optional(),
-});
+  email_verified: z.boolean().optional(),
+}).passthrough();
+
+const applicationRoles = ["buyer", "contributor", "editor", "admin"] as const;
+export type ApplicationRole = (typeof applicationRoles)[number];
+type JwtClaims = z.infer<typeof jwtClaimsSchema>;
+
+export type ExternalIdentity = {
+  provider: "auth0" | "supabase";
+  claims: JwtClaims;
+};
+
+const auth0UserInfoSchema = z.object({
+  sub: z.string().min(1).max(200),
+  email: z.string().email().max(320).optional(),
+  email_verified: z.boolean().optional(),
+  name: z.string().trim().min(1).max(180).optional(),
+}).passthrough();
 
 const utf8 = (value: string): Uint8Array<ArrayBuffer> => new TextEncoder().encode(value) as Uint8Array<ArrayBuffer>;
 
@@ -56,12 +86,6 @@ function base64UrlEncode(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-}
-
-function base64UrlDecode(value: string): Uint8Array<ArrayBuffer> {
-  const normalized = value.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - value.length % 4) % 4);
-  const binary = atob(normalized);
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0)) as Uint8Array<ArrayBuffer>;
 }
 
 async function hmac(secret: string, value: string): Promise<Uint8Array<ArrayBuffer>> {
@@ -111,8 +135,9 @@ export function responseWithoutSession(response: Response, env: AuthBindings): R
 }
 
 function requiredSecret(env: AuthBindings): string {
-  if (!env.SESSION_SECRET || env.SESSION_SECRET.length < 32) throw new Error("SESSION_SECRET must be configured with at least 32 characters");
-  return env.SESSION_SECRET;
+  if (env.SESSION_SECRET && env.SESSION_SECRET.length >= 32) return env.SESSION_SECRET;
+  if (String(env.DEMO_AUTH_ENABLED) === "true") return "veld-archive-demo-session-secret-replace-before-production-use";
+  throw new Error("SESSION_SECRET must be configured with at least 32 characters");
 }
 
 export async function createSession(env: AuthBindings, userId: string, organizationId: string): Promise<{ token: string; csrfToken: string; sessionId: string; expiresAt: string }> {
@@ -173,25 +198,94 @@ export function csrfValid(request: Request, user: RequestUser): boolean {
   return timingSafeEqual(request.headers.get("X-CSRF-Token") ?? "", user.csrfToken);
 }
 
-export async function verifyExternalJwt(env: AuthBindings, token: string): Promise<z.infer<typeof jwtClaimsSchema> | null> {
-  if (!env.AUTH_JWT_SECRET) return null;
-  const parts = token.split(".");
-  if (parts.length !== 3) return null;
-  let header: { alg?: string; typ?: string };
-  let claims: z.infer<typeof jwtClaimsSchema>;
+export async function verifyExternalJwt(env: AuthBindings, token: string): Promise<JwtClaims | null> {
+  const identity = await verifyExternalJwtWithProvider(env, token);
+  return identity?.claims ?? null;
+}
+
+function providerEnabled(env: AuthBindings, provider: "auth0" | "supabase"): boolean {
+  const configured = String(env.AUTH_PROVIDER ?? "both").toLowerCase();
+  return configured === "both" || configured === provider || configured === "";
+}
+
+function supabaseProfile(env: AuthBindings) {
+  const baseUrl = env.SUPABASE_URL?.replace(/\/$/, "");
+  return {
+    secret: env.SUPABASE_JWT_SECRET,
+    issuer: env.SUPABASE_ISSUER ?? (baseUrl ? `${baseUrl}/auth/v1` : undefined),
+    jwksUrl: env.SUPABASE_JWKS_URL ?? (baseUrl ? `${baseUrl}/auth/v1/.well-known/jwks.json` : undefined),
+    audience: env.SUPABASE_AUDIENCE ?? "authenticated",
+    rolesClaim: env.SUPABASE_ROLES_CLAIM,
+  };
+}
+
+async function verifyJoseToken(token: string, profile: { secret?: string; jwksUrl?: string; issuer?: string; audience?: string }, algorithms: string[]): Promise<JwtClaims | null> {
   try {
-    header = JSON.parse(new TextDecoder().decode(base64UrlDecode(parts[0]))) as { alg?: string; typ?: string };
-    claims = jwtClaimsSchema.parse(JSON.parse(new TextDecoder().decode(base64UrlDecode(parts[1]))));
-  } catch { return null; }
-  if (header.alg !== "HS256") return null;
-  const expected = base64UrlEncode(await hmac(env.AUTH_JWT_SECRET, `${parts[0]}.${parts[1]}`));
-  if (!timingSafeEqual(expected, parts[2])) return null;
-  const now = Math.floor(Date.now() / 1000);
-  if (claims.exp !== undefined && claims.exp <= now) return null;
-  if (claims.nbf !== undefined && claims.nbf > now) return null;
-  if (env.AUTH_ISSUER && claims.iss !== env.AUTH_ISSUER) return null;
-  if (env.AUTH_AUDIENCE && !(Array.isArray(claims.aud) ? claims.aud.includes(env.AUTH_AUDIENCE) : claims.aud === env.AUTH_AUDIENCE)) return null;
-  return claims;
+    const key = profile.secret
+      ? new TextEncoder().encode(profile.secret)
+      : profile.jwksUrl
+        ? createRemoteJWKSet(new URL(profile.jwksUrl))
+        : null;
+    if (!key) return null;
+    const result = await jwtVerify(token, key, {
+      algorithms,
+      ...(profile.issuer ? { issuer: profile.issuer } : {}),
+      ...(profile.audience ? { audience: profile.audience } : {}),
+    });
+    return jwtClaimsSchema.parse(result.payload);
+  } catch {
+    return null;
+  }
+}
+
+export async function verifyExternalJwtWithProvider(env: AuthBindings, token: string): Promise<ExternalIdentity | null> {
+  if (!token || token.split(".").length !== 3) return null;
+  const auth0Configured = Boolean(env.AUTH_JWT_SECRET || env.AUTH_JWKS_URL && env.AUTH_ISSUER && env.AUTH_AUDIENCE);
+  if (providerEnabled(env, "auth0") && auth0Configured) {
+    const auth0Claims = await verifyJoseToken(token, {
+      secret: env.AUTH_JWT_SECRET,
+      jwksUrl: env.AUTH_JWKS_URL,
+      issuer: env.AUTH_ISSUER,
+      audience: env.AUTH_AUDIENCE,
+    }, env.AUTH_JWT_SECRET ? ["HS256"] : ["RS256", "ES256"]);
+    if (auth0Claims) return { provider: "auth0", claims: auth0Claims };
+  }
+  if (providerEnabled(env, "supabase")) {
+    const profile = supabaseProfile(env);
+    const supabaseClaims = await verifyJoseToken(token, profile, profile.secret ? ["HS256"] : ["RS256", "ES256"]);
+    if (supabaseClaims) return { provider: "supabase", claims: supabaseClaims };
+  }
+  return null;
+}
+
+export async function enrichExternalIdentity(env: AuthBindings, token: string, identity: ExternalIdentity): Promise<ExternalIdentity | null> {
+  if (identity.provider !== "auth0") return identity;
+  const userInfoUrl = env.AUTH_USERINFO_URL ?? (env.AUTH_ISSUER ? new URL("userinfo", env.AUTH_ISSUER).toString() : undefined);
+  if (!userInfoUrl) return identity;
+  try {
+    const response = await fetch(userInfoUrl, { headers: { Accept: "application/json", Authorization: `Bearer ${token}` } });
+    if (!response.ok) return null;
+    const profile = auth0UserInfoSchema.parse(await response.json());
+    if (profile.sub !== identity.claims.sub) return null;
+    return {
+      ...identity,
+      claims: {
+        ...identity.claims,
+        email: profile.email ?? identity.claims.email,
+        email_verified: profile.email_verified ?? identity.claims.email_verified,
+        name: profile.name ?? identity.claims.name,
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function applicationRoleFromClaims(claims: JwtClaims, env: AuthBindings): ApplicationRole {
+  const configuredClaim = env.AUTH_ROLES_CLAIM ? claims[env.AUTH_ROLES_CLAIM] : env.SUPABASE_ROLES_CLAIM ? claims[env.SUPABASE_ROLES_CLAIM] : undefined;
+  const configuredRoles = Array.isArray(configuredClaim) ? configuredClaim : typeof configuredClaim === "string" ? [configuredClaim] : [];
+  const candidates = [claims.role, ...(claims.roles ?? []), ...configuredRoles];
+  return candidates.find((role): role is ApplicationRole => applicationRoles.includes(role as ApplicationRole)) ?? "buyer";
 }
 
 export { clearSessionCookie };

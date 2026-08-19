@@ -6,7 +6,10 @@ The Worker now fails closed for identity and storage operations. Before a produc
 
 ```text
 SESSION_SECRET                 # >= 32 random characters; rotate by overlapping deployments
-AUTH_JWT_SECRET                # HS256 verification secret for the configured identity provider
+AUTH_JWKS_URL                  # Auth0/.well-known/jwks.json URL for RS256 verification
+AUTH_ISSUER                    # expected issuer, including trailing slash
+AUTH_AUDIENCE                  # expected API audience
+AUTH_ROLES_CLAIM               # optional namespaced claim containing application roles
 PAYMENT_WEBHOOK_SECRET         # provider webhook signing secret
 TURNSTILE_SECRET               # required for high-risk public actions
 MEDIA_SCANNER_SECRET           # only when MEDIA_SCANNER_URL is configured
@@ -19,6 +22,18 @@ AUDIT_SIGNING_PUBLIC_JWK
 ## CORS and browser policy
 
 Set `ALLOWED_ORIGINS` to exact HTTPS origins only. Do not use `*` with authenticated requests. The Worker emits CSP, HSTS, frame, MIME, referrer, permissions, and cross-origin isolation headers.
+
+## Auth0 bootstrap values
+
+The deployed production Worker is `https://veld-archive-api-production.blewisorlando.workers.dev` and the SPA origin is `https://veld-archive.pages.dev`. Create an Auth0 SPA application and API with these values before adding the Worker secrets:
+
+- Allowed callback URL: `https://veld-archive.pages.dev`
+- Allowed logout URL: `https://veld-archive.pages.dev`
+- Allowed web origin: `https://veld-archive.pages.dev`
+- API audience: `https://veld-archive-api-production.blewisorlando.workers.dev`
+- Worker values: `AUTH_JWKS_URL=https://<tenant>/.well-known/jwks.json`, `AUTH_ISSUER=https://<tenant>/`, and `AUTH_AUDIENCE` equal to the API audience.
+
+The Auth0 tenant/application cannot be created from the current Cloudflare session; it requires an authenticated Auth0 Management API session or dashboard administrator access.
 
 ## Cloudflare WAF/API controls
 
@@ -45,3 +60,9 @@ Payment providers must sign `/api/webhooks/payments`. The endpoint deduplicates 
 - Run `npm run test:local-smoke` against a local Worker with a non-production secret.
 - Restore a recent D1 export into an isolated database, run `PRAGMA integrity_check`, verify row counts, and exercise the replacement Worker before promoting bindings.
 - Verify R2 replication manifests, queue dead-letter replay, audit signature verification, and payment reconciliation during every release candidate.
+
+## Production readiness gate
+
+An authenticated administrator can call `GET /api/ops/readiness`. The response is deliberately fail-closed and reports only booleans and remediation text, never secret values. It requires live production identity, media/scanning, Stream, payment, KYC, audit-key, AI/Vectorize/queue, D1, primary R2, DR R2, and backup R2 configuration. It also blocks when demo rows remain or migration `0015_personalized_discovery.sql` is absent.
+
+Set `EDGE_CONTROLS_ATTESTED_AT`, `KEY_ROTATION_ATTESTED_AT`, and `BACKUP_RESTORE_ATTESTED_AT` only after the corresponding live drill passes, using an ISO-8601 date/time. These attestations do not replace evidence in Cloudflare/provider logs; they prevent an unverified external control from being silently treated as complete by the application release gate.
