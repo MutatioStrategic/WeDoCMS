@@ -11,6 +11,7 @@ import { StakeholderDiagrams } from "./stakeholder-diagrams";
 import { WordPressIntegrationPanel } from "./wordpress-integration";
 import type { BrandKit, CampaignBrief, CampaignPlatform, CampaignRecommendation, CampaignStage } from "./campaign-intelligence";
 import { cropPresets, defaultEditRecipe, derivativeForPreset, fitCrop, safeZonePercent, type CropPreset, type EditRecipe } from "./campaign-editor";
+import { Icon, type IconName } from "./ui";
 
 declare global {
   interface Window {
@@ -30,6 +31,13 @@ function TurnstileChallenge({ onToken }: { onToken: (token: string) => void }) {
 }
 
 type View = "explore" | "search" | "campaigns" | "contributors" | "contributor" | "buyer" | "review" | "governance" | "community" | "account" | "studio" | "rights" | "stakeholders" | "wordpress";
+type SidebarSection = { label: string; items: Array<{ view: View; label: string; icon: IconName; badge?: string }> };
+const sidebarSections: SidebarSection[] = [
+  { label: "Discover", items: [{ view: "explore", label: "Explore archive", icon: "compass" }, { view: "search", label: "Search workbench", icon: "search" }, { view: "community", label: "Community", icon: "users" }] },
+  { label: "Workspaces", items: [{ view: "campaigns", label: "Campaign intelligence", icon: "sparkles", badge: "3A" }, { view: "studio", label: "Media studio", icon: "image" }, { view: "contributors", label: "Creator marketplace", icon: "briefcase" }, { view: "buyer", label: "Buyer ROI", icon: "grid" }] },
+  { label: "Operations", items: [{ view: "contributor", label: "Contributor insights", icon: "layout" }, { view: "review", label: "Editorial review", icon: "shield" }, { view: "governance", label: "Governance", icon: "workflow" }, { view: "wordpress", label: "WordPress", icon: "settings" }] },
+  { label: "Reference", items: [{ view: "rights", label: "Rights guide", icon: "shield" }, { view: "stakeholders", label: "System overview", icon: "layout" }, { view: "account", label: "Account", icon: "settings" }] },
+];
 type SessionUser = { id: string; email: string; displayName: string; role: string; organizationId: string; organizationName: string };
 type AppNotification = { id: string; type: string; title: string; body: string; resource_type?: string | null; resource_id?: string | null; read_at?: string | null; created_at: string };
 type Auth0Bridge = Pick<Auth0ContextInterface, "isAuthenticated" | "isLoading" | "getAccessTokenSilently" | "loginWithRedirect" | "logout">;
@@ -68,6 +76,8 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
   const [discovery, setDiscovery] = useState<DiscoveryResponse>(emptyDiscovery);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [devRole, setDevRole] = useState<"contributor" | "admin">("contributor");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [supabaseAuthOpen, setSupabaseAuthOpen] = useState(false);
   const [supabaseAuthMode, setSupabaseAuthMode] = useState<"signin" | "signup">("signin");
   const [supabaseEmail, setSupabaseEmail] = useState("");
@@ -305,10 +315,14 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
 
   const verifiedCount = useMemo(() => assets.filter((asset) => asset.humanVerified).length, [assets]);
   function openAsset(asset: Asset) { setSelectedAsset(asset); trackEvent({ type: "asset_view", assetId: asset.id }); }
+  const currentViewLabel = sidebarSections.flatMap((section) => section.items).find((item) => item.view === view)?.label ?? "Explore archive";
 
-  return <div className="app-shell">
+  return <div className={`app-shell better-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
+    <BetterSidebar view={view} navigate={navigate} collapsed={sidebarCollapsed} mobileOpen={mobileSidebarOpen} onToggleCollapse={() => setSidebarCollapsed((value) => !value)} onCloseMobile={() => setMobileSidebarOpen(false)} />
     <header className="topbar">
+      <button type="button" className="better-mobile-menu" aria-label="Open navigation" onClick={() => setMobileSidebarOpen(true)}><Icon name="menu" /></button>
       <button className="wordmark wordmark-button" onClick={() => navigate("explore")} aria-label="Veld Archive home"><span className="mark">V</span><span>veld<span className="muted">archive</span></span></button>
+      <div className="better-context"><span>VELD ARCHIVE / WORKSPACE</span><strong>{currentViewLabel}</strong></div>
       <nav className="nav-links" aria-label="Primary navigation"><button onClick={() => navigate("explore")}>Explore</button><button className="stakeholder-nav-link" onClick={() => navigate("stakeholders")}>System overview <span>NEW</span></button><button className="rights-nav-link" onClick={() => navigate("rights")}>Rights guide <span>NEW</span></button><button className="campaign-nav" onClick={() => navigate("campaigns")}>Campaigns <span>3A</span></button><button onClick={() => navigate("contributors")}>Creators</button><button onClick={() => navigate("community")}>Community & collections</button><button className="studio-nav-link" onClick={() => navigate("studio")}>Media studio <span>NEW</span></button><button onClick={() => navigate("wordpress")}>WordPress <span>NEW</span></button><button onClick={() => navigate("contributor")}>Contributor insights</button><button onClick={() => navigate("buyer")}>Buyer ROI</button><button onClick={() => navigate("review")}>Editorial review</button><button className="governance-link" onClick={() => navigate("governance")}>Governance <span>NEW</span></button></nav>
       <div className="top-actions">{import.meta.env.DEV && !auth0 && !supabase && <label className="role-switcher">Local role <select value={devRole} onChange={(event) => setDevRole(event.target.value as "contributor" | "admin")}><option value="contributor">Contributor</option><option value="admin">Admin</option></select></label>}{!sessionUser && <a className="dark-button subscription-button" href={paystackSubscriptionUrl} target="_blank" rel="noopener noreferrer" data-paystack-plan={paystackSubscriptionPlanCode}>Subscribe · R1 200/month</a>}<button className="ghost-button" onClick={async () => { if (auth0) { await auth0.loginWithRedirect({ authorizationParams: { ...(auth0Audience ? { audience: auth0Audience } : {}), ...(auth0Organization ? { organization: auth0Organization } : {}) } }); return; } if (supabase) { setSupabaseAuthOpen(true); return; } if (!import.meta.env.DEV) { setNotice("An external identity provider is not configured for this deployment."); return; } const response = await fetch("/api/auth/dev-login", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role: devRole }) }); if (!response.ok) { setNotice("Local authentication is unavailable; apply the identity migration first."); return; } const data = await response.json() as { user: SessionUser; csrfToken: string }; setSessionUser(data.user); setCsrfToken(data.csrfToken); setNotice(`Signed in to ${data.user.organizationName}.`); }}>{auth0 ? "Sign in with Auth0" : supabase ? "Sign in with Supabase" : "Sign in"}</button>{sessionUser && <><button className="ghost-button" onClick={() => navigate("account")}>Account</button><button className="ghost-button" onClick={() => { void api("/api/auth/logout", { method: "POST" }).then(() => { setSessionUser(null); setCsrfToken(""); setNotice("Signed out."); if (auth0) auth0.logout({ logoutParams: { returnTo: window.location.origin } }); if (supabase) void supabase.auth.signOut(); }); }}>Sign out</button></>}</div>
     </header>
@@ -334,6 +348,26 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
     <footer><button className="wordmark wordmark-button" onClick={() => navigate("explore")}><span className="mark">V</span><span>veld<span className="muted">archive</span></span></button><button className="footer-guide-link" onClick={() => navigate("rights")}>Rights guide ↗</button><button className="footer-guide-link" onClick={() => navigate("stakeholders")}>System overview ↗</button><span>© 2026 Veld Archive · South Africa</span><span>Context before category.</span></footer>
     {selectedAsset && <AssetModal asset={selectedAsset} onClose={() => setSelectedAsset(null)} onNotice={setNotice} authenticated={Boolean(sessionUser)} lightboxes={lightboxes} onCreateLightbox={createLightbox} onSaveToLightbox={saveToLightbox} />}
   </div>;
+}
+
+function BetterSidebar({ view, navigate, collapsed, mobileOpen, onToggleCollapse, onCloseMobile }: { view: View; navigate: (nextView: View) => void; collapsed: boolean; mobileOpen: boolean; onToggleCollapse: () => void; onCloseMobile: () => void }) {
+  return <>
+    {mobileOpen && <button type="button" className="better-sidebar-backdrop" aria-label="Close navigation" onClick={onCloseMobile} />}
+    <aside className={`better-sidebar ${collapsed ? "is-collapsed" : ""} ${mobileOpen ? "is-mobile-open" : ""}`} aria-label="Archive workspace navigation">
+      <div className="better-sidebar-brand">
+        <button type="button" className="wordmark wordmark-button" onClick={() => { navigate("explore"); onCloseMobile(); }} aria-label="Veld Archive home"><span className="mark">V</span><span className="better-brand-name">veld<span className="muted">archive</span></span></button>
+        <button type="button" className="better-collapse-button" aria-label={collapsed ? "Expand navigation" : "Collapse navigation"} onClick={onToggleCollapse}><Icon name="chevron" className={collapsed ? "is-rotated" : ""} /></button>
+      </div>
+      <button type="button" className="better-command-button" onClick={() => { navigate("search"); onCloseMobile(); }}><Icon name="search" /><span>Search archive</span><kbd><Icon name="command" size={12} /> K</kbd></button>
+      <nav className="better-sidebar-nav">
+        {sidebarSections.map((section) => <div className="better-nav-section" key={section.label}>
+          <span className="better-nav-label">{section.label}</span>
+          {section.items.map((item) => <button type="button" key={item.view} className={`better-nav-item ${view === item.view ? "is-active" : ""}`} aria-current={view === item.view ? "page" : undefined} title={collapsed ? item.label : undefined} onClick={() => { navigate(item.view); onCloseMobile(); }}><span className="better-nav-icon"><Icon name={item.icon} /></span><span className="better-nav-text">{item.label}</span>{item.badge && <span className="better-nav-badge">{item.badge}</span>}</button>)}
+        </div>)}
+      </nav>
+      <div className="better-sidebar-footer"><span className="better-status-dot" /><span className="better-sidebar-footer-copy"><strong>Archive service online</strong><small>Verified content pipeline</small></span></div>
+    </aside>
+  </>;
 }
 
 function ExploreView({ query, setQuery, runSearch, assets, filter, setFilter, sort, setSort, orientation, setOrientation, verifiedCount, notice, onOpen, authenticated, discovery, onUseQuery, onSaveSearch, onDeleteSearch }: { query: string; setQuery: (value: string) => void; runSearch: (event: React.FormEvent) => void; assets: Asset[]; filter: "all" | "image" | "video"; setFilter: (value: "all" | "image" | "video") => void; sort: "relevance" | "newest" | "popular" | "random"; setSort: (value: "relevance" | "newest" | "popular" | "random") => void; orientation: "all" | "landscape" | "portrait" | "square"; setOrientation: (value: "all" | "landscape" | "portrait" | "square") => void; verifiedCount: number; notice: string; onOpen: (asset: Asset) => void; authenticated: boolean; discovery: DiscoveryResponse; onUseQuery: (value: string) => void; onSaveSearch: (frequency: SavedSearch["alertFrequency"]) => Promise<void>; onDeleteSearch: (id: string) => Promise<void> }) {

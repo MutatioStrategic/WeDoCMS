@@ -129,7 +129,6 @@ type SecretBindings = {
   ZOHO_REFRESH_TOKEN?: string;
   ZOHO_ACCESS_TOKEN?: string;
   ZOHO_API_DOMAIN?: string;
-  ZOHO_OAUTH_SCOPES?: string;
   ZOHO_CRM_MODULE?: string;
   ZOHO_CRM_EXTERNAL_FIELD?: string;
   ZOHO_CRM_NAME_FIELD?: string;
@@ -3028,11 +3027,12 @@ app.post("/api/analytics/events", async (c) => {
     DO UPDATE SET count = count + 1, updated_at = CURRENT_TIMESTAMP
   `).bind(today(), payload.type, metricKey, payload.type === "asset_view" ? payload.assetId ?? "" : "", normalizedMetric(payload.country), normalizedMetric(payload.province), normalizedMetric(payload.city)).run();
   if (payload.type === "asset_view" && payload.assetId) {
-    const asset = await c.env.DB.prepare("SELECT id, organization_id FROM assets WHERE id = ? AND status = 'published'").bind(payload.assetId).first<{ id: string; organization_id: string }>();
+    const asset = await c.env.DB.prepare("SELECT id, organization_id, owner_id FROM assets WHERE id = ? AND status = 'published'").bind(payload.assetId).first<{ id: string; organization_id: string; owner_id: string }>();
     if (asset) {
       const actor = await requestUser(c);
       await c.env.DB.prepare("INSERT INTO asset_events (id, organization_id, asset_id, actor_id, event_type) VALUES (?, ?, ?, ?, 'view')")
         .bind(crypto.randomUUID(), asset.organization_id, asset.id, actor?.id ?? null).run();
+      await queueZohoDomainEventBestEffort(c.env, { organizationId: asset.organization_id, actorId: actor?.id ?? asset.owner_id, app: "analytics", action: "ingest_asset_engagement", entityType: "asset", entityId: asset.id, eventName: `analytics.${payload.type}`, payload: { contractVersion: "1.0", eventName: `analytics.${payload.type}`, assetId: asset.id, metricKey, metricType: payload.type, country: normalizedMetric(payload.country) || null, province: normalizedMetric(payload.province) || null, occurredAt: new Date().toISOString() } });
     }
   }
   return c.json({ accepted: true }, 202);
@@ -3406,8 +3406,9 @@ const zohoOAuthScopes = [
   "ZohoCRM.settings.fields.READ",
 ];
 
-function zohoOAuthRedirectUri(env: Bindings): string {
-  return `${String(env.APP_PUBLIC_URL ?? "").replace(/\/$/, "")}/api/integrations/zoho/oauth/callback`;
+function zohoOAuthRedirectUri(env: Bindings, requestUrl?: string): string {
+  const origin = env.APP_PUBLIC_URL || (requestUrl ? new URL(requestUrl).origin : "");
+  return `${String(origin).replace(/\/$/, "")}/api/integrations/zoho/oauth/callback`;
 }
 
 function zohoOutboxBindings(env: Bindings): ZohoOutboxBindings {
@@ -3494,7 +3495,7 @@ app.post("/api/integrations/zoho/connect/start", async (c) => {
   await c.env.DB.prepare(`INSERT INTO zoho_oauth_states (id, organization_id, actor_id, state_hash, account_server, scopes_json, return_path, expires_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '+10 minutes'))`).bind(crypto.randomUUID(), user.organizationId, user.id, stateHash, accountServer, JSON.stringify(scopes), returnPath.slice(0, 200)).run();
   const authorization = new URL(`${accountServer}/oauth/v2/auth`);
-  authorization.search = new URLSearchParams({ scope: scopes.join(","), client_id: c.env.ZOHO_CLIENT_ID, response_type: "code", access_type: "offline", prompt: "consent", redirect_uri: zohoOAuthRedirectUri(c.env), state: rawState }).toString();
+  authorization.search = new URLSearchParams({ scope: scopes.join(","), client_id: c.env.ZOHO_CLIENT_ID, response_type: "code", access_type: "offline", prompt: "consent", redirect_uri: zohoOAuthRedirectUri(c.env, c.req.url), state: rawState }).toString();
   return c.json({ authorizationUrl: authorization.toString(), expiresInSeconds: 600 }, 201);
 });
 
@@ -3509,7 +3510,7 @@ app.get("/api/integrations/zoho/oauth/callback", async (c) => {
   if (!user || user.id !== String(oauthState.actor_id) || user.organizationId !== String(oauthState.organization_id)) return c.json({ error: "The Zoho OAuth callback must be completed by the initiating user" }, 403);
   if (!c.env.ZOHO_TOKEN_ENCRYPTION_KEY || !c.env.ZOHO_CLIENT_ID || !c.env.ZOHO_CLIENT_SECRET) return c.json({ error: "Zoho OAuth storage is not configured" }, 503);
   try {
-    const token = await new IntegrationContainer({ ...c.env, ZOHO_ACCOUNTS_URL: String(oauthState.account_server) }).zoho.exchangeAuthorizationCode(code, zohoOAuthRedirectUri(c.env));
+    const token = await new IntegrationContainer({ ...c.env, ZOHO_ACCOUNTS_URL: String(oauthState.account_server) }).zoho.exchangeAuthorizationCode(code, zohoOAuthRedirectUri(c.env, c.req.url));
     if (!token.refresh_token) return c.json({ error: "Zoho did not return a refresh token; reconnect with offline access" }, 502);
     const encrypted = await encryptZohoSecret(token.refresh_token, c.env.ZOHO_TOKEN_ENCRYPTION_KEY);
     const existing = await c.env.DB.prepare("SELECT id FROM zoho_connections WHERE organization_id = ? AND status <> 'revoked' LIMIT 1").bind(user.organizationId).first<{ id: string }>();

@@ -87,6 +87,26 @@ export const zohoDeskCaseSchema = z.object({
   publicUrl: z.string().url().optional(),
 }).strict();
 
+export const zohoAnalyticsEventSchema = z.object({
+  contractVersion: z.literal("1.0"),
+  eventName: z.string().trim().min(1).max(120),
+  occurredAt: z.string().datetime({ offset: true }).optional(),
+  organizationId: z.string().trim().min(1).max(160).optional(),
+  assetId: z.string().trim().min(1).max(160).optional(),
+  campaignId: z.string().trim().min(1).max(160).nullable().optional(),
+  licenceId: z.string().trim().min(1).max(160).optional(),
+  metricType: z.string().trim().min(1).max(80).optional(),
+  metricKey: z.string().trim().max(160).optional(),
+  country: z.string().trim().max(80).nullable().optional(),
+  province: z.string().trim().max(120).nullable().optional(),
+  provider: z.string().trim().max(80).optional(),
+  providerEventId: z.string().trim().max(160).optional(),
+  providerReference: z.string().trim().max(160).nullable().optional(),
+  status: z.string().trim().max(80).optional(),
+  amountCents: z.number().int().nonnegative().optional(),
+  currency: z.string().trim().length(3).optional(),
+}).passthrough();
+
 export type ZohoTokenResponse = { access_token?: string; refresh_token?: string; api_domain?: string; expires_in?: number; scope?: string };
 
 /**
@@ -193,13 +213,14 @@ export class ZohoIntegration {
   }
 
   async sendAnalyticsEvent(payload: Record<string, unknown>, idempotencyKey: string): Promise<{ providerReference?: string; raw?: unknown }> {
+    const validated = zohoAnalyticsEventSchema.parse(payload);
     return this.sendFlow("analytics", this.config.ZOHO_ANALYTICS_FLOW_WEBHOOK_URL, {
       contractVersion: "1.0",
       event: "veld_archive.analytics.event",
       action: "ingest_cms_event",
       idempotencyKey,
       source: "veld-archive",
-      payload,
+      payload: validated,
     }, idempotencyKey);
   }
 

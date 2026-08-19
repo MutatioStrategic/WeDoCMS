@@ -143,6 +143,10 @@ export async function dispatchZohoOutboxJob(env: ZohoOutboxBindings, jobId: stri
 }
 
 export async function dispatchDueZohoOutbox(env: ZohoOutboxBindings, limit = 25): Promise<number> {
+  // A Worker crash after claiming a job must not silently leave it locked.
+  // Because the provider outcome is unknown, recovery is deliberately manual.
+  await env.DB.prepare(`UPDATE zoho_outbox_jobs SET status = 'unknown', last_error = 'Worker stopped while provider outcome was unknown', updated_at = CURRENT_TIMESTAMP
+    WHERE status = 'processing' AND locked_at < datetime('now', '-10 minutes')`).run();
   const rows = await env.DB.prepare(`SELECT id FROM zoho_outbox_jobs WHERE status IN ('pending', 'failed') AND next_attempt_at <= CURRENT_TIMESTAMP AND attempts < 8 ORDER BY created_at LIMIT ?`).bind(limit).all<{ id: string }>();
   for (const row of rows.results) await dispatchZohoOutboxJob(env, String(row.id));
   return rows.results.length;

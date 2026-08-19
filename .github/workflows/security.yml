@@ -175,7 +175,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Scan repository for vulnerabilities, secrets, and misconfiguration
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -201,7 +201,7 @@ jobs:
         run: |
           grep -q '^permissions:' .github/workflows/security.yml
           grep -q 'contents: read' .github/workflows/security.yml
-          if grep -RInE 'CLOUDFLARE_API_TOKEN|STRIPE_SECRET_KEY|PAYMENT_TOKEN' .github/workflows \
+          if grep -RInE 'CLOUDFLARE_API_TOKEN|STRIPE_SECRET_KEY|PAYMENT_TOKEN' .github/workflows --exclude=security.yml \
               | grep -v 'secrets\.'; then
             echo "A production credential appears to be embedded in workflow source."
             exit 1

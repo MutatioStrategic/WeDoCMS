@@ -14,9 +14,12 @@ around the existing campaign workflow: brief → ranked sources → human approv
 | Zoho Campaigns | Optional campaign/email handoff payload is supported through Flow; keep final recipient/list/send approval in Zoho. | Zoho Flow webhook |
 | Zoho Analytics | Optional event handoff endpoint is available in the integration adapter for reporting pipelines. | Zoho Flow webhook |
 
-No OAuth token, client secret, or webhook URL is stored in D1 or exposed to the
-browser. D1 stores only provider references, redacted metadata, status, and an
-audit record in `zoho_integration_events`.
+The browser never receives a client secret or refresh token. Tenant OAuth
+refresh tokens are encrypted with the Worker secret `ZOHO_TOKEN_ENCRYPTION_KEY`
+before being stored as ciphertext in `zoho_connections`; D1 also stores the
+OAuth state, contract metadata snapshot, provider references, redacted
+metadata, and delivery status. The legacy environment refresh-token path remains
+available for a single deployment-wide connection.
 
 Every outbound Flow payload carries `contractVersion: "1.0"`. Social and Desk
 payloads are validated before leaving the Worker. CRM custom fields are omitted
@@ -26,6 +29,11 @@ field label from being mistaken for an API name.
 ## Routes
 
 - `GET /api/integrations/zoho/status`
+- `POST /api/integrations/zoho/connect/start`
+- `GET /api/integrations/zoho/oauth/callback`
+- `POST /api/integrations/zoho/crm/validate`
+- `GET /api/integrations/zoho/outbox`
+- `POST /api/integrations/zoho/outbox/:id/retry`
 - `POST /api/campaigns/:id/integrations/zoho/social`
 - `POST /api/campaigns/:id/integrations/zoho/crm`
 - `POST /api/rights/cases/:id/integrations/zoho/desk`
@@ -36,8 +44,12 @@ a reviewable handoff; it does not claim that a Social post was published.
 
 ## Zoho setup
 
-1. Create a Zoho OAuth client in the same data centre as the Zoho account.
-2. Grant only the CRM scopes needed for the selected module and upsert action.
+1. Create a Zoho OAuth client in the same data centre as the Zoho account and
+   register `${APP_PUBLIC_URL}/api/integrations/zoho/oauth/callback` as the
+   redirect URI.
+2. Set `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`, and a randomly generated
+   `ZOHO_TOKEN_ENCRYPTION_KEY` as Worker secrets. Grant only the CRM scopes
+   needed for the selected module and upsert action.
 3. Create a CRM external text field such as `Veld_Archive_ID` and mark it as
    an external/unique field. Set that API name as `ZOHO_CRM_EXTERNAL_FIELD`.
    Configure the optional correlated fields in `.env.example` only when those
@@ -49,7 +61,7 @@ a reviewable handoff; it does not claim that a Social post was published.
 
 ```powershell
 wrangler secret put ZOHO_CLIENT_SECRET
-wrangler secret put ZOHO_REFRESH_TOKEN
+wrangler secret put ZOHO_TOKEN_ENCRYPTION_KEY
 wrangler secret put ZOHO_SOCIAL_FLOW_WEBHOOK_URL
 wrangler secret put ZOHO_DESK_FLOW_WEBHOOK_URL
 ```
@@ -57,10 +69,12 @@ wrangler secret put ZOHO_DESK_FLOW_WEBHOOK_URL
 The module/API field names are deliberately configurable because Zoho CRM uses
 the field API names from the target CRM account, not display labels.
 
-Repeated requests with the same CMS entity and payload are deduplicated by a
-stable idempotency key. A changed campaign payload creates a new handoff key;
-retrying an unchanged payload returns the previously recorded provider
-reference.
+Requests create a durable `zoho_outbox_jobs` record and return `202` with a
+job ID. A queue consumer or scheduled reconciliation dispatches the job. The
+idempotency key is unique in D1, and the provider request repeats that key for
+Flow deliveries. Retryable HTTP failures are delayed with backoff; a network
+failure with an unknown provider outcome is marked `unknown` and requires an
+explicit admin retry so a Social draft or Desk ticket is not silently duplicated.
 
 ## Operational rule
 
