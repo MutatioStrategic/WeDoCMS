@@ -1,6 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { join, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 
 const baseUrl = (process.env.E2E_BASE_URL ?? "https://veld-archive-api.blewisorlando.workers.dev").replace(/\/$/, "");
 const libraryDir = resolve(process.env.PHOTO_LIBRARY_DIR ?? "fixtures/test-photo-library");
@@ -8,6 +8,35 @@ const manifestPath = join(libraryDir, "manifest.json");
 const statePath = join(libraryDir, "upload-state.json");
 const resume = process.argv.includes("--resume");
 const dryRun = process.argv.includes("--dry-run");
+
+function resolveLibraryImage(fileName) {
+  if (typeof fileName !== "string" || basename(fileName) !== fileName || !/^photo-\d{3}\.jpg$/i.test(fileName)) throw new Error(`Unsafe photo-library filename: ${fileName}`);
+  const imagePath = resolve(libraryDir, fileName);
+  const relativePath = relative(libraryDir, imagePath);
+  if (relativePath.startsWith("..") || isAbsolute(relativePath)) throw new Error(`Photo-library file escaped fixture directory: ${fileName}`);
+  return imagePath;
+}
+
+function trustedUploadUrl(value) {
+  const url = new URL(String(value ?? ""));
+  const hostname = url.hostname.toLowerCase();
+  const localDev = url.protocol === "http:" && ["127.0.0.1", "localhost"].includes(hostname);
+  const cloudflareR2 = url.protocol === "https:" && (hostname.endsWith(".r2.cloudflarestorage.com") || hostname.endsWith(".r2.dev"));
+  if (!localDev && !cloudflareR2) throw new Error(`Unexpected upload URL host: ${hostname}`);
+  return url.href;
+}
+
+function safeStateIdentifier(value, label) {
+  const text = String(value ?? "");
+  if (!/^[A-Za-z0-9._:-]{1,240}$/.test(text)) throw new Error(`Unsafe ${label} in upload response.`);
+  return text;
+}
+
+function safeObjectKey(value) {
+  const text = String(value ?? "");
+  if (!/^[A-Za-z0-9._~!$&'()*+,;=:@/-]{1,1024}$/.test(text)) throw new Error("Unsafe object key in upload response.");
+  return text;
+}
 
 const manifest = JSON.parse((await readFile(manifestPath, "utf8")).replace(/^\uFEFF/, ""));
 if (!Array.isArray(manifest) || manifest.length !== 100) throw new Error("Expected a manifest containing exactly 100 images.");
@@ -58,7 +87,7 @@ for (const item of manifest) {
     console.log(`[skip ${item.sequence}/100] ${item.fileName}`);
     continue;
   }
-  const file = await readFile(join(libraryDir, item.fileName));
+  const file = await readFile(resolveLibraryImage(item.fileName));
   const sha256 = createHash("sha256").update(file).digest("hex");
   const idempotencyKey = `photo-library:${item.sequence}:${sha256}`;
   const session = await call("/api/uploads", {
@@ -73,6 +102,7 @@ for (const item of manifest) {
     }
     throw new Error(`Upload session failed for ${item.fileName}: HTTP ${session.status} ${JSON.stringify(sessionBody)}`);
   }
+  const uploadId = safeStateIdentifier(sessionBody.uploadId, "upload id");
 
   let put;
   let lastPutError;
@@ -80,7 +110,7 @@ for (const item of manifest) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60_000);
     try {
-      put = await fetch(sessionBody.uploadUrl, {
+      put = await fetch(trustedUploadUrl(sessionBody.uploadUrl), {
         method: "PUT",
         headers: { "Content-Type": item.contentType },
         body: file,
@@ -102,14 +132,17 @@ for (const item of manifest) {
     throw new Error(`R2 PUT failed for ${item.fileName}: HTTP ${put.status}, request=${requestId}, body=${errorBody.slice(0, 1000)}`);
   }
 
-  const complete = await call(`/api/uploads/${encodeURIComponent(sessionBody.uploadId)}/complete`, { method: "POST" });
+  const complete = await call(`/api/uploads/${encodeURIComponent(uploadId)}/complete`, { method: "POST" });
   const completeBody = await complete.json();
   if (!complete.ok) throw new Error(`Upload completion failed for ${item.fileName}: HTTP ${complete.status} ${JSON.stringify(completeBody)}`);
+  const assetId = safeStateIdentifier(completeBody.assetId, "asset id");
+  const completedUploadId = safeStateIdentifier(completeBody.uploadId, "upload id");
+  const objectKey = safeObjectKey(completeBody.objectKey);
   state[item.sequence] = {
-    assetId: completeBody.assetId,
-    uploadId: completeBody.uploadId,
-    objectKey: completeBody.objectKey,
-    previewKey: String(completeBody.objectKey).replace(/^originals\//, "previews/").replace(/\.[^.\/]+$/, ".webp"),
+    assetId,
+    uploadId: completedUploadId,
+    objectKey,
+    previewKey: objectKey.replace(/^originals\//, "previews/").replace(/\.[^.\/]+$/, ".webp"),
     fileName: item.fileName,
     sourceTitle: item.sourceTitle,
   };

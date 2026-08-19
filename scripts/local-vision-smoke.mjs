@@ -1,7 +1,10 @@
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 
+const imageRoot = resolve(process.env.LOCAL_VISION_IMAGE_ROOT ?? "fixtures");
 const imagePath = resolve(process.argv[2] ?? "fixtures/demo-media/garden-route-south-africa.jpg");
+const relativeImagePath = relative(imageRoot, imagePath);
+if (relativeImagePath.startsWith("..") || isAbsolute(relativeImagePath)) throw new Error(`Image path must stay inside ${imageRoot}`);
 const image = (await readFile(imagePath)).toString("base64");
 const response = await fetch(process.env.LOCAL_VISION_URL ?? "http://127.0.0.1:11434/api/generate", {
   method: "POST",

@@ -1,5 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { basename, isAbsolute, relative, resolve } from "node:path";
 
 const libraryDir = resolve(process.env.PHOTO_LIBRARY_DIR ?? "fixtures/test-photo-library");
 const manifest = JSON.parse((await readFile(resolve(libraryDir, "manifest.json"), "utf8")).replace(/^\uFEFF/, ""));
@@ -59,8 +59,16 @@ function score(output, expectedTopic) {
   };
 }
 
+function resolveLibraryImage(fileName) {
+  if (typeof fileName !== "string" || basename(fileName) !== fileName || !/^photo-\d{3}\.jpg$/i.test(fileName)) throw new Error(`Unsafe benchmark image filename: ${fileName}`);
+  const imagePath = resolve(libraryDir, fileName);
+  const relativePath = relative(libraryDir, imagePath);
+  if (relativePath.startsWith("..") || isAbsolute(relativePath)) throw new Error(`Benchmark image escaped library directory: ${fileName}`);
+  return imagePath;
+}
+
 async function run(model, item) {
-  const image = (await readFile(resolve(libraryDir, item.fileName))).toString("base64");
+  const image = (await readFile(resolveLibraryImage(item.fileName))).toString("base64");
   const started = performance.now();
   try {
     const response = await fetch(`${model.url.replace(/\/$/, "")}/api/generate`, {
