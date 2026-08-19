@@ -31,7 +31,7 @@ csrfToken = String(loginBody.csrfToken ?? "");
 if (!login.ok || !cookie || !csrfToken) throw new Error(`chaos smoke could not create an authenticated session: ${login.status}`);
 
 for (const [scenario, expectedStatus] of scenarios) {
-  const authenticatedHeaders = scenario === "fail-before-session" ? {} : { Cookie: cookie, "X-CSRF-Token": csrfToken };
+  const authenticatedHeaders = scenario === "fail-before-session" ? {} : { Cookie: cookie, Origin: baseUrl, "X-CSRF-Token": csrfToken };
   const createResponse = await fetch(`${baseUrl}/api/uploads`, {
     method: "POST",
     headers: {
