@@ -1664,13 +1664,14 @@ app.patch("/api/assets/:id", async (c) => {
     artistLicenseUrl: payload.artistLicenseUrl !== undefined ? payload.artistLicenseUrl : (current.artist_license_url as string | undefined),
     artistLicenseTerms: payload.artistLicenseTerms !== undefined ? payload.artistLicenseTerms : (current.artist_license_terms as string | undefined),
   };
-  if (next.monetizationModel === "individual_license" && (!next.licensePriceCents || next.licensePriceCents < 100)) {
+  const licensingFieldsTouched = ["monetizationModel", "licensePriceCents", "artistLicenseKey", "artistLicenseVersion", "artistLicenseUrl", "artistLicenseTerms"].some((field) => Object.prototype.hasOwnProperty.call(payload, field));
+  if (licensingFieldsTouched && next.monetizationModel === "individual_license" && (!next.licensePriceCents || next.licensePriceCents < 100)) {
     return c.json({ error: "Individual licences must have a price of at least ZAR 1.00" }, 422);
   }
-  if ((next.artistLicenseKey === "custom" || next.artistLicenseKey === "other") && !String(next.artistLicenseTerms ?? "").trim()) return c.json({ error: "Custom or other artist licences must include the licence terms" }, 422);
-  if (next.artistLicenseKey !== "custom" && !next.artistLicenseUrl) return c.json({ error: "A proof URL is required for the selected artist licence" }, 422);
-  const artistLicenseTerms = String(next.artistLicenseTerms ?? `${next.artistLicenseKey} ${next.artistLicenseVersion ?? ""}`).trim();
-  const artistLicenseSha256 = await sha256Hex(JSON.stringify({ key: next.artistLicenseKey, version: next.artistLicenseVersion ?? null, url: next.artistLicenseUrl || null, terms: artistLicenseTerms }));
+  if (licensingFieldsTouched && (next.artistLicenseKey === "custom" || next.artistLicenseKey === "other") && !String(next.artistLicenseTerms ?? "").trim()) return c.json({ error: "Custom or other artist licences must include the licence terms" }, 422);
+  if (licensingFieldsTouched && next.artistLicenseKey !== "custom" && !next.artistLicenseUrl) return c.json({ error: "A proof URL is required for the selected artist licence" }, 422);
+  const artistLicenseTerms = licensingFieldsTouched ? String(next.artistLicenseTerms ?? `${next.artistLicenseKey} ${next.artistLicenseVersion ?? ""}`).trim() : String(current.artist_license_terms ?? "");
+  const artistLicenseSha256 = licensingFieldsTouched ? await sha256Hex(JSON.stringify({ key: next.artistLicenseKey, version: next.artistLicenseVersion ?? null, url: next.artistLicenseUrl || null, terms: artistLicenseTerms })) : String(current.artist_license_sha256 ?? "");
   const safetyIssue = metadataSafetyIssue((next.culturalTags ?? []) as string[]);
   if (safetyIssue) return c.json({ error: safetyIssue, code: "metadata_context_required" }, 422);
   await c.env.DB.prepare(`UPDATE assets SET kind = ?, title = ?, description = ?, caption = ?, province = ?, city = ?, locality = ?, landmark = ?, subject_tags = ?, cultural_tags = ?, rights_status = ?, model_release_status = ?, property_release_status = ?, monetization_model = ?, license_price_cents = ?, artist_license_key = ?, artist_license_version = ?, artist_license_url = ?, artist_license_terms = ?, artist_license_sha256 = ?, artist_license_accepted_at = COALESCE(artist_license_accepted_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?`)

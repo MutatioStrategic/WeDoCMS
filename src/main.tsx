@@ -244,6 +244,15 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
     if (nextView === "review") void loadReviewQueue();
   }
 
+  async function devSignIn(): Promise<void> {
+    const response = await fetch("/api/auth/dev-login", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role: devRole }) });
+    if (!response.ok) { setNotice("Local authentication is unavailable; start the local Worker and apply the identity migration first."); return; }
+    const data = await response.json() as { user: SessionUser; csrfToken: string };
+    setSessionUser(data.user);
+    setCsrfToken(data.csrfToken);
+    setNotice(`Signed in locally as ${data.user.role}.`);
+  }
+
   function trackEvent(payload: Record<string, unknown>) {
     if (!analyticsConsent) return;
     void fetch("/api/analytics/events", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...payload, consent: true }) }).catch(() => undefined);
@@ -324,7 +333,7 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
       <button className="wordmark wordmark-button" onClick={() => navigate("explore")} aria-label="Veld Archive home"><span className="mark">V</span><span>veld<span className="muted">archive</span></span></button>
       <div className="better-context"><span>VELD ARCHIVE / WORKSPACE</span><strong>{currentViewLabel}</strong></div>
       <nav className="nav-links" aria-label="Primary navigation"><button onClick={() => navigate("explore")}>Explore</button><button className="stakeholder-nav-link" onClick={() => navigate("stakeholders")}>System overview <span>NEW</span></button><button className="rights-nav-link" onClick={() => navigate("rights")}>Rights guide <span>NEW</span></button><button className="campaign-nav" onClick={() => navigate("campaigns")}>Campaigns <span>3A</span></button><button onClick={() => navigate("contributors")}>Creators</button><button onClick={() => navigate("community")}>Community & collections</button><button className="studio-nav-link" onClick={() => navigate("studio")}>Media studio <span>NEW</span></button><button onClick={() => navigate("wordpress")}>WordPress <span>NEW</span></button><button onClick={() => navigate("contributor")}>Contributor insights</button><button onClick={() => navigate("buyer")}>Buyer ROI</button><button onClick={() => navigate("review")}>Editorial review</button><button className="governance-link" onClick={() => navigate("governance")}>Governance <span>NEW</span></button></nav>
-      <div className="top-actions">{import.meta.env.DEV && !auth0 && !supabase && <label className="role-switcher">Local role <select value={devRole} onChange={(event) => setDevRole(event.target.value as "contributor" | "admin")}><option value="contributor">Contributor</option><option value="admin">Admin</option></select></label>}{!sessionUser && <a className="dark-button subscription-button" href={paystackSubscriptionUrl} target="_blank" rel="noopener noreferrer" data-paystack-plan={paystackSubscriptionPlanCode}>Subscribe · R1 200/month</a>}<button className="ghost-button" onClick={async () => { if (auth0) { await auth0.loginWithRedirect({ authorizationParams: { ...(auth0Audience ? { audience: auth0Audience } : {}), ...(auth0Organization ? { organization: auth0Organization } : {}) } }); return; } if (supabase) { setSupabaseAuthOpen(true); return; } if (!import.meta.env.DEV) { setNotice("An external identity provider is not configured for this deployment."); return; } const response = await fetch("/api/auth/dev-login", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role: devRole }) }); if (!response.ok) { setNotice("Local authentication is unavailable; apply the identity migration first."); return; } const data = await response.json() as { user: SessionUser; csrfToken: string }; setSessionUser(data.user); setCsrfToken(data.csrfToken); setNotice(`Signed in to ${data.user.organizationName}.`); }}>{auth0 ? "Sign in with Auth0" : supabase ? "Sign in with Supabase" : "Sign in"}</button>{sessionUser && <><button className="ghost-button" onClick={() => navigate("account")}>Account</button><button className="ghost-button" onClick={() => { void api("/api/auth/logout", { method: "POST" }).then(() => { setSessionUser(null); setCsrfToken(""); setNotice("Signed out."); if (auth0) auth0.logout({ logoutParams: { returnTo: window.location.origin } }); if (supabase) void supabase.auth.signOut(); }); }}>Sign out</button></>}</div>
+      <div className="top-actions">{import.meta.env.DEV && !sessionUser && <label className="role-switcher">Local role <select value={devRole} onChange={(event) => setDevRole(event.target.value as "contributor" | "admin")}><option value="contributor">Contributor</option><option value="admin">Admin</option></select></label>}{import.meta.env.DEV && !sessionUser && <button className="ghost-button local-dev-login" onClick={() => void devSignIn()}>Local sign in</button>}{!sessionUser && <a className="dark-button subscription-button" href={paystackSubscriptionUrl} target="_blank" rel="noopener noreferrer" data-paystack-plan={paystackSubscriptionPlanCode}>Subscribe · R1 200/month</a>}<button className="ghost-button" onClick={async () => { if (auth0) { await auth0.loginWithRedirect({ authorizationParams: { ...(auth0Audience ? { audience: auth0Audience } : {}), ...(auth0Organization ? { organization: auth0Organization } : {}) } }); return; } if (supabase) { setSupabaseAuthOpen(true); return; } if (!import.meta.env.DEV) { setNotice("An external identity provider is not configured for this deployment."); return; } await devSignIn(); }}>{auth0 ? "Sign in with Auth0" : supabase ? "Sign in with Supabase" : "Sign in"}</button>{sessionUser && <><button className="ghost-button" onClick={() => navigate("account")}>Account</button><button className="ghost-button" onClick={() => { void api("/api/auth/logout", { method: "POST" }).then(() => { setSessionUser(null); setCsrfToken(""); setNotice("Signed out."); if (auth0) auth0.logout({ logoutParams: { returnTo: window.location.origin } }); if (supabase) void supabase.auth.signOut(); }); }}>Sign out</button></>}</div>
     </header>
     {supabase && supabaseAuthOpen && !sessionUser && <section className="auth-panel" aria-label="Supabase authentication"><div><span className="section-kicker">SUPABASE AUTH</span><h2>{supabaseAuthMode === "signup" ? "Create your archive account." : "Welcome back."}</h2><p>Email/password authentication is handled by Supabase; Veld receives only the verified access token.</p></div><form onSubmit={(event) => void submitSupabaseAuth(event)}><label>Email<input type="email" autoComplete="email" required value={supabaseEmail} onChange={(event) => setSupabaseEmail(event.target.value)} /></label><label>Password<input type="password" autoComplete={supabaseAuthMode === "signup" ? "new-password" : "current-password"} minLength={8} required value={supabasePassword} onChange={(event) => setSupabasePassword(event.target.value)} /></label><div className="modal-actions"><button type="submit" className="dark-button" disabled={supabaseAuthBusy}>{supabaseAuthBusy ? "Working…" : supabaseAuthMode === "signup" ? "Create account" : "Sign in"}</button><button type="button" className="ghost-button" onClick={() => setSupabaseAuthMode((mode) => mode === "signup" ? "signin" : "signup")}>{supabaseAuthMode === "signup" ? "Use existing account" : "Create an account"}</button><button type="button" className="ghost-button" onClick={() => setSupabaseAuthOpen(false)}>Close</button></div></form></section>}
     {sessionUser && <details className="notification-center"><summary>Alerts {notifications.some((item) => !item.read_at) && <span>{notifications.filter((item) => !item.read_at).length}</span>}</summary><div><strong>In-app alerts</strong>{notifications.length ? notifications.slice(0, 8).map((item) => <article className={item.read_at ? "read" : ""} key={item.id}><h3>{item.title}</h3><p>{item.body}</p><small>{new Date(item.created_at).toLocaleDateString("en-ZA")}</small>{!item.read_at && <button type="button" onClick={() => void markNotificationRead(item.id)}>Mark read</button>}</article>) : <p>No alerts yet. Saved-search matches will appear here.</p>}</div></details>}
@@ -1152,6 +1161,16 @@ function ContributorAssetLibrary({ api, onNotice }: { api: (path: string, init?:
     if (!draft) return;
     setSaving(true);
     try {
+      const original = assets.find((asset) => asset.id === draft.id);
+      const originalLicensePrice = original?.licensePriceCents == null ? "" : (original.licensePriceCents / 100).toFixed(2);
+      const licensingChanged = Boolean(original && (
+        draft.monetizationModel !== (original.monetizationModel ?? "membership") ||
+        draft.licensePriceZar !== originalLicensePrice ||
+        draft.artistLicenseKey !== (original.artistLicenseKey ?? "custom") ||
+        draft.artistLicenseVersion !== (original.artistLicenseVersion ?? "") ||
+        draft.artistLicenseUrl !== (original.artistLicenseUrl ?? "") ||
+        draft.artistLicenseTerms !== (original.artistLicenseTerms ?? "")
+      ));
       const response = await api(`/api/assets/${encodeURIComponent(draft.id)}`, {
         method: "PATCH",
         body: JSON.stringify({
@@ -1168,12 +1187,14 @@ function ContributorAssetLibrary({ api, onNotice }: { api: (path: string, init?:
           rightsStatus: draft.rightsStatus,
           modelReleaseStatus: draft.modelReleaseStatus,
           propertyReleaseStatus: draft.propertyReleaseStatus,
-          monetizationModel: draft.monetizationModel,
-          licensePriceCents: draft.monetizationModel === "individual_license" && draft.licensePriceZar.trim() ? Math.round(Number(draft.licensePriceZar) * 100) : null,
-          artistLicenseKey: draft.artistLicenseKey,
-          artistLicenseVersion: draft.artistLicenseVersion || null,
-          artistLicenseUrl: draft.artistLicenseUrl || null,
-          artistLicenseTerms: draft.artistLicenseTerms,
+          ...(licensingChanged ? {
+            monetizationModel: draft.monetizationModel,
+            licensePriceCents: draft.monetizationModel === "individual_license" && draft.licensePriceZar.trim() ? Math.round(Number(draft.licensePriceZar) * 100) : null,
+            artistLicenseKey: draft.artistLicenseKey,
+            artistLicenseVersion: draft.artistLicenseVersion || null,
+            artistLicenseUrl: draft.artistLicenseUrl || null,
+            artistLicenseTerms: draft.artistLicenseTerms,
+          } : {}),
         }),
       });
       const body = await response.json().catch(() => ({})) as { error?: string };
