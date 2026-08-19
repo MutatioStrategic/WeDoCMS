@@ -27,6 +27,8 @@ try {
   $env:E2E_BASE_URL = $baseUrl
   node scripts/authenticated-smoke.mjs
   if ($LASTEXITCODE -ne 0) { throw "Authenticated smoke failed with exit code $LASTEXITCODE. See $logPath and $errPath" }
+  node scripts/wordpress-integration-smoke.mjs
+  if ($LASTEXITCODE -ne 0) { throw "WordPress integration smoke failed with exit code $LASTEXITCODE. See $logPath and $errPath" }
   node scripts/penetration-smoke.mjs
   if ($LASTEXITCODE -ne 0) { throw "Penetration smoke failed with exit code $LASTEXITCODE. See $logPath and $errPath" }
   node scripts/payment-reconciliation-smoke.mjs

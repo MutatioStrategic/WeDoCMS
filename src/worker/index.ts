@@ -25,7 +25,7 @@ import {
   type AuditBindings,
   type StoredAuditEvent,
 } from "./audit";
-import { calculateMarketplaceSplit, IntegrationContainer, PaystackPaymentAdapter } from "../integrations";
+import { calculateMarketplaceSplit, IntegrationContainer, IntegrationError, PaystackPaymentAdapter, type ZohoCampaignSync, type ZohoDeskCase, type ZohoSocialDraft } from "../integrations";
 import { canonicalContract, ocrValidation, sanitizeOcrResult, sha256Hex } from "./seller-workflow";
 import {
   enqueuePhotoJob,
@@ -50,6 +50,7 @@ import { allowedOrigin, applySecurityHeaders, enforceRateLimit, scanMediaObject,
 import { discoveryTokens, isDemoAssetRow, isProductionDemoAssetRow, normalizeSavedQuery, scoreRecommendation } from "./discovery";
 import { parseCampaignBrief, rankCampaignAssets, type BrandKit, type CampaignBrief, type CampaignStage } from "../campaign-intelligence";
 import { agreementText, buyerAgreement, getMarketplaceAgreement, paymentDisclosure, sellerAgreement } from "../legal/agreements";
+import { bearerToken, normalizeWordPressSiteUrl, WORDPRESS_SCOPES, wordPressApiBaseUrl, wordPressNoticeSeverity } from "../integrations/wordpress";
 import {
   assetCreateRequestSchema as contractAssetCreateRequestSchema,
   assetCreateResponseSchema,
@@ -109,6 +110,25 @@ type SecretBindings = {
   PHOTO_INDEX_NAMESPACE?: string;
   FIRMA_VERIFY_URL?: string;
   FIRMA_API_TOKEN?: string;
+  ZOHO_ACCOUNTS_URL?: string;
+  ZOHO_CLIENT_ID?: string;
+  ZOHO_CLIENT_SECRET?: string;
+  ZOHO_REFRESH_TOKEN?: string;
+  ZOHO_ACCESS_TOKEN?: string;
+  ZOHO_API_DOMAIN?: string;
+  ZOHO_CRM_MODULE?: string;
+  ZOHO_CRM_EXTERNAL_FIELD?: string;
+  ZOHO_CRM_NAME_FIELD?: string;
+  ZOHO_CRM_DESCRIPTION_FIELD?: string;
+  ZOHO_CRM_STATUS_FIELD?: string;
+  ZOHO_CRM_APPROVED_ASSETS_FIELD?: string;
+  ZOHO_CRM_PLATFORMS_FIELD?: string;
+  ZOHO_CRM_USAGE_RIGHTS_FIELD?: string;
+  ZOHO_CRM_URL_FIELD?: string;
+  ZOHO_SOCIAL_FLOW_WEBHOOK_URL?: string;
+  ZOHO_DESK_FLOW_WEBHOOK_URL?: string;
+  ZOHO_CAMPAIGNS_FLOW_WEBHOOK_URL?: string;
+  ZOHO_ANALYTICS_FLOW_WEBHOOK_URL?: string;
   SESSION_SECRET?: string;
   AUTH_JWT_SECRET?: string;
   AUTH_JWKS_URL?: string;
@@ -426,6 +446,173 @@ app.post("/api/auth/switch-organization", async (c) => {
   return sessionResponse(c, user.id, membership.organization_id);
 });
 
+const wordpressPairingSchema = z.object({
+  siteUrl: z.string().trim().min(8).max(2048),
+  siteName: z.string().trim().max(180).default(""),
+});
+
+const wordpressExchangeSchema = wordpressPairingSchema.extend({
+  pairingCode: z.string().regex(/^wpc_[A-Za-z0-9_-]{40,180}$/),
+  pluginVersion: z.string().trim().max(40).default(""),
+});
+
+app.post("/api/integrations/wordpress/pairing", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["buyer", "editor", "admin"])) return c.json({ error: "WordPress connection requires buyer, editor, or admin access" }, 403);
+  const payload = wordpressPairingSchema.parse(await c.req.json());
+  const siteUrl = normalizeWordPressSiteUrl(payload.siteUrl, String(c.env.APP_ENV) === "production");
+  if (!siteUrl) return c.json({ error: "A valid HTTPS WordPress site URL is required" }, 422);
+  const pairingCode = `wpc_${base64UrlToken()}`;
+  const id = crypto.randomUUID();
+  await c.env.DB.prepare("INSERT INTO wordpress_pairing_codes (id, organization_id, created_by, code_hash, site_url, site_name, expires_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now', '+10 minutes'))")
+    .bind(id, user.organizationId, user.id, await sha256Hex(pairingCode), siteUrl, payload.siteName).run();
+  return c.json({ pairingId: id, pairingCode, siteUrl, expiresInSeconds: 600, apiBaseUrl: wordPressApiBaseUrl(c.req.raw, c.env.APP_PUBLIC_URL), message: "Enter this code in the Veld Archive WordPress connector. It can be used once and expires in ten minutes." }, 201);
+});
+
+app.post("/api/integrations/wordpress/pairing/exchange", async (c) => {
+  const payload = wordpressExchangeSchema.parse(await c.req.json());
+  const siteUrl = normalizeWordPressSiteUrl(payload.siteUrl, String(c.env.APP_ENV) === "production");
+  if (!siteUrl) return c.json({ error: "A valid HTTPS WordPress site URL is required" }, 422);
+  const pairing = await c.env.DB.prepare("SELECT id, organization_id, created_by, site_url, site_name FROM wordpress_pairing_codes WHERE code_hash = ? AND used_at IS NULL AND expires_at > CURRENT_TIMESTAMP")
+    .bind(await sha256Hex(payload.pairingCode)).first<{ id: string; organization_id: string; created_by: string; site_url: string; site_name: string }>();
+  if (!pairing || pairing.site_url !== siteUrl) return c.json({ error: "Pairing code is invalid, expired, already used, or bound to another site" }, 401);
+  const existing = await c.env.DB.prepare("SELECT id FROM wordpress_connections WHERE organization_id = ? AND site_url = ? AND status = 'active'").bind(pairing.organization_id, siteUrl).first();
+  if (existing) return c.json({ error: "This WordPress site is already connected; revoke the existing connection before pairing again" }, 409);
+  const accessToken = `wpa_${base64UrlToken()}`;
+  const connectionId = crypto.randomUUID();
+  await c.env.DB.batch([
+    c.env.DB.prepare("INSERT INTO wordpress_connections (id, organization_id, created_by, site_url, site_name, token_hash, token_prefix, plugin_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(connectionId, pairing.organization_id, pairing.created_by, siteUrl, payload.siteName || pairing.site_name, await sha256Hex(accessToken), accessToken.slice(0, 12), payload.pluginVersion),
+    c.env.DB.prepare("UPDATE wordpress_pairing_codes SET used_at = CURRENT_TIMESTAMP WHERE id = ? AND used_at IS NULL").bind(pairing.id),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, metadata_json) VALUES (?, ?, 'wordpress_connection_created', 'wordpress_connection', ?, ?)").bind(crypto.randomUUID(), pairing.created_by, connectionId, JSON.stringify({ siteUrl, pluginVersion: payload.pluginVersion })),
+  ]);
+  const connection: WordPressConnectionRow = { id: connectionId, organization_id: pairing.organization_id, created_by: pairing.created_by, site_url: siteUrl, site_name: payload.siteName || pairing.site_name, plugin_version: payload.pluginVersion, status: "active" };
+  return c.json({ ...wordpressConnectionResponse(c.req.raw, c.env, connection), accessToken, tokenWarning: "Store this token securely. It will not be shown again." }, 201);
+});
+
+app.get("/api/integrations/wordpress/connections", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["admin", "editor"])) return c.json({ error: "Organisation administration required" }, 403);
+  const rows = await c.env.DB.prepare("SELECT id, site_url, site_name, token_prefix, plugin_version, status, last_seen_at, revoked_at, created_at FROM wordpress_connections WHERE organization_id = ? ORDER BY created_at DESC LIMIT 50").bind(user.organizationId).all<Record<string, unknown>>();
+  return c.json({ results: rows.results });
+});
+
+app.post("/api/integrations/wordpress/connections/:id/revoke", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["admin", "editor"])) return c.json({ error: "Organisation administration required" }, 403);
+  const connection = await c.env.DB.prepare("SELECT id FROM wordpress_connections WHERE id = ? AND organization_id = ? AND status = 'active'").bind(c.req.param("id"), user.organizationId).first();
+  if (!connection) return c.json({ error: "Active WordPress connection not found" }, 404);
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE wordpress_connections SET status = 'revoked', revoked_at = CURRENT_TIMESTAMP WHERE id = ?").bind(c.req.param("id")),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id) VALUES (?, ?, 'wordpress_connection_revoked', 'wordpress_connection', ?)").bind(crypto.randomUUID(), user.id, c.req.param("id")),
+  ]);
+  return c.json({ connectionId: c.req.param("id"), status: "revoked" });
+});
+
+app.get("/api/integrations/wordpress/v1/me", async (c) => {
+  const connection = await requestWordPressConnection(c);
+  if (!connection) return c.json({ error: "WordPress connection is invalid or revoked" }, 401);
+  return c.json(wordpressConnectionResponse(c.req.raw, c.env, connection));
+});
+
+app.get("/api/integrations/wordpress/v1/assets", async (c) => {
+  const connection = await requestWordPressConnection(c);
+  if (!connection) return c.json({ error: "WordPress connection is invalid or revoked" }, 401);
+  const query = String(c.req.query("q") ?? "").trim().slice(0, 180);
+  const kind = String(c.req.query("kind") ?? "all");
+  const orientation = String(c.req.query("orientation") ?? "all");
+  const usage = String(c.req.query("usage") ?? "all");
+  const page = Math.min(100, Math.max(1, Number(c.req.query("page") ?? 1) || 1));
+  const limit = Math.min(40, Math.max(1, Number(c.req.query("limit") ?? 20) || 20));
+  if (!["all", "image"].includes(kind) || !["all", "landscape", "portrait", "square"].includes(orientation) || !["all", "commercial", "editorial"].includes(usage)) return c.json({ error: "Unsupported WordPress search filter" }, 400);
+  const clauses = ["a.status = 'published'", "a.kind = 'image'", "a.human_verified = 1", "a.rights_status IN ('verified', 'editorial_only')", "COALESCE(a.preview_key, a.original_key, '') <> ''", "COALESCE(a.demo_seed, 0) = 0", "a.id NOT LIKE 'asset-demo-%'", "a.id NOT LIKE 'asset-test-photo-%'"];
+  const values: unknown[] = [];
+  if (kind !== "all") { clauses.push("a.kind = ?"); values.push(kind); }
+  if (orientation !== "all") { clauses.push("a.media_orientation = ?"); values.push(orientation); }
+  if (usage !== "all") { clauses.push("a.media_usage_type = ?"); values.push(usage); }
+  for (const token of discoveryTokens([query]).slice(0, 6)) {
+    clauses.push("(lower(a.title) LIKE ? OR lower(a.description) LIKE ? OR lower(a.caption) LIKE ? OR lower(a.subject_tags) LIKE ? OR lower(COALESCE(a.city, '')) LIKE ? OR lower(COALESCE(a.province, '')) LIKE ?)");
+    const pattern = `%${token}%`; values.push(pattern, pattern, pattern, pattern, pattern, pattern);
+  }
+  const where = clauses.join(" AND ");
+  const count = await c.env.DB.prepare(`SELECT COUNT(*) AS count FROM assets a WHERE ${where}`).bind(...values).first<{ count: number }>();
+  const rows = await c.env.DB.prepare(`SELECT a.*, u.display_name AS contributor,
+      (SELECT l.id FROM licences l WHERE l.asset_id = a.id AND l.organization_id = ? AND l.status = 'paid' AND datetime(l.created_at, '+' || l.duration_days || ' days') > CURRENT_TIMESTAMP ORDER BY l.created_at DESC LIMIT 1) AS active_licence_id,
+      (SELECT l.licence_type FROM licences l WHERE l.asset_id = a.id AND l.organization_id = ? AND l.status = 'paid' AND datetime(l.created_at, '+' || l.duration_days || ' days') > CURRENT_TIMESTAMP ORDER BY l.created_at DESC LIMIT 1) AS active_licence_type,
+      (SELECT l.territory FROM licences l WHERE l.asset_id = a.id AND l.organization_id = ? AND l.status = 'paid' AND datetime(l.created_at, '+' || l.duration_days || ' days') > CURRENT_TIMESTAMP ORDER BY l.created_at DESC LIMIT 1) AS active_licence_territory,
+      (SELECT datetime(l.created_at, '+' || l.duration_days || ' days') FROM licences l WHERE l.asset_id = a.id AND l.organization_id = ? AND l.status = 'paid' AND datetime(l.created_at, '+' || l.duration_days || ' days') > CURRENT_TIMESTAMP ORDER BY l.created_at DESC LIMIT 1) AS active_licence_expires_at
+    FROM assets a JOIN users u ON u.id = a.owner_id WHERE ${where} ORDER BY a.human_verified DESC, a.updated_at DESC LIMIT ? OFFSET ?`).bind(connection.organization_id, connection.organization_id, connection.organization_id, connection.organization_id, ...values, limit, (page - 1) * limit).all<Record<string, unknown>>();
+  return c.json({ query, page, limit, total: Number(count?.count ?? 0), results: rows.results.map((row) => wordpressAssetResponse(c.req.raw, c.env, row)) });
+});
+
+app.get("/api/integrations/wordpress/v1/assets/:id", async (c) => {
+  const connection = await requestWordPressConnection(c);
+  if (!connection) return c.json({ error: "WordPress connection is invalid or revoked" }, 401);
+  const row = await c.env.DB.prepare(`SELECT a.*, u.display_name AS contributor,
+      (SELECT l.id FROM licences l WHERE l.asset_id = a.id AND l.organization_id = ? AND l.status = 'paid' AND datetime(l.created_at, '+' || l.duration_days || ' days') > CURRENT_TIMESTAMP ORDER BY l.created_at DESC LIMIT 1) AS active_licence_id,
+      (SELECT l.licence_type FROM licences l WHERE l.asset_id = a.id AND l.organization_id = ? AND l.status = 'paid' AND datetime(l.created_at, '+' || l.duration_days || ' days') > CURRENT_TIMESTAMP ORDER BY l.created_at DESC LIMIT 1) AS active_licence_type,
+      (SELECT l.territory FROM licences l WHERE l.asset_id = a.id AND l.organization_id = ? AND l.status = 'paid' AND datetime(l.created_at, '+' || l.duration_days || ' days') > CURRENT_TIMESTAMP ORDER BY l.created_at DESC LIMIT 1) AS active_licence_territory,
+      (SELECT datetime(l.created_at, '+' || l.duration_days || ' days') FROM licences l WHERE l.asset_id = a.id AND l.organization_id = ? AND l.status = 'paid' AND datetime(l.created_at, '+' || l.duration_days || ' days') > CURRENT_TIMESTAMP ORDER BY l.created_at DESC LIMIT 1) AS active_licence_expires_at
+    FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.id = ? AND a.status = 'published' AND a.kind = 'image' AND a.human_verified = 1 AND a.rights_status IN ('verified', 'editorial_only') AND COALESCE(a.preview_key, a.original_key, '') <> ''`).bind(connection.organization_id, connection.organization_id, connection.organization_id, connection.organization_id, c.req.param("id")).first<Record<string, unknown>>();
+  if (!row || (String(c.env.APP_ENV) === "production" && isProductionDemoAssetRow(row))) return c.json({ error: "Published image not found" }, 404);
+  return c.json(wordpressAssetResponse(c.req.raw, c.env, row));
+});
+
+app.get("/api/integrations/wordpress/v1/assets/:id/media", async (c) => {
+  const connection = await requestWordPressConnection(c);
+  if (!connection) return c.json({ error: "WordPress connection is invalid or revoked" }, 401);
+  const licenceId = String(c.req.query("licenceId") ?? "").trim();
+  const variant = String(c.req.query("variant") ?? "preview");
+  if (!licenceId || !["thumb", "card", "preview"].includes(variant)) return c.json({ error: "A licenceId and supported preview variant are required" }, 400);
+  const licence = await c.env.DB.prepare(`SELECT l.id, l.asset_id, a.preview_key, a.original_key, a.source_file_name
+    FROM licences l JOIN assets a ON a.id = l.asset_id
+    WHERE l.id = ? AND l.organization_id = ? AND l.status = 'paid' AND datetime(l.created_at, '+' || l.duration_days || ' days') > CURRENT_TIMESTAMP AND a.id = ? AND a.status = 'published' AND a.kind = 'image' AND a.human_verified = 1 AND a.rights_status IN ('verified', 'editorial_only') AND COALESCE(a.preview_key, a.original_key, '') <> ''`).bind(licenceId, connection.organization_id, c.req.param("id")).first<{ id: string; asset_id: string; preview_key: string | null; original_key: string | null; source_file_name: string | null }>();
+  if (!licence) return c.json({ error: "An active paid licence is required for this preview import", code: "licence_required" }, 403);
+  const object = await c.env.MEDIA_BUCKET.get(licence.preview_key ?? licence.original_key ?? "");
+  if (!object?.body) return c.json({ error: "Approved preview derivative is unavailable" }, 503);
+  const preview = licence.preview_key ? new Response(object.body) : (await c.env.IMAGES.input(object.body).transform({ width: 1600, fit: "scale-down" }).output({ format: "image/webp", quality: 88 })).response();
+  const headers = new Headers(preview.headers); if (licence.preview_key) object.writeHttpMetadata(headers);
+  headers.set("Content-Disposition", `attachment; filename="${(licence.source_file_name ?? licence.asset_id).replace(/[\r\n"]/g, "-")}"`);
+  headers.set("X-Veld-Asset-Id", licence.asset_id); headers.set("X-Veld-Licence-Id", licence.id); headers.set("X-Veld-Variant", variant); headers.set("Cache-Control", "private, no-store");
+  return new Response(preview.body, { headers });
+});
+
+app.post("/api/integrations/wordpress/v1/usages", async (c) => {
+  const connection = await requestWordPressConnection(c);
+  if (!connection) return c.json({ error: "WordPress connection is invalid or revoked" }, 401);
+  const payload = z.object({ assetId: z.string().min(1).max(120), licenceId: z.string().min(1).max(120), mode: z.enum(["hosted", "imported"]), variant: z.enum(["thumb", "card", "preview"]).default("preview"), wordpressPostId: z.string().max(120).optional(), wordpressAttachmentId: z.string().max(120).optional() }).parse(await c.req.json());
+  const valid = await c.env.DB.prepare("SELECT l.id FROM licences l JOIN assets a ON a.id = l.asset_id WHERE l.id = ? AND l.asset_id = ? AND l.organization_id = ? AND l.status = 'paid' AND datetime(l.created_at, '+' || l.duration_days || ' days') > CURRENT_TIMESTAMP AND a.status = 'published' AND a.kind = 'image' AND a.human_verified = 1 AND a.rights_status IN ('verified', 'editorial_only')").bind(payload.licenceId, payload.assetId, connection.organization_id).first();
+  if (!valid) return c.json({ error: "Usage requires an active paid licence and publishable image", code: "licence_required" }, 403);
+  const id = crypto.randomUUID();
+  await c.env.DB.batch([
+    c.env.DB.prepare("INSERT INTO wordpress_usage_events (id, connection_id, organization_id, asset_id, licence_id, mode, variant, wordpress_post_id, wordpress_attachment_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, connection.id, connection.organization_id, payload.assetId, payload.licenceId, payload.mode, payload.variant, payload.wordpressPostId ?? null, payload.wordpressAttachmentId ?? null),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, metadata_json) VALUES (?, ?, 'wordpress_asset_used', 'wordpress_usage', ?, ?)").bind(crypto.randomUUID(), connection.created_by, id, JSON.stringify({ connectionId: connection.id, assetId: payload.assetId, licenceId: payload.licenceId, mode: payload.mode, variant: payload.variant })),
+  ]);
+  return c.json({ usageId: id, recorded: true }, 201);
+});
+
+app.get("/api/integrations/wordpress/v1/notices", async (c) => {
+  const connection = await requestWordPressConnection(c);
+  if (!connection) return c.json({ error: "WordPress connection is invalid or revoked" }, 401);
+  const rows = await c.env.DB.prepare(`SELECT e.asset_id, e.licence_id, e.mode, e.variant, e.wordpress_attachment_id, e.wordpress_post_id, MAX(e.created_at) AS used_at,
+      a.title, a.status AS asset_status, a.rights_status, l.status AS licence_status, datetime(l.created_at, '+' || l.duration_days || ' days') AS expires_at
+    FROM wordpress_usage_events e JOIN assets a ON a.id = e.asset_id JOIN licences l ON l.id = e.licence_id
+    WHERE e.connection_id = ?
+    GROUP BY e.asset_id, e.licence_id, e.mode, e.variant, e.wordpress_attachment_id, e.wordpress_post_id, a.title, a.status, a.rights_status, l.status, l.created_at, l.duration_days
+    HAVING a.status <> 'published' OR a.rights_status IN ('restricted', 'pending') OR l.status <> 'paid' OR datetime(l.created_at, '+' || l.duration_days || ' days') <= CURRENT_TIMESTAMP OR datetime(l.created_at, '+' || l.duration_days || ' days') <= datetime('now', '+30 day')
+    ORDER BY used_at DESC LIMIT 100`).bind(connection.id).all<Record<string, unknown>>();
+  return c.json({ results: rows.results.map((row) => ({ assetId: String(row.asset_id), licenceId: String(row.licence_id), title: String(row.title), mode: String(row.mode), variant: String(row.variant), wordpressAttachmentId: row.wordpress_attachment_id ?? null, wordpressPostId: row.wordpress_post_id ?? null, usedAt: row.used_at, assetStatus: String(row.asset_status), rightsStatus: String(row.rights_status), licenceStatus: String(row.licence_status), expiresAt: row.expires_at ?? null, severity: wordPressNoticeSeverity({ assetStatus: String(row.asset_status), rightsStatus: String(row.rights_status), licenceStatus: String(row.licence_status), expiresAt: row.expires_at ? String(row.expires_at) : null }) })) });
+});
+
+app.post("/api/integrations/wordpress/v1/disconnect", async (c) => {
+  const connection = await requestWordPressConnection(c);
+  if (!connection) return c.json({ error: "WordPress connection is invalid or revoked" }, 401);
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE wordpress_connections SET status = 'revoked', revoked_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'active'").bind(connection.id),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id) VALUES (?, ?, 'wordpress_connection_disconnected', 'wordpress_connection', ?)").bind(crypto.randomUUID(), connection.created_by, connection.id),
+  ]);
+  return c.json({ connectionId: connection.id, status: "revoked" });
+});
+
 const creatorProfileInputSchema = z.object({
   slug: z.string().trim().toLowerCase().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).min(3).max(100),
   headline: z.string().trim().max(180).default(""), bio: z.string().trim().max(3000).default(""), location: z.string().trim().max(180).default(""),
@@ -511,6 +698,80 @@ function base64UrlToken(): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+type WordPressConnectionRow = {
+  id: string;
+  organization_id: string;
+  created_by: string;
+  site_url: string;
+  site_name: string;
+  plugin_version: string;
+  status: "active" | "revoked";
+};
+
+async function requestWordPressConnection(c: any): Promise<WordPressConnectionRow | null> {
+  const token = bearerToken(c.req.raw);
+  if (!token) return null;
+  const tokenHash = await sha256Hex(token);
+  const connection = await c.env.DB.prepare(`
+    SELECT id, organization_id, created_by, site_url, site_name, plugin_version, status
+    FROM wordpress_connections
+    WHERE token_hash = ? AND status = 'active'
+  `).bind(tokenHash).first() as WordPressConnectionRow | null;
+  if (!connection) return null;
+  await c.env.DB.prepare("UPDATE wordpress_connections SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'active'").bind(connection.id).run();
+  return connection;
+}
+
+function wordpressConnectionResponse(request: Request, env: Bindings, connection: WordPressConnectionRow): Record<string, unknown> {
+  return {
+    connectionId: connection.id,
+    siteUrl: connection.site_url,
+    siteName: connection.site_name,
+    status: connection.status,
+    pluginVersion: connection.plugin_version,
+    scopes: [...WORDPRESS_SCOPES],
+    apiBaseUrl: wordPressApiBaseUrl(request, env.APP_PUBLIC_URL),
+  };
+}
+
+function wordpressAssetResponse(request: Request, env: Bindings, row: Record<string, unknown>): Record<string, unknown> {
+  const assetId = String(row.id);
+  const activeLicenceId = row.active_licence_id ? String(row.active_licence_id) : null;
+  return {
+    id: assetId,
+    kind: String(row.kind),
+    title: String(row.title),
+    description: String(row.description ?? ""),
+    caption: String(row.caption ?? ""),
+    country: String(row.country ?? ""),
+    province: row.province ?? null,
+    city: row.city ?? null,
+    locality: row.locality ?? null,
+    landmark: row.landmark ?? null,
+    orientation: row.media_orientation ?? null,
+    width: row.media_width == null ? null : Number(row.media_width),
+    height: row.media_height == null ? null : Number(row.media_height),
+    subjectTags: JSON.parse(String(row.subject_tags ?? "[]")),
+    culturalTags: JSON.parse(String(row.cultural_tags ?? "[]")),
+    rightsStatus: String(row.rights_status),
+    modelReleaseStatus: String(row.model_release_status),
+    propertyReleaseStatus: String(row.property_release_status),
+    humanVerified: Boolean(row.human_verified),
+    contributor: String(row.contributor ?? "Veld Archive"),
+    attribution: row.source_attribution ?? null,
+    sourceUrl: row.source_url ?? null,
+    sourceLicense: row.source_license ?? null,
+    activeLicence: activeLicenceId ? {
+      id: activeLicenceId,
+      type: String(row.active_licence_type),
+      territory: String(row.active_licence_territory),
+      expiresAt: row.active_licence_expires_at ?? null,
+    } : null,
+    licenceRequired: !activeLicenceId,
+    previewUrl: `${wordPressApiBaseUrl(request, env.APP_PUBLIC_URL)}/api/assets/${encodeURIComponent(assetId)}/image/card`,
+  };
 }
 
 
@@ -3113,6 +3374,132 @@ app.get("/api/campaigns/:id/manifest", async (c) => {
   const manifest = { manifestVersion: "3A", generatedAt: new Date().toISOString(), campaign: { id: campaign.id, name: campaign.name }, brief: briefFields, brandKit, selectedAssets, auditTrail: { approvedCount: selectedAssets.length, source: "campaign_assets", generatedBy: user.id } };
   await c.env.DB.prepare("INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, metadata_json) VALUES (?, ?, 'campaign_manifest_exported', 'campaign', ?, ?)").bind(crypto.randomUUID(), user.id, campaign.id, JSON.stringify({ approvedCount: selectedAssets.length })).run();
   return c.json(manifest);
+});
+
+const zohoSocialHandoffSchema = z.object({
+  copy: z.string().trim().max(5000).optional(),
+  channels: z.array(z.string().trim().min(1).max(40)).max(12).optional(),
+  scheduleAt: z.string().datetime({ offset: true }).optional(),
+});
+
+function zohoPublicUrl(c: any, env: Bindings): string {
+  return String(env.APP_PUBLIC_URL ?? new URL(c.req.url).origin).replace(/\/$/, "");
+}
+
+async function zohoCampaignSync(c: any, campaign: Record<string, unknown>, approvedAssetCount: number): Promise<ZohoCampaignSync> {
+  const brief = jsonObject<CampaignBrief>(campaign.brief_json, parseCampaignBrief(String(campaign.brief_text ?? "")));
+  return {
+    id: String(campaign.id),
+    name: String(campaign.name),
+    brief: String(campaign.brief_text ?? ""),
+    status: String(campaign.status),
+    approvedAssetCount,
+    platforms: brief.platforms,
+    usageRights: brief.usageRights,
+    publicUrl: `${zohoPublicUrl(c, c.env)}/?campaign=${encodeURIComponent(String(campaign.id))}`,
+  };
+}
+
+async function recordZohoIntegrationEvent(env: Bindings, event: { id: string; organizationId: string; actorId: string; app: "social" | "crm" | "desk" | "campaigns" | "analytics"; action: string; entityType: string; entityId: string; idempotencyKey: string; status: "succeeded" | "failed"; providerReference?: string; metadata?: Record<string, unknown>; errorMessage?: string }): Promise<void> {
+  await env.DB.prepare(`INSERT INTO zoho_integration_events (id, organization_id, actor_id, app, action, entity_type, entity_id, idempotency_key, status, provider_reference, metadata_json, error_message)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(organization_id, app, action, entity_type, entity_id, idempotency_key) DO UPDATE SET
+      status = excluded.status,
+      provider_reference = excluded.provider_reference,
+      metadata_json = excluded.metadata_json,
+      error_message = excluded.error_message`)
+    .bind(event.id, event.organizationId, event.actorId, event.app, event.action, event.entityType, event.entityId, event.idempotencyKey, event.status, event.providerReference ?? null, JSON.stringify(event.metadata ?? {}), event.errorMessage ?? null).run();
+}
+
+async function zohoIdempotencyKey(app: string, entityId: string, payload: unknown): Promise<string> {
+  const digest = await sha256Hex(JSON.stringify(payload));
+  return `zoho:${app}:${entityId}:${digest.slice(0, 32)}`;
+}
+
+async function completedZohoEvent(env: Bindings, organizationId: string, app: string, action: string, entityType: string, entityId: string, idempotencyKey: string): Promise<{ providerReference: string | null } | null> {
+  return env.DB.prepare(`SELECT provider_reference AS providerReference FROM zoho_integration_events
+    WHERE organization_id = ? AND app = ? AND action = ? AND entity_type = ? AND entity_id = ? AND idempotency_key = ? AND status = 'succeeded' LIMIT 1`)
+    .bind(organizationId, app, action, entityType, entityId, idempotencyKey).first<{ providerReference: string | null }>();
+}
+
+app.get("/api/integrations/zoho/status", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  return c.json(new IntegrationContainer(c.env).zoho.status());
+});
+
+app.post("/api/campaigns/:id/integrations/zoho/social", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Campaign workspace access required" }, 403);
+  const payload = zohoSocialHandoffSchema.parse(await c.req.json().catch(() => ({})));
+  const campaign = await campaignForUser(c, c.req.param("id"), user);
+  if (!campaign) return c.json({ error: "Campaign not found" }, 404);
+  const source = await campaignBundleRows(c.env, String(campaign.id), user.organizationId);
+  if (!source.assets.length) return c.json({ error: "Approve at least one asset before sending a Social handoff" }, 422);
+  if (source.blocked.length) return c.json({ error: "Social handoff blocked by current rights state", blocked: source.blocked }, 422);
+  const approved = await c.env.DB.prepare(`SELECT a.id, a.title, a.source_attribution FROM campaign_assets ca JOIN assets a ON a.id = ca.asset_id
+    WHERE ca.campaign_id = ? AND a.organization_id = ? AND ca.stage = 'approved' ORDER BY ca.updated_at DESC`).bind(campaign.id, user.organizationId).all<Record<string, unknown>>();
+  const sync = await zohoCampaignSync(c, campaign, approved.results.length);
+  const social: ZohoSocialDraft = {
+    ...sync,
+    copy: payload.copy ?? `${sync.name} — ${sync.brief.slice(0, 420)}`,
+    channels: [...new Set(payload.channels?.length ? payload.channels : sync.platforms.filter((value) => ["instagram", "linkedin", "facebook", "tiktok", "youtube", "pinterest"].includes(value)).slice(0, 8))].sort(),
+    scheduleAt: payload.scheduleAt,
+    media: approved.results.map((asset) => ({ assetId: String(asset.id), title: String(asset.title), url: `${zohoPublicUrl(c, c.env)}/api/assets/${encodeURIComponent(String(asset.id))}/image/preview`, attribution: asset.source_attribution ? String(asset.source_attribution) : null })).sort((left, right) => left.assetId.localeCompare(right.assetId)),
+  };
+  if (!social.channels.length) social.channels = ["instagram"];
+  if (social.scheduleAt && (!Number.isFinite(Date.parse(social.scheduleAt)) || Date.parse(social.scheduleAt) <= Date.now())) return c.json({ error: "scheduleAt must be a valid future timestamp" }, 422);
+  const idempotencyKey = await zohoIdempotencyKey("social", String(campaign.id), social);
+  const previous = await completedZohoEvent(c.env, user.organizationId, "social", "create_reviewable_social_draft", "campaign", String(campaign.id), idempotencyKey);
+  if (previous) return c.json({ ok: true, status: "already_handed_off", providerReference: previous.providerReference, channels: social.channels, approvedAssetCount: approved.results.length });
+  try {
+    const result = await new IntegrationContainer(c.env).zoho.sendSocialDraft(social, idempotencyKey);
+    await recordZohoIntegrationEvent(c.env, { id: crypto.randomUUID(), organizationId: user.organizationId, actorId: user.id, app: "social", action: "create_reviewable_social_draft", entityType: "campaign", entityId: String(campaign.id), idempotencyKey, status: "succeeded", providerReference: result.providerReference, metadata: { approvedAssetCount: approved.results.length, channels: social.channels, scheduled: Boolean(social.scheduleAt) } });
+    return c.json({ ok: true, status: "handoff_sent", providerReference: result.providerReference, channels: social.channels, approvedAssetCount: approved.results.length });
+  } catch (error) {
+    await recordZohoIntegrationEvent(c.env, { id: crypto.randomUUID(), organizationId: user.organizationId, actorId: user.id, app: "social", action: "create_reviewable_social_draft", entityType: "campaign", entityId: String(campaign.id), idempotencyKey, status: "failed", metadata: { approvedAssetCount: approved.results.length }, errorMessage: error instanceof Error ? error.message : "Zoho Social handoff failed" });
+    return c.json({ error: error instanceof IntegrationError ? error.message : "Zoho Social handoff failed" }, 503);
+  }
+});
+
+app.post("/api/campaigns/:id/integrations/zoho/crm", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Campaign workspace access required" }, 403);
+  const campaign = await campaignForUser(c, c.req.param("id"), user);
+  if (!campaign) return c.json({ error: "Campaign not found" }, 404);
+  const approved = await c.env.DB.prepare("SELECT COUNT(*) AS count FROM campaign_assets WHERE campaign_id = ? AND stage = 'approved'").bind(campaign.id).first<{ count: number }>();
+  const sync = await zohoCampaignSync(c, campaign, Number(approved?.count ?? 0));
+  const idempotencyKey = await zohoIdempotencyKey("crm", String(campaign.id), sync);
+  const previous = await completedZohoEvent(c.env, user.organizationId, "crm", "upsert_campaign", "campaign", String(campaign.id), idempotencyKey);
+  if (previous) return c.json({ ok: true, status: "already_synced", providerReference: previous.providerReference });
+  try {
+    const result = await new IntegrationContainer(c.env).zoho.syncCampaignToCrm(sync);
+    await recordZohoIntegrationEvent(c.env, { id: crypto.randomUUID(), organizationId: user.organizationId, actorId: user.id, app: "crm", action: "upsert_campaign", entityType: "campaign", entityId: String(campaign.id), idempotencyKey, status: "succeeded", providerReference: result.providerReference, metadata: { approvedAssetCount: sync.approvedAssetCount } });
+    return c.json({ ok: true, status: "synced", providerReference: result.providerReference });
+  } catch (error) {
+    await recordZohoIntegrationEvent(c.env, { id: crypto.randomUUID(), organizationId: user.organizationId, actorId: user.id, app: "crm", action: "upsert_campaign", entityType: "campaign", entityId: String(campaign.id), idempotencyKey, status: "failed", metadata: {}, errorMessage: error instanceof Error ? error.message : "Zoho CRM sync failed" });
+    return c.json({ error: error instanceof IntegrationError ? error.message : "Zoho CRM sync failed" }, 503);
+  }
+});
+
+app.post("/api/rights/cases/:id/integrations/zoho/desk", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Editorial access required" }, 403);
+  const caseRow = await c.env.DB.prepare(`SELECT t.id, t.asset_id, t.reason, t.summary, t.status, t.response_due_at, a.title AS asset_title
+    FROM takedown_requests t JOIN assets a ON a.id = t.asset_id WHERE t.id = ? AND t.organization_id = ?`).bind(c.req.param("id"), user.organizationId).first<Record<string, unknown>>();
+  if (!caseRow) return c.json({ error: "Rights case not found" }, 404);
+  const desk: ZohoDeskCase = { id: String(caseRow.id), assetId: String(caseRow.asset_id), assetTitle: String(caseRow.asset_title), reason: String(caseRow.reason), summary: String(caseRow.summary), status: String(caseRow.status), responseDueAt: String(caseRow.response_due_at), publicUrl: `${zohoPublicUrl(c, c.env)}/rights` };
+  const idempotencyKey = await zohoIdempotencyKey("desk", desk.id, desk);
+  const previous = await completedZohoEvent(c.env, user.organizationId, "desk", "create_rights_case_ticket", "takedown_request", desk.id, idempotencyKey);
+  if (previous) return c.json({ ok: true, status: "already_handed_off", providerReference: previous.providerReference });
+  try {
+    const result = await new IntegrationContainer(c.env).zoho.sendDeskCase(desk, idempotencyKey);
+    await recordZohoIntegrationEvent(c.env, { id: crypto.randomUUID(), organizationId: user.organizationId, actorId: user.id, app: "desk", action: "create_rights_case_ticket", entityType: "takedown_request", entityId: desk.id, idempotencyKey, status: "succeeded", providerReference: result.providerReference, metadata: { reason: desk.reason } });
+    return c.json({ ok: true, status: "handoff_sent", providerReference: result.providerReference });
+  } catch (error) {
+    await recordZohoIntegrationEvent(c.env, { id: crypto.randomUUID(), organizationId: user.organizationId, actorId: user.id, app: "desk", action: "create_rights_case_ticket", entityType: "takedown_request", entityId: desk.id, idempotencyKey, status: "failed", metadata: { reason: desk.reason }, errorMessage: error instanceof Error ? error.message : "Zoho Desk handoff failed" });
+    return c.json({ error: error instanceof IntegrationError ? error.message : "Zoho Desk handoff failed" }, 503);
+  }
 });
 
 const lightboxCreateSchema = z.object({

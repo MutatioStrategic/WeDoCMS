@@ -473,7 +473,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .app-shell .suggestion, .app-shell .filter-tabs button:not(.active), .app-shell .ghost-button, .app-shell .text-button, .app-shell .light-outline-button { color: #34443a !important; }
 .app-shell .search-box button, .app-shell .light-button, .app-shell .dark-button { color: #fffaf2 !important; background-color: #7a3524 !important; }
 .app-shell .filter-tabs button.active { color: #fffaf2 !important; background-color: #172019 !important; }
-.app-shell .explainability-note > span, .app-shell .ai-badge, .app-shell .confidence-chip.low, .app-shell small, .app-shell b { color: #34443a !important; }
+.app-shell .explainability-note > span, .app-shell .ai-badge, .app-shell .confidence-chip.high, .app-shell .confidence-chip.medium, .app-shell .confidence-chip.low, .app-shell small, .app-shell b { color: #34443a !important; }
 .app-shell .workspace-intro p { color: #34443a !important; }
 .app-shell .thread-panel .section-kicker, .app-shell .thread-panel .text-button { color: #f6d1bc !important; }
 .app-shell .manifesto p { color: #34443a !important; }

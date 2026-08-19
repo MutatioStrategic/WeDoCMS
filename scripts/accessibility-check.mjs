@@ -42,13 +42,19 @@ try {
   const browser = await chromium.launch({ headless: true, executablePath: installedBrowserPath() });
   const context = await browser.newContext();
   const page = await context.newPage();
+  await page.route("**/api/assets?**", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ results: [{
+      id: "fixture-published-preview", kind: "image", status: "published", title: "Table Mountain preview", description: "A published preview-backed archive record.", caption: "Table Mountain above Cape Town.", country: "South Africa", province: "Western Cape", city: "Cape Town", locality: "City Bowl", landmark: "Table Mountain", subjectTags: ["landscape"], culturalTags: ["South African landscape"], rightsStatus: "pending", modelReleaseStatus: "not_required", propertyReleaseStatus: "not_required", authenticityConfidence: 0.8, humanVerified: true, contributor: "Fixture archive", workflowStage: "approval", aiTags: ["mountain"], curatorNotes: "", previewUrl: "/api/assets/fixture-published-preview/media?variant=preview"
+    }] }) });
+  });
   await page.goto(`http://127.0.0.1:${port}`, { waitUntil: "networkidle" });
   const scan = () => new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"]).analyze();
   const initial = await scan();
   const initialPassed = report("archive landing page", initial);
-  await page.route("**/api/assets?**", async (route) => {
-    await new Promise((resolve) => setTimeout(resolve, 1_100));
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ results: [] }) });
+  await page.waitForFunction(() => {
+    const button = document.querySelector("form.search-box button");
+    return button instanceof HTMLButtonElement && !button.disabled;
   });
   await page.getByLabel("Search photo and video").fill("Table Mountain");
   await page.getByRole("button", { name: /Search archive/ }).click();

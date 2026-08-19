@@ -17,6 +17,8 @@
     "test:migrations": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/migration-smoke.ps1",
     "test:backup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-backup.ps1",
     "test:dr": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dr-restore-smoke.ps1",
+    "test:wordpress-plugin": "node scripts/wordpress-plugin-smoke.mjs",
+    "test:wordpress-integration": "node scripts/wordpress-integration-smoke.mjs",
     "test:local-smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-local-smoke.ps1",
     "seed:demo-media": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/seed-demo-media.ps1",
     "seed:paystack-demo": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/seed-paystack-split-demo.ps1",
