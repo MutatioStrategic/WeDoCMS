@@ -64,6 +64,11 @@ export type Asset = {
   sourceUrl?: string | null;
   sourceLicense?: string | null;
   sourceAttribution?: string | null;
+  artistLicenseKey?: "custom" | "cc_by_4_0" | "cc_by_sa_4_0" | "mit" | "other";
+  artistLicenseVersion?: string | null;
+  artistLicenseUrl?: string | null;
+  artistLicenseTerms?: string | null;
+  artistLicenseSha256?: string | null;
   releases?: ContributorRelease[];
   monetizationModel?: MonetizationModel;
   licensePriceCents?: number | null;
@@ -264,6 +269,8 @@ export type CreatorProfile = {
   specialties: string[];
   websiteUrl: string | null;
   assetCount: number;
+  publishedImageCount: number;
+  reviewCount: number;
   collectionCount: number;
   featuredAssetId: string | null;
 };
@@ -300,6 +307,20 @@ export type AccountLifecycle = {
   productNotifications: boolean;
   exportStatus: "not_requested" | "queued" | "ready" | "expired" | "failed";
   deletionStatus: "none" | "requested" | "cancelled" | "scheduled" | "completed";
+};
+
+export type SubscriptionStatus = {
+  provider: "paystack" | null;
+  planCode: string | null;
+  status: "none" | "active" | "non-renewing" | "attention" | "completed" | "cancelled" | "pending";
+  subscribed: boolean;
+  hasAccess: boolean;
+  amountCents: number | null;
+  currency: string;
+  nextPaymentAt: string | null;
+  lastPaidAt: string | null;
+  cancelAtPeriodEnd: boolean;
+  manageAvailable: boolean;
 };
 
 export type UserLightbox = {
