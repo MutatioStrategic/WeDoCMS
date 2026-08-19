@@ -6,7 +6,7 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": process.env.VITE_WORKER_API_URL ?? "http://localhost:8787",
+      "/api": process.env.VITE_WORKER_API_URL ?? "http://127.0.0.1:8799",
     },
   },
 });
