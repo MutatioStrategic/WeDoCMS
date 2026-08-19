@@ -20,6 +20,18 @@ type ReplicationResult = {
   reason: "missing-source" | "already-current" | "copied";
 };
 
+type CatchUpState = {
+  cursor: string;
+  pages: number;
+  scanned: number;
+  copied: number;
+  startedAt: string;
+};
+
+const CATCH_UP_STATE_KEY = "r2-manifests/_catch-up-state.json";
+const CATCH_UP_PAGE_SIZE = 100;
+const CATCH_UP_COPY_CONCURRENCY = 6;
+
 async function copyObject(
   env: ReplicationBindings,
   key: string,
@@ -61,36 +73,64 @@ export async function catchUpR2Replication(
   env: ReplicationBindings,
   trace: TraceContext,
 ): Promise<void> {
-  let cursor: string | undefined;
-  let pages = 0;
-  let copied = 0;
-  let scanned = 0;
-
-  do {
-    const page = await env.MEDIA_BUCKET.list({ cursor, limit: 1000 });
-    pages += 1;
-    for (const object of page.objects) {
-      scanned += 1;
-      const result = await copyObject(env, object.key, trace);
-      if (result.copied) copied += 1;
+  const savedState = await env.BACKUP_BUCKET.get(CATCH_UP_STATE_KEY);
+  let state: CatchUpState | undefined;
+  if (savedState) {
+    try {
+      const parsed = JSON.parse(await savedState.text()) as Partial<CatchUpState>;
+      if (typeof parsed.cursor === "string" && typeof parsed.pages === "number" && typeof parsed.scanned === "number" && typeof parsed.copied === "number" && typeof parsed.startedAt === "string") {
+        state = parsed as CatchUpState;
+      }
+    } catch {
+      // A corrupt cursor must not prevent a fresh catch-up scan.
     }
-    cursor = page.truncated ? page.cursor : undefined;
-  } while (cursor);
+  }
 
-  const manifest = {
-    schemaVersion: 1,
-    type: "r2-catch-up",
-    completedAt: new Date().toISOString(),
-    pages,
+  const page = await env.MEDIA_BUCKET.list({ cursor: state?.cursor, limit: CATCH_UP_PAGE_SIZE });
+  let copiedThisPage = 0;
+  for (let offset = 0; offset < page.objects.length; offset += CATCH_UP_COPY_CONCURRENCY) {
+    const batch = page.objects.slice(offset, offset + CATCH_UP_COPY_CONCURRENCY);
+    const results = await Promise.all(batch.map((object) => copyObject(env, object.key, trace)));
+    copiedThisPage += results.filter((result) => result.copied).length;
+  }
+
+  const pages = (state?.pages ?? 0) + 1;
+  const scanned = (state?.scanned ?? 0) + page.objects.length;
+  const copied = (state?.copied ?? 0) + copiedThisPage;
+  const startedAt = state?.startedAt ?? new Date().toISOString();
+  const nextCursor = page.truncated ? page.cursor : undefined;
+
+  if (nextCursor) {
+    await env.BACKUP_BUCKET.put(CATCH_UP_STATE_KEY, JSON.stringify({ cursor: nextCursor, pages, scanned, copied, startedAt } satisfies CatchUpState), {
+      httpMetadata: { contentType: "application/json" },
+    });
+  } else {
+    const completedAt = new Date().toISOString();
+    const manifest = {
+      schemaVersion: 1,
+      type: "r2-catch-up",
+      startedAt,
+      completedAt,
+      pages,
+      scanned,
+      copied,
+      traceId: trace.traceId,
+    };
+    await env.BACKUP_BUCKET.put(
+      `r2-manifests/${completedAt.replace(/[:.]/g, "-")}.json`,
+      JSON.stringify(manifest),
+      { httpMetadata: { contentType: "application/json" } },
+    );
+    await env.BACKUP_BUCKET.delete(CATCH_UP_STATE_KEY);
+  }
+
+  recordMetric(env, "r2_replication_run", trace, copiedThisPage, ["catch-up"]);
+  logEvent("info", nextCursor ? "r2.replication.page_completed" : "r2.replication.completed", trace, {
+    objectsThisPage: page.objects.length,
+    copiedThisPage,
     scanned,
     copied,
-    traceId: trace.traceId,
-  };
-  await env.BACKUP_BUCKET.put(
-    `r2-manifests/${manifest.completedAt.replace(/[:.]/g, "-")}.json`,
-    JSON.stringify(manifest),
-    { httpMetadata: { contentType: "application/json" } },
-  );
-  recordMetric(env, "r2_replication_run", trace, copied, ["catch-up"]);
-  logEvent("info", "r2.replication.completed", trace, { pages, scanned, copied });
+    resumed: Boolean(state),
+    hasNextPage: Boolean(nextCursor),
+  });
 }

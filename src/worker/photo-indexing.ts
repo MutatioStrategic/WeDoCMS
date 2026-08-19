@@ -311,6 +311,7 @@ export async function searchPhotoIndex(
     clauses.push("(a.city LIKE ? OR a.province LIKE ? OR a.locality LIKE ? OR a.landmark LIKE ?)");
     values.push(location, location, location, location);
   }
+  clauses.push("COALESCE(a.preview_key, a.original_key, '') <> ''");
   const result = await env.DB.prepare(`SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id WHERE ${clauses.join(" AND ")}`).bind(...values).all<Record<string, unknown>>();
   const scores = new Map(matches.matches.map((match) => [match.id, match.score]));
   const rows = result.results as Record<string, unknown>[];

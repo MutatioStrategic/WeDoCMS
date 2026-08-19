@@ -21,6 +21,8 @@ function assert(condition, message) {
 
 const unauthenticated = await call("/api/me");
 assert(unauthenticated.ok && (await unauthenticated.json()).authenticated === false, "unauthenticated session check failed");
+const publicDiscovery = await call("/api/discovery");
+assert(publicDiscovery.ok && Array.isArray((await publicDiscovery.json()).trending), "public trending discovery failed");
 
 const login = await call("/api/auth/dev-login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role: "contributor" }) });
 assert(login.ok, `dev login failed with ${login.status}`);
@@ -46,9 +48,53 @@ assert(missingCsrf.status === 403, "cookie-authenticated mutation without CSRF p
 const cases = await call("/api/rights/cases");
 assert(cases.ok, "authenticated rights-case listing failed");
 
+const lightboxes = await call("/api/lightboxes");
+assert(lightboxes.ok && Array.isArray((await lightboxes.clone().json()).results), "authenticated lightbox listing failed");
+const lightboxName = `Smoke ${Date.now()}`;
+const createdLightbox = await call("/api/lightboxes", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": loginBody.csrfToken }, body: JSON.stringify({ name: lightboxName }) });
+assert(createdLightbox.status === 201, `lightbox creation failed: ${createdLightbox.status}`);
+const lightbox = await createdLightbox.json();
+const savedAsset = await call(`/api/lightboxes/${lightbox.id}/assets`, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": loginBody.csrfToken }, body: JSON.stringify({ assetId: "asset-table-mountain" }) });
+assert(savedAsset.ok, `lightbox asset save failed: ${savedAsset.status}`);
+const lightboxAfterSave = await call("/api/lightboxes");
+const savedLightbox = (await lightboxAfterSave.json()).results.find((item) => item.id === lightbox.id);
+assert(savedLightbox?.assetIds?.includes("asset-table-mountain"), "saved asset was not returned in lightbox listing");
+const shareLink = await call(`/api/lightboxes/${lightbox.id}/share-link`, { method: "POST", headers: { "X-CSRF-Token": loginBody.csrfToken } });
+assert(shareLink.status === 201, `lightbox share link failed: ${shareLink.status}`);
+const shareBody = await shareLink.json();
+const sharedView = await call(shareBody.shareUrl);
+assert(sharedView.ok && Array.isArray((await sharedView.json()).results), "shared lightbox view failed");
+const removedAsset = await call(`/api/lightboxes/${lightbox.id}/assets/asset-table-mountain`, { method: "DELETE", headers: { "X-CSRF-Token": loginBody.csrfToken } });
+assert(removedAsset.ok, `lightbox asset removal failed: ${removedAsset.status}`);
+const deletedLightbox = await call(`/api/lightboxes/${lightbox.id}`, { method: "DELETE", headers: { "X-CSRF-Token": loginBody.csrfToken } });
+assert(deletedLightbox.ok, `lightbox deletion failed: ${deletedLightbox.status}`);
+
+const savedSearchName = `Cape Town smoke ${Date.now()}`;
+const createdSearch = await call("/api/saved-searches", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": loginBody.csrfToken }, body: JSON.stringify({ name: savedSearchName, query: "Cape Town", mediaKind: "image", alertFrequency: "weekly" }) });
+assert(createdSearch.status === 201, `saved search creation failed: ${createdSearch.status}`);
+const savedSearch = await createdSearch.json();
+const personalizedDiscovery = await call("/api/discovery");
+const personalizedBody = await personalizedDiscovery.json();
+assert(personalizedDiscovery.ok && personalizedBody.savedSearches.some((item) => item.id === savedSearch.id), "saved search was not returned by discovery");
+const deletedSearch = await call(`/api/saved-searches/${savedSearch.id}`, { method: "DELETE", headers: { "X-CSRF-Token": loginBody.csrfToken } });
+assert(deletedSearch.ok, `saved search deletion failed: ${deletedSearch.status}`);
+
+const campaignName = `Integrated campaign ${Date.now()}`;
+const createdCampaign = await call("/api/campaigns", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": loginBody.csrfToken }, body: JSON.stringify({ name: campaignName, brief: "Cape Town travel campaign for social and web use with commercial rights", platforms: ["instagram", "website"] }) });
+assert(createdCampaign.status === 201, `campaign creation failed: ${createdCampaign.status}`);
+const campaign = await createdCampaign.json();
+const stagedAsset = await call(`/api/campaigns/${campaign.id}/assets`, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": loginBody.csrfToken }, body: JSON.stringify({ assetId: "asset-table-mountain", stage: "approved", note: "Approved by the integrated smoke path" }) });
+assert(stagedAsset.ok, `campaign asset staging failed: ${stagedAsset.status}`);
+const campaignDetail = await call(`/api/campaigns/${campaign.id}`);
+const campaignDetailBody = await campaignDetail.json();
+assert(campaignDetail.ok && Array.isArray(campaignDetailBody.assets) && Array.isArray(campaignDetailBody.recommendations) && campaignDetailBody.assets.some((asset) => asset.id === "asset-table-mountain" && asset.campaignStage === "approved"), "consolidated campaign detail did not expose CMS assets and recommendations");
+const campaignManifest = await call(`/api/campaigns/${campaign.id}/manifest`);
+const manifestBody = await campaignManifest.json();
+assert(campaignManifest.ok && manifestBody.manifestVersion === "3A" && manifestBody.auditTrail?.approvedCount === 1, "campaign manifest did not include the approved asset and audit summary");
+
 const logout = await call("/api/auth/logout", { method: "POST", headers: { "X-CSRF-Token": loginBody.csrfToken } });
 assert(logout.ok, "logout failed");
 const afterLogout = await call("/api/me");
 assert(afterLogout.ok && (await afterLogout.json()).authenticated === false, "revoked session remained active");
 
-console.log(JSON.stringify({ ok: true, baseUrl, checks: ["session", "header-spoofing", "org-rbac", "cors", "upload-auth", "csrf", "rights", "logout"] }, null, 2));
+console.log(JSON.stringify({ ok: true, baseUrl, checks: ["session", "header-spoofing", "org-rbac", "cors", "upload-auth", "csrf", "rights", "lightboxes", "lightbox-sharing", "discovery", "saved-searches", "campaign-cms", "campaign-manifest", "logout"] }, null, 2));

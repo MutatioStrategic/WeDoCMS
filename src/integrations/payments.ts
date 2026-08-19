@@ -3,12 +3,19 @@ import { bearerHeaders, idempotencyHeaders, IntegrationError, readJson, type Htt
 export type PaymentSessionRequest = {
   idempotencyKey: string;
   licenceId: string;
+  reference?: string;
   amountCents: number;
   currency: string;
   buyer: { id: string; email: string };
   successUrl: string;
   cancelUrl: string;
   metadata?: Record<string, string>;
+  planCode?: string;
+  split?: {
+    type: "percentage";
+    bearerType: "account" | "subaccount";
+    subaccounts: Array<{ subaccount: string; share: number }>;
+  };
 };
 
 export type PaymentSession = {
@@ -35,6 +42,16 @@ type JsonPaymentResponse = {
   payment_reference?: string;
 };
 
+type PaystackInitializeResponse = {
+  status?: boolean;
+  message?: string;
+  data?: {
+    authorization_url?: string;
+    access_code?: string;
+    reference?: string;
+  };
+};
+
 /**
  * Provider-neutral adapter for a PSP-owned checkout endpoint. The PSP must
  * return a hosted checkout URL and later call the signed payment webhook.
@@ -45,7 +62,7 @@ export class JsonPaymentAdapter implements PaymentProvider {
 
   constructor(private readonly config: { provider: string; endpoint: string; token: string; fetcher?: HttpClient; headers?: Record<string, string> }) {
     this.provider = config.provider;
-    this.fetcher = config.fetcher ?? fetch;
+    this.fetcher = config.fetcher ?? ((input, init) => globalThis.fetch(input, init));
   }
 
   async createCheckoutSession(request: PaymentSessionRequest): Promise<PaymentSession> {
@@ -58,13 +75,18 @@ export class JsonPaymentAdapter implements PaymentProvider {
         ...idempotencyHeaders(request.idempotencyKey),
       },
       body: JSON.stringify({
-        reference: request.licenceId,
+        reference: request.reference ?? request.licenceId,
         amount: request.amountCents,
         currency: request.currency.toUpperCase(),
         buyer: request.buyer,
         successUrl: request.successUrl,
         cancelUrl: request.cancelUrl,
         metadata: request.metadata,
+        split: request.split ? {
+          type: request.split.type,
+          bearer_type: request.split.bearerType,
+          subaccounts: request.split.subaccounts,
+        } : undefined,
       }),
     });
     const value = await readJson<JsonPaymentResponse>(response, this.provider);
@@ -76,6 +98,61 @@ export class JsonPaymentAdapter implements PaymentProvider {
       status: value.status === "created" ? "created" : "pending",
       checkoutUrl,
       providerReference: value.paymentReference ?? value.payment_reference ?? value.id,
+      raw: value,
+    };
+  }
+}
+
+/** Paystack hosted-checkout adapter using server-side transaction initialization. */
+export class PaystackPaymentAdapter implements PaymentProvider {
+  readonly provider = "paystack";
+  private readonly fetcher: HttpClient;
+
+  constructor(private readonly config: { endpoint: string; secretKey: string; fetcher?: HttpClient }) {
+    this.fetcher = config.fetcher ?? ((input, init) => globalThis.fetch(input, init));
+  }
+
+  async createCheckoutSession(request: PaymentSessionRequest): Promise<PaymentSession> {
+    const response = await this.fetcher(this.config.endpoint, {
+      method: "POST",
+      headers: {
+        ...bearerHeaders(this.config.secretKey),
+        "Content-Type": "application/json",
+        ...idempotencyHeaders(request.idempotencyKey),
+      },
+      body: JSON.stringify({
+        email: request.buyer.email,
+        amount: String(request.amountCents),
+        currency: request.currency.toUpperCase(),
+        reference: request.reference ?? request.licenceId,
+        ...(request.planCode ? { plan: request.planCode } : {}),
+        callback_url: request.successUrl,
+        metadata: {
+          ...request.metadata,
+          licenceId: request.licenceId,
+          buyerId: request.buyer.id,
+          cancel_action: request.cancelUrl,
+          ...(request.planCode ? { subscriptionPlanCode: request.planCode } : {}),
+        },
+        split: request.split ? {
+          type: request.split.type,
+          bearer_type: request.split.bearerType,
+          subaccounts: request.split.subaccounts,
+        } : undefined,
+      }),
+    });
+    const value = await readJson<PaystackInitializeResponse>(response, this.provider);
+    const checkoutUrl = value.data?.authorization_url;
+    const reference = value.data?.reference;
+    if (value.status !== true || !checkoutUrl || !reference) {
+      throw new IntegrationError(this.provider, "Paystack returned no authorization URL or transaction reference", { details: value });
+    }
+    return {
+      id: value.data?.access_code ?? reference,
+      provider: this.provider,
+      status: "created",
+      checkoutUrl,
+      providerReference: reference,
       raw: value,
     };
   }

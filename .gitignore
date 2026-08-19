@@ -3,9 +3,13 @@ dist/
 .wrangler/
 .security-dry-run/
 security-dry-run/
+security-dry-run-*/
+worker-smoke-*.log
+worker-*.log
+worker-*.log
 .dev.vars
 .env
 .backups/
 *.sql.gz
 fixtures/demo-media/
-worker-configuration.d.ts
+supabase/.temp/

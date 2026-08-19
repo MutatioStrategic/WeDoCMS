@@ -12,28 +12,50 @@ const scenarios = [
 ];
 
 const results = [];
+let cookie = "";
+let csrfToken = "";
+function rememberCookie(response) {
+  const values = typeof response.headers.getSetCookie === "function" ? response.headers.getSetCookie() : [response.headers.get("set-cookie") ?? ""];
+  const session = values.find((value) => value.startsWith("va_session="));
+  if (session) cookie = session.split(";", 1)[0];
+}
+
+const login = await fetch(`${baseUrl}/api/auth/dev-login`, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ role: "contributor" }),
+});
+rememberCookie(login);
+const loginBody = await login.json().catch(() => ({}));
+csrfToken = String(loginBody.csrfToken ?? "");
+if (!login.ok || !cookie || !csrfToken) throw new Error(`chaos smoke could not create an authenticated session: ${login.status}`);
+
 for (const [scenario, expectedStatus] of scenarios) {
+  const authenticatedHeaders = scenario === "fail-before-session" ? {} : { Cookie: cookie, Origin: baseUrl, "X-CSRF-Token": csrfToken };
   const createResponse = await fetch(`${baseUrl}/api/uploads`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       "x-chaos-scenario": scenario,
       "x-chaos-token": token,
+      ...authenticatedHeaders,
     },
     body: JSON.stringify({ filename: `chaos-${scenario}.jpg`, contentType: "image/jpeg", sizeBytes: 1 }),
   });
   const createBody = await createResponse.json();
   let observedStatus = createResponse.status;
+  let observedBody = createBody;
 
   if (createResponse.ok && createBody.uploadId) {
     const completeResponse = await fetch(`${baseUrl}/api/uploads/${createBody.uploadId}/complete`, {
       method: "POST",
-      headers: { "x-chaos-scenario": scenario, "x-chaos-token": token },
+      headers: { "x-chaos-scenario": scenario, "x-chaos-token": token, ...authenticatedHeaders },
     });
     observedStatus = completeResponse.status;
+    observedBody = await completeResponse.json().catch(() => ({}));
   }
 
-  results.push({ scenario, expectedStatus, observedStatus, passed: observedStatus === expectedStatus });
+  results.push({ scenario, expectedStatus, observedStatus, passed: observedStatus === expectedStatus, ...(observedStatus === expectedStatus ? {} : { observedBody }) });
 }
 
 console.log(JSON.stringify({ baseUrl, results }, null, 2));

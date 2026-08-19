@@ -13,11 +13,32 @@
     "binding": "ASSETS",
     "not_found_handling": "single-page-application"
   },
+  "ai": {
+    "binding": "AI"
+  },
+  "images": {
+    "binding": "IMAGES"
+  },
+  "cache": {
+    "enabled": true
+  },
+  "secrets_store_secrets": [
+    {
+      "binding": "STREAM_WEBHOOK_SECRET_STORE",
+      "store_id": "80f201935679435385f2b6f33d8504a6",
+      "secret_name": "STREAM_WEBHOOK_SECRET_V1"
+    },
+    {
+      "binding": "STREAM_API_TOKEN_STORE",
+      "store_id": "80f201935679435385f2b6f33d8504a6",
+      "secret_name": "STREAM_API_TOKEN"
+    }
+  ],
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "veld-archive",
-      "database_id": "replace-with-cloudflare-d1-id",
+      "database_id": "8403b7a9-c787-4976-808a-5263da1411a7",
       "migrations_dir": "./migrations"
     }
   ],
@@ -70,6 +91,10 @@
       {
         "queue": "veld-archive-photo-enrichment",
         "binding": "PHOTO_ENRICHMENT_QUEUE"
+      },
+      {
+        "queue": "veld-archive-zoho-integrations",
+        "binding": "ZOHO_INTEGRATION_QUEUE"
       }
     ],
     "consumers": [
@@ -85,6 +110,13 @@
         "max_batch_timeout": 5,
         "max_retries": 5,
         "dead_letter_queue": "veld-archive-photo-enrichment-dlq"
+      },
+      {
+        "queue": "veld-archive-zoho-integrations",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "dead_letter_queue": "veld-archive-zoho-integrations-dlq"
       }
     ]
   },
@@ -105,16 +137,206 @@
     "R2_DR_BUCKET_NAME": "veld-archive-media-dr",
     "BACKUP_BUCKET_NAME": "veld-archive-backups-dr",
     "CHAOS_TESTING_ENABLED": "false",
+    "AUTH_JWKS_URL": "https://dev-irn8jgmlsiudjo2l.us.auth0.com/.well-known/jwks.json",
+    "AUTH_ISSUER": "https://dev-irn8jgmlsiudjo2l.us.auth0.com/",
     "UPLOAD_MAX_SIZE_BYTES": "30000000000",
     "AUDIT_SIGNING_KEY_ID": "audit-ed25519-v1",
     "AUDIT_RETENTION_DAYS": "2555",
     "AUDIT_ALLOWED_RESIDENCIES": "za,eu",
     "KYC_PROVIDER": "replace-with-your-kyc-provider",
+    "DIDIT_KYC_WORKFLOW_ID": "",
+    "DIDIT_KYB_WORKFLOW_ID": "",
+    "APP_PUBLIC_URL": "https://veld-archive.pages.dev",
+    "CIPC_LOOKUP_URL": "",
     "OCR_ENABLED": "false",
     "OCR_MODEL": "@cf/moondream/moondream3.1-9B-A2B",
     "PHOTO_VISION_MODEL": "@cf/moondream/moondream3.1-9B-A2B",
     "PHOTO_EMBEDDING_MODEL": "@cf/baai/bge-base-en-v1.5",
     "PHOTO_INDEX_NAMESPACE": "published-photos-v1",
-    "PAYOUT_MIN_CENTS": "10000"
+    "TRENDING_SEARCH_MIN_COUNT": "3",
+    "PAYOUT_MIN_CENTS": "10000",
+    "DEFAULT_ARTIST_SHARE_PERCENTAGE": "60",
+    "PAYSTACK_SPLIT_FEE_BEARER": "account",
+    "PAYSTACK_SUBSCRIPTION_PLAN_CODE": "PLN_aoo1xazr02olbru",
+    "BUYER_SUBSCRIPTION_AMOUNT_CENTS": "120000",
+    "BUYER_SUBSCRIPTION_INTERVAL": "monthly",
+    "PAYMENT_PROVIDER": "paystack",
+    "PAYMENT_ENDPOINT": "https://api.paystack.co/transaction/initialize",
+    "STREAM_ACCOUNT_ID": "37e92dc58245d6eab6517a916bd4d9d6",
+    "STREAM_ALLOWED_ORIGINS": "https://veld-archive.pages.dev"
+  },
+  "env": {
+    "production": {
+      "name": "veld-archive-api",
+      "main": "src/worker/index.ts",
+      "compatibility_date": "2026-08-13",
+      "compatibility_flags": ["nodejs_compat"],
+      "observability": {
+        "enabled": true,
+        "head_sampling_rate": 1
+      },
+      "assets": {
+        "directory": "./dist",
+        "binding": "ASSETS",
+        "not_found_handling": "single-page-application"
+      },
+      "ai": {
+        "binding": "AI"
+      },
+      "images": {
+        "binding": "IMAGES"
+      },
+      "cache": {
+        "enabled": true
+      },
+      "secrets_store_secrets": [
+        {
+          "binding": "STREAM_WEBHOOK_SECRET_STORE",
+          "store_id": "80f201935679435385f2b6f33d8504a6",
+          "secret_name": "STREAM_WEBHOOK_SECRET_V1"
+        },
+        {
+          "binding": "STREAM_API_TOKEN_STORE",
+          "store_id": "80f201935679435385f2b6f33d8504a6",
+          "secret_name": "STREAM_API_TOKEN"
+        }
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "veld-archive",
+          "database_id": "8403b7a9-c787-4976-808a-5263da1411a7",
+          "migrations_dir": "./migrations"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "MEDIA_BUCKET",
+          "bucket_name": "veld-archive-media"
+        },
+        {
+          "binding": "MEDIA_DR_BUCKET",
+          "bucket_name": "veld-archive-media-dr"
+        },
+        {
+          "binding": "BACKUP_BUCKET",
+          "bucket_name": "veld-archive-backups"
+        },
+        {
+          "binding": "AUDIT_BUCKET_ZA",
+          "bucket_name": "veld-archive-audit-za"
+        },
+        {
+          "binding": "AUDIT_BUCKET_EU",
+          "bucket_name": "veld-archive-audit-eu",
+          "jurisdiction": "eu"
+        },
+        {
+          "binding": "KYC_BUCKET_ZA",
+          "bucket_name": "veld-archive-kyc-za"
+        },
+        {
+          "binding": "KYC_BUCKET_EU",
+          "bucket_name": "veld-archive-kyc-eu",
+          "jurisdiction": "eu"
+        }
+      ],
+      "analytics_engine_datasets": [
+        {
+          "binding": "OBSERVABILITY",
+          "dataset": "veld_archive_observability"
+        }
+      ],
+      "vectorize": [
+        {
+          "binding": "PHOTO_INDEX",
+          "index_name": "veld-archive-photo-index"
+        }
+      ],
+      "queues": {
+        "producers": [
+          {
+            "queue": "veld-archive-photo-enrichment",
+            "binding": "PHOTO_ENRICHMENT_QUEUE"
+          },
+          {
+            "queue": "veld-archive-zoho-integrations",
+            "binding": "ZOHO_INTEGRATION_QUEUE"
+          }
+        ],
+        "consumers": [
+          {
+            "queue": "veld-archive-r2-events",
+            "max_batch_size": 100,
+            "max_batch_timeout": 5,
+            "max_retries": 5
+          },
+          {
+            "queue": "veld-archive-photo-enrichment",
+            "max_batch_size": 10,
+            "max_batch_timeout": 5,
+            "max_retries": 5,
+            "dead_letter_queue": "veld-archive-photo-enrichment-dlq"
+          },
+          {
+            "queue": "veld-archive-zoho-integrations",
+            "max_batch_size": 10,
+            "max_batch_timeout": 5,
+            "max_retries": 3,
+            "dead_letter_queue": "veld-archive-zoho-integrations-dlq"
+          }
+        ]
+      },
+      "triggers": {
+        "crons": ["*/15 * * * *"]
+      },
+      "vars": {
+        "APP_ENV": "production",
+        "ALLOWED_ORIGINS": "https://veld-archive.pages.dev",
+        "TURNSTILE_HOSTNAMES": "veld-archive.pages.dev",
+        "AUTH_COOKIE_DOMAIN": "veld-archive.pages.dev",
+        "AUTH_PROVIDER": "both",
+        "SUPABASE_URL": "https://fmqwymgmrkrnfkugogbw.supabase.co",
+        "SUPABASE_AUDIENCE": "authenticated",
+        "AUTH_ALLOW_ORG_PROVISIONING": "false",
+        "DEFAULT_ORGANIZATION_ID": "org-production",
+        "RATE_LIMIT_WINDOW_SECONDS": "60",
+        "RATE_LIMIT_DEFAULT_PER_WINDOW": "120",
+        "UPLOAD_DAILY_QUOTA_BYTES": "50000000000",
+        "ORG_STORAGE_QUOTA_BYTES": "500000000000",
+        "MEDIA_SCANNER_URL": "",
+        "R2_BUCKET_NAME": "veld-archive-media",
+        "R2_DR_BUCKET_NAME": "veld-archive-media-dr",
+        "BACKUP_BUCKET_NAME": "veld-archive-backups",
+        "CHAOS_TESTING_ENABLED": "false",
+        "AUTH_JWKS_URL": "https://dev-irn8jgmlsiudjo2l.us.auth0.com/.well-known/jwks.json",
+        "AUTH_ISSUER": "https://dev-irn8jgmlsiudjo2l.us.auth0.com/",
+        "UPLOAD_MAX_SIZE_BYTES": "30000000000",
+        "AUDIT_SIGNING_KEY_ID": "audit-ed25519-v1",
+        "AUDIT_RETENTION_DAYS": "2555",
+        "AUDIT_ALLOWED_RESIDENCIES": "za,eu",
+        "KYC_PROVIDER": "",
+        "DIDIT_KYC_WORKFLOW_ID": "",
+        "DIDIT_KYB_WORKFLOW_ID": "",
+        "APP_PUBLIC_URL": "https://veld-archive.pages.dev",
+        "CIPC_LOOKUP_URL": "",
+        "OCR_ENABLED": "false",
+        "OCR_MODEL": "@cf/moondream/moondream3.1-9B-A2B",
+        "PHOTO_VISION_MODEL": "@cf/moondream/moondream3.1-9B-A2B",
+        "PHOTO_EMBEDDING_MODEL": "@cf/baai/bge-base-en-v1.5",
+        "PHOTO_INDEX_NAMESPACE": "published-photos-v1",
+        "TRENDING_SEARCH_MIN_COUNT": "3",
+      "PAYOUT_MIN_CENTS": "10000",
+      "DEFAULT_ARTIST_SHARE_PERCENTAGE": "60",
+      "PAYSTACK_SPLIT_FEE_BEARER": "account",
+      "PAYSTACK_SUBSCRIPTION_PLAN_CODE": "PLN_aoo1xazr02olbru",
+      "BUYER_SUBSCRIPTION_AMOUNT_CENTS": "120000",
+      "BUYER_SUBSCRIPTION_INTERVAL": "monthly",
+      "PAYMENT_PROVIDER": "paystack",
+        "PAYMENT_ENDPOINT": "https://api.paystack.co/transaction/initialize",
+        "STREAM_ACCOUNT_ID": "37e92dc58245d6eab6517a916bd4d9d6",
+        "STREAM_ALLOWED_ORIGINS": "https://veld-archive.pages.dev"
+      }
+    }
   }
 }

@@ -2,9 +2,12 @@ export * from "./dam";
 export * from "./http";
 export * from "./payouts";
 export * from "./payments";
+export * from "./paystack-splits";
+export * from "./zoho";
 
 import { PayFastPayoutAdapter, PayoutProviderRegistry, SouthAfricanBankPayoutAdapter, StripeConnectPayoutAdapter } from "./payouts";
-import { JsonPaymentAdapter, PaymentProviderRegistry } from "./payments";
+import { JsonPaymentAdapter, PaymentProviderRegistry, PaystackPaymentAdapter } from "./payments";
+import { ZohoIntegration, type ZohoIntegrationEnvironment } from "./zoho";
 
 /** The environment values needed to compose the available integrations. */
 export type IntegrationEnvironment = {
@@ -16,7 +19,7 @@ export type IntegrationEnvironment = {
   PAYFAST_TOKEN?: string;
   ZA_BANK_ENDPOINT?: string;
   ZA_BANK_TOKEN?: string;
-};
+} & ZohoIntegrationEnvironment;
 
 /**
  * Application integration container.
@@ -28,17 +31,23 @@ export type IntegrationEnvironment = {
 export class IntegrationContainer {
   readonly payments: PaymentProviderRegistry;
   readonly payouts: PayoutProviderRegistry;
+  readonly zoho: ZohoIntegration;
 
   constructor(environment: IntegrationEnvironment) {
     this.payments = new PaymentProviderRegistry();
     this.payouts = new PayoutProviderRegistry();
+    this.zoho = new ZohoIntegration(environment);
 
     if (environment.PAYMENT_PROVIDER && environment.PAYMENT_ENDPOINT && environment.PAYMENT_TOKEN) {
-      this.payments.register(new JsonPaymentAdapter({
-        provider: environment.PAYMENT_PROVIDER,
-        endpoint: environment.PAYMENT_ENDPOINT,
-        token: environment.PAYMENT_TOKEN,
-      }));
+      if (environment.PAYMENT_PROVIDER.toLowerCase() === "paystack") {
+        this.payments.register(new PaystackPaymentAdapter({ endpoint: environment.PAYMENT_ENDPOINT, secretKey: environment.PAYMENT_TOKEN }));
+      } else {
+        this.payments.register(new JsonPaymentAdapter({
+          provider: environment.PAYMENT_PROVIDER,
+          endpoint: environment.PAYMENT_ENDPOINT,
+          token: environment.PAYMENT_TOKEN,
+        }));
+      }
     }
     if (environment.STRIPE_SECRET_KEY) {
       this.payouts.register(new StripeConnectPayoutAdapter({ secretKey: environment.STRIPE_SECRET_KEY }));
