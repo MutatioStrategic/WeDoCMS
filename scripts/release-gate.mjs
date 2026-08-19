@@ -44,6 +44,9 @@ if (process.argv.includes("--production")) {
   const productionConfig = productionStart >= 0 ? wrangler.slice(productionStart, productionStart + 20_000) : "";
   if (productionStart < 0) failures.push("wrangler.jsonc has no dedicated production environment; root development bindings cannot be promoted.");
   if (!/"APP_ENV"\s*:\s*"production"/.test(productionConfig)) failures.push("The production Wrangler environment must set APP_ENV to production.");
+  if (/"cache"\s*:\s*\{\s*"enabled"\s*:\s*true/s.test(productionConfig)) failures.push("Worker-wide production caching must remain disabled for cookie-authenticated API responses.");
+  if (/"AUTH_PROVIDER"\s*:\s*"(?:auth0|both)"/.test(productionConfig) && !/"AUTH_AUDIENCE"\s*:\s*"[^"]+"/.test(productionConfig)) failures.push("Auth0 is selected in production but AUTH_AUDIENCE is missing.");
+  if (!/"PAYSTACK_SUBSCRIPTION_PLAN_CODE"\s*:\s*"PLN_[^"]+"/.test(productionConfig)) failures.push("The canonical Paystack subscription plan code is missing.");
   if (/replace-with-|org-demo|localhost|127\.0\.0\.1/i.test(productionConfig)) failures.push("The production Wrangler environment contains demo, localhost, or placeholder configuration.");
 }
 

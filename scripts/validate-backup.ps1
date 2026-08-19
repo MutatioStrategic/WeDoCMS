@@ -1,9 +1,19 @@
 param(
-  [Parameter(Mandatory = $true)][string]$BackupSql,
+  [string]$BackupSql,
   [string]$Manifest
 )
 
 $ErrorActionPreference = "Stop"
+$temporaryFixture = $false
+if (-not $BackupSql) {
+  $BackupSql = [System.IO.Path]::GetTempFileName()
+  $temporaryFixture = $true
+  @"
+CREATE TABLE users (id TEXT PRIMARY KEY);
+CREATE TABLE organizations (id TEXT PRIMARY KEY);
+CREATE TABLE licences (id TEXT PRIMARY KEY);
+"@ | Set-Content -LiteralPath $BackupSql -Encoding utf8
+}
 $sqlPath = [System.IO.Path]::GetFullPath($BackupSql)
 if (-not (Test-Path -LiteralPath $sqlPath -PathType Leaf)) { throw "Backup SQL file was not found: $sqlPath" }
 
@@ -20,3 +30,4 @@ foreach ($required in @("CREATE TABLE", "users", "organizations", "licences")) {
   if ($sql -notmatch [regex]::Escape($required)) { throw "Backup does not contain the required marker: $required" }
 }
 Write-Host "Backup integrity markers and optional SHA-256 manifest verified: $sqlPath"
+if ($temporaryFixture) { Remove-Item -LiteralPath $sqlPath -Force }

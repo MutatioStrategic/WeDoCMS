@@ -429,9 +429,71 @@ paths:
                     type: array
                     items:
                       type: object
-                      required: [id, ready, detail]
-                      properties: { id: { type: string }, ready: { type: boolean }, detail: { type: string } }
+                      required: [id, ready, action]
+                      properties: { id: { type: string }, ready: { type: boolean }, action: { type: string } }
         '403': { description: Admin access required }
+  /api/onboarding/seller:
+    put:
+      operationId: saveSellerOnboarding
+      summary: Persist the authenticated seller profile and versioned seller agreement acceptance
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Seller profile saved }
+        '403': { description: Contributor access required }
+        '422': { description: Invalid or incomplete seller profile }
+  /api/onboarding/cipc/lookup:
+    post:
+      operationId: verifyCipcRegistration
+      summary: Verify the saved company registration through the configured CIPC adapter
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Company registration verified }
+        '409': { description: A matching company seller profile is required }
+        '503': { description: CIPC integration is unavailable or unconfigured }
+  /api/onboarding/didit/session:
+    post:
+      operationId: createDiditVerificationSession
+      summary: Create a hosted Didit KYC or KYB session for the authenticated seller
+      security: [{ sessionCookie: [] }]
+      responses:
+        '201': { description: Didit hosted verification session created }
+        '409': { description: Seller or CIPC prerequisite is incomplete }
+        '503': { description: Didit integration is unavailable or unconfigured }
+  /api/webhooks/didit:
+    post:
+      operationId: receiveDiditWebhook
+      summary: Receive a signed, timestamped, deduplicated Didit decision event
+      parameters:
+        - { name: x-signature-v2, in: header, required: false, schema: { type: string } }
+        - { name: x-signature, in: header, required: false, schema: { type: string } }
+        - { name: x-timestamp, in: header, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Event accepted or already processed }
+        '401': { description: Invalid or stale signature }
+  /api/subscription:
+    get:
+      operationId: getBuyerSubscription
+      summary: Return the signed-in buyer's canonical Paystack subscription and payment history
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Subscription state and plan configuration }
+  /api/subscription/session:
+    post:
+      operationId: createBuyerSubscriptionSession
+      summary: Start hosted checkout for the configured Paystack recurring plan
+      security: [{ sessionCookie: [] }]
+      responses:
+        '201': { description: Hosted subscription checkout created }
+        '409': { description: Subscription is already active or pending }
+        '503': { description: Paystack plan is unconfigured or unavailable }
+  /api/subscription/manage-link:
+    post:
+      operationId: createBuyerSubscriptionManageLink
+      summary: Create a short-lived Paystack-hosted billing management link
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Management link created }
+        '404': { description: No manageable subscription found }
   /api/governance/assets/{id}/action:
     post:
       operationId: runGovernanceAction
@@ -577,8 +639,13 @@ paths:
       parameters:
         - name: x-payment-signature
           in: header
-          required: true
+          required: false
           schema: { type: string, minLength: 1 }
+        - name: x-paystack-signature
+          in: header
+          required: false
+          description: Paystack HMAC-SHA512 signature over the raw JSON body
+          schema: { type: string, minLength: 128, maxLength: 128 }
       responses:
         '200':
           description: Event accepted or already processed

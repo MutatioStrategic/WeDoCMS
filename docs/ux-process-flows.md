@@ -77,7 +77,7 @@ approved archive search.
    purchase history, including licences, photographer subscriptions, monthly
    membership payments, and credit purchases.
 2. The buyer chooses a membership start date and billing day from 1 to 28,
-   then opens hosted payment checkout for the fixed R1299 monthly price.
+   then opens hosted payment checkout for the configured R1,200 monthly Paystack plan.
 3. The membership remains pending until the signed payment webhook confirms
    payment. A confirmed payment activates the membership and records the next
    monthly charge date; a failed payment shows a past-due state.
