@@ -32,8 +32,12 @@ import {
   type AuditCatalogRow,
 } from "./audit-analytics";
 import { IntegrationContainer } from "../integrations";
+import { calculateMarketplaceSplit } from "../integrations/paystack-splits";
+import { normalizePaystackPaymentEvent, verifyPaystackWebhook } from "../integrations/paystack-webhooks";
+import { normalizeDiditStatus, verifyDiditWebhook } from "../integrations/didit";
+import { agreementText, buyerAgreement, paymentDisclosure, sellerAgreement } from "../legal/agreements";
 import { isPayFastIp, payfastAmountCents, verifyPayFastSignature } from "../integrations/payfast";
-import { CREDIT_UNIT_CENTS, PLATFORM_SUBSCRIPTION_PRICE_CENTS, creditPurchaseAmountCents, isCalendarDate, nextMonthlyChargeDate } from "./buyer-finance";
+import { CREDIT_UNIT_CENTS, creditPurchaseAmountCents } from "./buyer-finance";
 import { monthlyPayoutSchedule } from "./payout-schedule";
 import { buildStatementCsv, buildStatementPdf } from "./statement-export";
 import { canonicalContract, ocrValidation, sanitizeOcrResult, sha256Hex } from "./seller-workflow";
@@ -61,6 +65,7 @@ import {
   type RequestUser,
 } from "./auth";
 import { allowedOrigin, applySecurityHeaders, enforceRateLimit, scanMediaObject, type SecurityBindings } from "./security";
+import { applyApiCachePolicy } from "./http-cache";
 import { createPresignedR2Url } from "./r2-presign";
 import { decidePayoutBatch } from "./payout-decision";
 import { AUTO_APPROVAL_SCOPE, AUTO_APPROVAL_TERMS_VERSION, autoApprovalIsActive, licenceApprovalStatus } from "./licence-approval";
@@ -109,6 +114,14 @@ type SecretBindings = {
   AUDIT_ALLOWED_RESIDENCIES?: string;
   KYC_PROVIDER?: string;
   KYC_WEBHOOK_SECRET?: string;
+  DIDIT_API_KEY?: string;
+  DIDIT_WEBHOOK_SECRET?: string;
+  DIDIT_KYC_WORKFLOW_ID?: string;
+  DIDIT_KYB_WORKFLOW_ID?: string;
+  DIDIT_API_URL?: string;
+  CIPC_LOOKUP_URL?: string;
+  CIPC_API_TOKEN?: string;
+  APP_PUBLIC_URL?: string;
   STRIPE_SECRET_KEY?: string;
   PAYFAST_ENDPOINT?: string;
   PAYFAST_TOKEN?: string;
@@ -150,6 +163,15 @@ type SecretBindings = {
   PAYMENT_PROVIDER?: string;
   PAYMENT_ENDPOINT?: string;
   PAYMENT_TOKEN?: string;
+  PAYSTACK_SUBSCRIPTION_PLAN_CODE?: string;
+  BUYER_SUBSCRIPTION_AMOUNT_CENTS?: string;
+  BUYER_SUBSCRIPTION_INTERVAL?: string;
+  DEFAULT_ARTIST_SHARE_PERCENTAGE?: string;
+  PAYSTACK_SPLIT_FEE_BEARER?: string;
+  MARKETPLACE_TERMS_APPROVED?: string;
+  EDGE_CONTROLS_ATTESTED_AT?: string;
+  KEY_ROTATION_ATTESTED_AT?: string;
+  BACKUP_RESTORE_ATTESTED_AT?: string;
   PAYFAST_MERCHANT_ID?: string;
   PAYFAST_MERCHANT_KEY?: string;
   PAYFAST_PASSPHRASE?: string;
@@ -263,6 +285,7 @@ app.use("*", async (c, next) => {
     recordMetric(c.env, "request_error", trace, 1, [c.req.method, c.req.path]);
     throw error;
   } finally {
+    applyApiCachePolicy(c.req.raw, c.res);
     const durationMs = elapsedMilliseconds(startedAt);
     logEvent("info", "request.completed", trace, {
       method: c.req.method,
@@ -1044,7 +1067,7 @@ const contractSubmissionSchema = z.object({
 });
 
 const walletSchema = z.object({
-  provider: z.enum(["stripe_connect", "payfast", "za_bank"]),
+  provider: z.enum(["paystack", "stripe_connect", "payfast", "za_bank"]),
   providerAccountId: z.string().trim().max(240).optional(),
   accountHolderName: z.string().trim().min(2).max(180),
   accountLast4: z.string().regex(/^\d{4}$/).optional(),
@@ -1071,14 +1094,19 @@ async function ensureVerificationCase(c: { env: Bindings }, user: RequestUser, r
 
 async function verifyFirmaSignature(env: Bindings, reference: string, signerEmail: string): Promise<boolean> {
   if (!env.FIRMA_VERIFY_URL || !env.FIRMA_API_TOKEN) return String(env.APP_ENV) !== "production";
-  const response = await fetch(env.FIRMA_VERIFY_URL, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${env.FIRMA_API_TOKEN}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ reference, signerEmail }),
-  });
-  if (!response.ok) return false;
-  const result = await response.json() as { verified?: boolean; signerEmail?: string };
-  return result.verified === true && (!result.signerEmail || result.signerEmail.toLowerCase() === signerEmail.toLowerCase());
+  try {
+    const response = await fetch(env.FIRMA_VERIFY_URL, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.FIRMA_API_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ reference, signerEmail }),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!response.ok) return false;
+    const result = await response.json() as { verified?: boolean; signerEmail?: string };
+    return result.verified === true && (!result.signerEmail || result.signerEmail.toLowerCase() === signerEmail.toLowerCase());
+  } catch {
+    return false;
+  }
 }
 
 app.get("/api/onboarding/status", async (c) => {
@@ -1103,13 +1131,14 @@ app.post("/api/onboarding/wallet", async (c) => {
   const user = await requestUser(c);
   if (!user || !allowedRole(user, ["contributor", "admin"])) return c.json({ error: "Contributor access required" }, 403);
   const payload = walletSchema.parse(await c.req.json());
+  if (payload.provider === "paystack" && (!payload.providerAccountId || !/^ACCT_[A-Za-z0-9]+$/.test(payload.providerAccountId))) return c.json({ error: "A valid Paystack subaccount code is required" }, 422);
   if (payload.provider === "stripe_connect" && !payload.providerAccountId) return c.json({ error: "Stripe connected account is required" }, 422);
   if (payload.provider === "payfast" && !payload.providerAccountId) return c.json({ error: "PayFast recipient reference is required" }, 422);
   const walletId = crypto.randomUUID();
   await c.env.DB.batch([
     c.env.DB.prepare("UPDATE payout_wallets SET status = 'disabled', updated_at = CURRENT_TIMESTAMP WHERE contributor_id = ? AND provider = ? AND status <> 'disabled'").bind(user.id, payload.provider),
-    c.env.DB.prepare(`INSERT INTO payout_wallets (id, contributor_id, provider, provider_account_id, account_holder_name, account_last4, branch_last4, currency, status, metadata_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', '{}')`).bind(walletId, user.id, payload.provider, payload.providerAccountId ?? null, payload.accountHolderName, payload.accountLast4 ?? null, payload.branchLast4 ?? null, payload.currency),
+    c.env.DB.prepare(`INSERT INTO payout_wallets (id, contributor_id, provider, provider_account_id, account_holder_name, account_last4, branch_last4, currency, artist_share_percentage, status, metadata_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', '{}')`).bind(walletId, user.id, payload.provider, payload.providerAccountId ?? null, payload.accountHolderName, payload.accountLast4 ?? null, payload.branchLast4 ?? null, payload.currency, Math.min(99, Math.max(1, Number(c.env.DEFAULT_ARTIST_SHARE_PERCENTAGE ?? 60)))),
     c.env.DB.prepare("UPDATE onboarding_tenders SET wallet_id = ?, updated_at = CURRENT_TIMESTAMP WHERE organization_id = ? AND contributor_id = ? AND status IN ('pending', 'corrections_requested')").bind(walletId, user.organizationId, user.id),
     c.env.DB.prepare("UPDATE contributor_profiles SET payout_provider = ?, payout_status = 'pending', updated_at = CURRENT_TIMESTAMP WHERE user_id = ?").bind(payload.provider, user.id),
   ]);
@@ -1122,7 +1151,7 @@ app.post("/api/onboarding/contract", async (c) => {
   const payload = contractSubmissionSchema.parse(await c.req.json());
   if (String(c.env.APP_ENV) === "production" && payload.signatureMethod !== "firma") return c.json({ error: "Production contracts require a Firma signature" }, 422);
   if (!(await verifyFirmaSignature(c.env, payload.signatureReference, user.email))) return c.json({ error: "Firma signature could not be verified" }, 422);
-  const turnstile = await verifyTurnstileToken(c.env, payload.turnstileToken, "contributor-contract", c.get("trace").traceparent);
+  const turnstile = await verifyTurnstileToken(c.env, payload.turnstileToken, "contributor-contract", c.get("trace").traceparent, c.req.header("CF-Connecting-IP"));
   if (!turnstile.verified) return c.json({ error: turnstile.reason ?? "Turnstile verification failed" }, 403);
   const profile = await c.env.DB.prepare("SELECT contributor_type, location FROM contributor_profiles WHERE user_id = ?").bind(user.id).first<{ contributor_type?: string; location?: string }>();
   const actor = await requestActor(c);
@@ -1383,6 +1412,11 @@ app.post("/api/admin/assets/:id/review", async (c) => {
 });
 
 const licenceRequestSchema: z.ZodType<LicenceRequest> = contractLicenceRequestSchema;
+const checkoutRequestSchema = contractLicenceRequestSchema.extend({
+  buyerAgreementVersion: z.literal(buyerAgreement.version),
+  paymentAgreementVersion: z.literal(paymentDisclosure.version),
+  acceptBuyerTerms: z.literal(true),
+});
 
 async function governanceAsset(c: { env: Bindings }, assetId: string, organizationId?: string): Promise<Asset | null> {
   const row = organizationId
@@ -1578,7 +1612,7 @@ app.get("/api/admin/licence-approvals", async (c) => {
 app.post("/api/checkout", async (c) => {
   const user = await requestUser(c);
   if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, 401);
-  const request = licenceRequestSchema.parse(await c.req.json());
+  const request = checkoutRequestSchema.parse(await c.req.json());
   const asset = await governanceAsset(c, request.assetId, user.organizationId);
   if (!asset) return c.json({ error: "Asset not found" }, 404);
   const validation = archiveDomain.evaluateLicenceRequest(asset, request);
@@ -1592,7 +1626,16 @@ app.post("/api/checkout", async (c) => {
   const existing = await c.env.DB.prepare(`SELECT id, price_cents FROM licences
     WHERE organization_id = ? AND asset_id = ? AND buyer_id = ? AND licence_type = ? AND territory = ? AND duration_days = ? AND status = 'pending'
     ORDER BY created_at DESC LIMIT 1`).bind(user.organizationId, request.assetId, user.id, request.licenceType, request.territory, request.durationDays).first<{ id: string; price_cents: number }>();
-  if (existing) return c.json({ blocked: false, licenceId: existing.id, licenceType: request.licenceType, licence: archiveDomain.licenceDescription(request.licenceType), priceCents: Number(existing.price_cents), currency: "ZAR", paymentRequired: true, purchaseStatus: "not_charged_until_verified_checkout", existing: true, ...validation }, 200);
+  const acceptedAt = new Date().toISOString();
+  const buyerTermsHash = await sha256Hex(agreementText(buyerAgreement));
+  const paymentTermsHash = await sha256Hex(agreementText(paymentDisclosure));
+  if (existing) {
+    await c.env.DB.batch([
+      c.env.DB.prepare("INSERT OR IGNORE INTO marketplace_agreement_acceptances (id, organization_id, user_id, agreement_type, agreement_version, terms_sha256, context_type, context_id, accepted_at) VALUES (?, ?, ?, 'buyer', ?, ?, 'checkout', ?, ?)").bind(crypto.randomUUID(), user.organizationId, user.id, buyerAgreement.version, buyerTermsHash, existing.id, acceptedAt),
+      c.env.DB.prepare("INSERT OR IGNORE INTO marketplace_agreement_acceptances (id, organization_id, user_id, agreement_type, agreement_version, terms_sha256, context_type, context_id, accepted_at) VALUES (?, ?, ?, 'payment', ?, ?, 'checkout', ?, ?)").bind(crypto.randomUUID(), user.organizationId, user.id, paymentDisclosure.version, paymentTermsHash, existing.id, acceptedAt),
+    ]);
+    return c.json({ blocked: false, licenceId: existing.id, licenceType: request.licenceType, licence: archiveDomain.licenceDescription(request.licenceType), priceCents: Number(existing.price_cents), currency: "ZAR", paymentRequired: true, purchaseStatus: "not_charged_until_verified_checkout", existing: true, agreementsPersisted: true, ...validation }, 200);
+  }
   const preference = await c.env.DB.prepare(`SELECT id, enabled, terms_version, signed_at, signed_by
     FROM buyer_licence_approval_preferences WHERE organization_id = ? AND buyer_id = ?`)
     .bind(user.organizationId, user.id).first<{ id: string; enabled: number; terms_version: string; signed_at: string | null; signed_by: string | null }>();
@@ -1635,11 +1678,14 @@ app.post("/api/checkout", async (c) => {
       }
     }
   }
-  await c.env.DB.prepare(`INSERT INTO licences
+  await c.env.DB.batch([c.env.DB.prepare(`INSERT INTO licences
       (id, organization_id, asset_id, buyer_id, licence_type, territory, duration_days, price_cents, approval_status, approval_method, approved_at, approved_by, auto_approval_preference_id)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(licenceId, user.organizationId, request.assetId, user.id, request.licenceType, request.territory, request.durationDays, priceCents, approvalStatus, autoApproved ? "buyer_auto_approval" : null, autoApproved ? new Date().toISOString() : null, autoApproved ? user.id : null, autoApproved ? preference?.id ?? null : null).run();
-  return c.json({ blocked: false, licenceId, licenceType: request.licenceType, licence: archiveDomain.licenceDescription(request.licenceType), priceCents, currency: "ZAR", paymentRequired: true, purchaseStatus: "not_charged_until_verified_checkout", approvalStatus, approvalAuditEventId, approvalAuditSource, ...validation }, 201);
+    .bind(licenceId, user.organizationId, request.assetId, user.id, request.licenceType, request.territory, request.durationDays, priceCents, approvalStatus, autoApproved ? "buyer_auto_approval" : null, autoApproved ? new Date().toISOString() : null, autoApproved ? user.id : null, autoApproved ? preference?.id ?? null : null),
+    c.env.DB.prepare("INSERT INTO marketplace_agreement_acceptances (id, organization_id, user_id, agreement_type, agreement_version, terms_sha256, context_type, context_id, accepted_at) VALUES (?, ?, ?, 'buyer', ?, ?, 'checkout', ?, ?)").bind(crypto.randomUUID(), user.organizationId, user.id, buyerAgreement.version, buyerTermsHash, licenceId, acceptedAt),
+    c.env.DB.prepare("INSERT INTO marketplace_agreement_acceptances (id, organization_id, user_id, agreement_type, agreement_version, terms_sha256, context_type, context_id, accepted_at) VALUES (?, ?, ?, 'payment', ?, ?, 'checkout', ?, ?)").bind(crypto.randomUUID(), user.organizationId, user.id, paymentDisclosure.version, paymentTermsHash, licenceId, acceptedAt),
+  ]);
+  return c.json({ blocked: false, licenceId, licenceType: request.licenceType, licence: archiveDomain.licenceDescription(request.licenceType), priceCents, currency: "ZAR", paymentRequired: true, purchaseStatus: "not_charged_until_verified_checkout", agreementsPersisted: true, approvalStatus, approvalAuditEventId, approvalAuditSource, ...validation }, 201);
 });
 
 const paymentSessionSchema = z.object({
@@ -1653,12 +1699,24 @@ app.post("/api/payments/:licenceId/session", async (c) => {
   if (!paymentProviderConfigured(c.env)) return c.json({ error: "Payment provider is not configured" }, 503);
   const payload = paymentSessionSchema.parse(await c.req.json());
   const licence = await c.env.DB.prepare(`
-    SELECT l.id, l.price_cents, l.status, l.payment_reference, u.email
-    FROM licences l JOIN users u ON u.id = l.buyer_id
+    SELECT l.id, l.price_cents, l.status, l.payment_reference, u.email, a.owner_id,
+      w.provider AS wallet_provider, w.provider_account_id, w.artist_share_percentage, w.status AS wallet_status,
+      (SELECT COUNT(*) FROM marketplace_agreement_acceptances maa
+       WHERE maa.user_id = l.buyer_id AND maa.context_type = 'checkout' AND maa.context_id = l.id
+         AND ((maa.agreement_type = 'buyer' AND maa.agreement_version = ?) OR (maa.agreement_type = 'payment' AND maa.agreement_version = ?))) AS agreement_count
+    FROM licences l JOIN users u ON u.id = l.buyer_id JOIN assets a ON a.id = l.asset_id
+    LEFT JOIN payout_wallets w ON w.contributor_id = a.owner_id AND w.provider = 'paystack' AND w.status = 'verified'
     WHERE l.id = ? AND l.organization_id = ? AND l.buyer_id = ?
-  `).bind(c.req.param("licenceId"), user.organizationId, user.id).first<{ id: string; price_cents: number; status: string; payment_reference: string | null; email: string }>();
+  `).bind(buyerAgreement.version, paymentDisclosure.version, c.req.param("licenceId"), user.organizationId, user.id).first<{ id: string; price_cents: number; status: string; payment_reference: string | null; email: string; owner_id: string; wallet_provider: string | null; provider_account_id: string | null; artist_share_percentage: number | null; wallet_status: string | null; agreement_count: number }>();
   if (!licence) return c.json({ error: "Licence not found" }, 404);
   if (licence.status !== "pending") return c.json({ error: `Licence cannot be paid from status ${licence.status}` }, 409);
+  if (Number(licence.agreement_count) !== 2) return c.json({ error: "Current buyer and payment terms must be accepted before payment" }, 409);
+  if (c.env.PAYMENT_PROVIDER === "paystack" && (licence.wallet_provider !== "paystack" || licence.wallet_status !== "verified" || !licence.provider_account_id)) {
+    return c.json({ error: "The seller does not have a verified Paystack subaccount; checkout cannot safely split settlement" }, 409);
+  }
+  const allocation = c.env.PAYMENT_PROVIDER === "paystack"
+    ? calculateMarketplaceSplit(Number(licence.price_cents), Number(licence.artist_share_percentage ?? c.env.DEFAULT_ARTIST_SHARE_PERCENTAGE ?? 60))
+    : null;
   const integrations = new IntegrationContainer(c.env);
   try {
     const session = await integrations.payments.get(c.env.PAYMENT_PROVIDER!).createCheckoutSession({
@@ -1669,11 +1727,19 @@ app.post("/api/payments/:licenceId/session", async (c) => {
       buyer: { id: user.id, email: licence.email },
       successUrl: payload.successUrl,
       cancelUrl: payload.cancelUrl,
-      metadata: { organizationId: user.organizationId, userId: user.id },
+      metadata: { organizationId: user.organizationId, userId: user.id, productType: "licence", licenceId: licence.id },
+      ...(allocation && licence.provider_account_id ? { split: { type: "percentage" as const, bearerType: String(c.env.PAYSTACK_SPLIT_FEE_BEARER) === "subaccount" ? "subaccount" as const : "account" as const, subaccounts: [{ subaccount: licence.provider_account_id, share: allocation.artistSharePercentage }] } } : {}),
     });
-    await c.env.DB.prepare("UPDATE licences SET payment_provider = ?, payment_reference = COALESCE(payment_reference, ?) WHERE id = ? AND organization_id = ? AND status = 'pending'")
-      .bind(c.env.PAYMENT_PROVIDER, session.providerReference ?? session.id, licence.id, user.organizationId).run();
-    return c.json({ licenceId: licence.id, provider: session.provider, checkoutUrl: session.checkoutUrl, status: session.status }, 201, { Location: `/api/payments/${licence.id}/session` });
+    const providerReference = session.providerReference ?? session.id;
+    await c.env.DB.batch([
+      c.env.DB.prepare("UPDATE licences SET payment_provider = ?, payment_reference = COALESCE(payment_reference, ?) WHERE id = ? AND organization_id = ? AND status = 'pending'").bind(c.env.PAYMENT_PROVIDER, providerReference, licence.id, user.organizationId),
+      ...(allocation && licence.provider_account_id ? [c.env.DB.prepare(`INSERT INTO payment_split_allocations
+        (id, licence_id, provider, provider_reference, contributor_id, provider_account_id, artist_share_percentage, artist_amount_cents, platform_amount_cents, currency)
+        VALUES (?, ?, 'paystack', ?, ?, ?, ?, ?, ?, 'ZAR')
+        ON CONFLICT(licence_id) DO UPDATE SET provider_reference = excluded.provider_reference, contributor_id = excluded.contributor_id, provider_account_id = excluded.provider_account_id, artist_share_percentage = excluded.artist_share_percentage, artist_amount_cents = excluded.artist_amount_cents, platform_amount_cents = excluded.platform_amount_cents, status = 'configured', updated_at = CURRENT_TIMESTAMP`)
+        .bind(crypto.randomUUID(), licence.id, providerReference, licence.owner_id, licence.provider_account_id, allocation.artistSharePercentage, allocation.artistAmountCents, allocation.platformAmountCents)] : []),
+    ]);
+    return c.json({ licenceId: licence.id, provider: session.provider, checkoutUrl: session.checkoutUrl, status: session.status, split: allocation }, 201, { Location: `/api/payments/${licence.id}/session` });
   } catch (error) {
     logEvent("error", "payment.checkout_session_failed", c.get("trace"), { licenceId: licence.id, provider: c.env.PAYMENT_PROVIDER, error: error instanceof Error ? error.message : "unknown" });
     return c.json({ error: "Payment provider could not create a checkout session" }, 503);
@@ -1836,11 +1902,154 @@ app.post("/api/subscriptions/:id/cancel", async (c) => {
   return c.json({ subscriptionId: c.req.param("id"), status: "cancelled" });
 });
 
-const platformSubscriptionRequestSchema = z.object({
-  startDate: z.string().refine(isCalendarDate, "Start date must be a valid calendar date"),
-  billingDay: z.number().int().min(1).max(28),
+const buyerSubscriptionSessionSchema = z.object({
   successUrl: z.string().url().max(2048),
   cancelUrl: z.string().url().max(2048),
+});
+
+function buyerSubscriptionConfiguration(env: Bindings): { configured: boolean; planCode: string; amountCents: number; interval: string } {
+  const planCode = env.PAYSTACK_SUBSCRIPTION_PLAN_CODE?.trim() ?? "";
+  const amountCents = Number(env.BUYER_SUBSCRIPTION_AMOUNT_CENTS ?? 120_000);
+  const interval = env.BUYER_SUBSCRIPTION_INTERVAL?.trim() || "monthly";
+  return { configured: env.PAYMENT_PROVIDER === "paystack" && paymentProviderConfigured(env) && Boolean(planCode) && Number.isSafeInteger(amountCents) && amountCents > 0, planCode, amountCents, interval };
+}
+
+const sellerOnboardingSchema = z.object({
+  sellerType: z.enum(["individual", "company"]),
+  legalName: z.string().trim().min(2).max(180),
+  phone: z.string().trim().regex(/^\+[1-9]\d{7,14}$/, "Phone must be in E.164 format"),
+  ageConfirmed: z.literal(true),
+  identityDocumentType: z.enum(["sa_id", "passport"]),
+  bankAccountName: z.string().trim().min(2).max(180),
+  copyrightDeclaration: z.literal(true),
+  taxResponsibilityDeclaration: z.literal(true),
+  contributorAgreement: z.literal(true),
+  registeredName: z.string().trim().min(2).max(180).optional(),
+  cipcRegistrationNumber: z.string().trim().min(4).max(80).optional(),
+  representativeName: z.string().trim().min(2).max(180).optional(),
+  representativeAuthority: z.boolean().default(false),
+  beneficialOwnerRequired: z.boolean().default(false),
+}).superRefine((value, context) => {
+  if (value.sellerType !== "company") return;
+  for (const [field, current] of [["registeredName", value.registeredName], ["cipcRegistrationNumber", value.cipcRegistrationNumber], ["representativeName", value.representativeName]] as const) {
+    if (!current) context.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: `${field} is required for a company seller` });
+  }
+  if (!value.representativeAuthority) context.addIssue({ code: z.ZodIssueCode.custom, path: ["representativeAuthority"], message: "Representative authority must be confirmed" });
+});
+
+app.put("/api/onboarding/seller", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["contributor", "admin"])) return c.json({ error: "Contributor access required" }, 403);
+  const payload = sellerOnboardingSchema.parse(await c.req.json());
+  const now = new Date().toISOString();
+  const termsHash = await sha256Hex(agreementText(sellerAgreement));
+  await c.env.DB.batch([
+    c.env.DB.prepare(`INSERT INTO seller_onboarding_profiles
+      (contributor_id, seller_type, legal_name, phone_e164, age_confirmed_at, identity_document_type, bank_account_name, copyright_declaration_at, tax_responsibility_declaration_at, contributor_agreement_at, registered_name, cipc_registration_number, representative_name, representative_authority_at, beneficial_owner_required, beneficial_owner_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(contributor_id) DO UPDATE SET seller_type = excluded.seller_type, legal_name = excluded.legal_name, phone_e164 = excluded.phone_e164, age_confirmed_at = excluded.age_confirmed_at, identity_document_type = excluded.identity_document_type, bank_account_name = excluded.bank_account_name, copyright_declaration_at = excluded.copyright_declaration_at, tax_responsibility_declaration_at = excluded.tax_responsibility_declaration_at, contributor_agreement_at = excluded.contributor_agreement_at, registered_name = excluded.registered_name, cipc_registration_number = excluded.cipc_registration_number, representative_name = excluded.representative_name, representative_authority_at = excluded.representative_authority_at, beneficial_owner_required = excluded.beneficial_owner_required, beneficial_owner_status = excluded.beneficial_owner_status, cipc_status = CASE WHEN excluded.cipc_registration_number IS seller_onboarding_profiles.cipc_registration_number THEN seller_onboarding_profiles.cipc_status ELSE 'not_checked' END, updated_at = CURRENT_TIMESTAMP`)
+      .bind(user.id, payload.sellerType, payload.legalName, payload.phone, now, payload.identityDocumentType, payload.bankAccountName, now, now, now, payload.registeredName ?? null, payload.cipcRegistrationNumber ?? null, payload.representativeName ?? null, payload.representativeAuthority ? now : null, payload.beneficialOwnerRequired ? 1 : 0, payload.beneficialOwnerRequired ? "pending" : "not_required"),
+    c.env.DB.prepare("INSERT OR IGNORE INTO marketplace_agreement_acceptances (id, organization_id, user_id, agreement_type, agreement_version, terms_sha256, context_type, context_id, accepted_at) VALUES (?, ?, ?, 'seller', ?, ?, 'onboarding', ?, ?)").bind(crypto.randomUUID(), user.organizationId, user.id, sellerAgreement.version, termsHash, user.id, now),
+  ]);
+  return c.json({ sellerType: payload.sellerType, status: "saved", sellerAgreementVersion: sellerAgreement.version, agreementPersisted: true });
+});
+
+app.post("/api/onboarding/cipc/lookup", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["contributor", "admin"])) return c.json({ error: "Contributor access required" }, 403);
+  const payload = z.object({ registrationNumber: z.string().trim().min(4).max(80) }).parse(await c.req.json());
+  const seller = await c.env.DB.prepare("SELECT registered_name, cipc_registration_number FROM seller_onboarding_profiles WHERE contributor_id = ? AND seller_type = 'company'").bind(user.id).first<{ registered_name: string; cipc_registration_number: string }>();
+  if (!seller || seller.cipc_registration_number !== payload.registrationNumber) return c.json({ error: "Save the matching company seller profile before CIPC verification" }, 409);
+  const cipc = new IntegrationContainer(c.env).cipc;
+  if (!cipc) return c.json({ error: "CIPC lookup is not configured for this environment" }, 503);
+  try {
+    const result = await cipc.lookup(payload.registrationNumber);
+    const verified = result.verified === true && result.registrationNumber === payload.registrationNumber && typeof result.registeredName === "string" && result.registeredName.trim().toLowerCase() === seller.registered_name.trim().toLowerCase();
+    await c.env.DB.prepare("UPDATE seller_onboarding_profiles SET cipc_status = ?, cipc_checked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE contributor_id = ?").bind(verified ? "verified" : "rejected", user.id).run();
+    return c.json({ verified, status: verified ? "verified" : "rejected", registrationNumber: payload.registrationNumber, providerReference: result.providerReference ?? null }, verified ? 200 : 422);
+  } catch (error) {
+    logEvent("warn", "cipc.lookup_failed", c.get("trace"), { contributorId: user.id, error: error instanceof Error ? error.message : "unknown" });
+    return c.json({ error: "CIPC verification service is unavailable; the saved seller profile was retained" }, 503);
+  }
+});
+
+app.post("/api/onboarding/didit/session", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["contributor", "admin"])) return c.json({ error: "Contributor access required" }, 403);
+  const seller = await c.env.DB.prepare("SELECT seller_type, phone_e164, cipc_status, didit_session_id, didit_status FROM seller_onboarding_profiles WHERE contributor_id = ?").bind(user.id).first<{ seller_type: "individual" | "company"; phone_e164: string; cipc_status: string; didit_session_id: string | null; didit_status: string }>();
+  if (!seller) return c.json({ error: "Save the seller profile before starting identity verification" }, 409);
+  if (seller.seller_type === "company" && seller.cipc_status !== "verified") return c.json({ error: "CIPC verification must succeed before company identity verification" }, 409);
+  const didit = new IntegrationContainer(c.env).didit;
+  if (!didit) return c.json({ error: "Didit API, KYC, and KYB workflows are not fully configured" }, 503);
+  if (seller.didit_session_id && !["rejected", "expired", "Declined", "Expired", "Kyc Expired", "Abandoned"].includes(seller.didit_status)) return c.json({ sessionId: seller.didit_session_id, status: seller.didit_status, resumable: true }, 409);
+  try {
+    const session = await didit.createSellerSession({ sellerType: seller.seller_type, contributorId: user.id, callbackUrl: `${c.env.APP_PUBLIC_URL ?? new URL(c.req.url).origin}/account?verification=returned`, email: user.email, phone: seller.phone_e164 });
+    const actor = await requestActor(c);
+    if (!actor) return c.json({ error: "Authentication required" }, 401);
+    const caseId = await ensureVerificationCase(c, user, actor.residencyRegion, seller.seller_type === "company" ? "business" : "individual");
+    await c.env.DB.batch([
+      c.env.DB.prepare("UPDATE seller_onboarding_profiles SET didit_session_id = ?, didit_session_kind = ?, didit_status = ?, didit_provider_reference = ?, updated_at = CURRENT_TIMESTAMP WHERE contributor_id = ?").bind(session.sessionId, session.sessionKind, session.status, session.sessionId, user.id),
+      c.env.DB.prepare("UPDATE contributor_verification_cases SET provider = 'didit', provider_case_id = ?, status = 'pending', updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(session.sessionId, caseId),
+    ]);
+    return c.json({ sessionId: session.sessionId, sessionKind: session.sessionKind, url: session.url, status: session.status, verificationCaseId: caseId }, 201);
+  } catch (error) {
+    logEvent("error", "didit.session_failed", c.get("trace"), { contributorId: user.id, error: error instanceof Error ? error.message : "unknown" });
+    return c.json({ error: "Didit could not create a hosted verification session" }, 503);
+  }
+});
+
+app.get("/api/subscription", async (c) => {
+  const user = await buyerAccount(c);
+  if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, 403);
+  const configuration = buyerSubscriptionConfiguration(c.env);
+  const subscription = await c.env.DB.prepare("SELECT * FROM buyer_subscriptions WHERE organization_id = ? AND buyer_id = ? ORDER BY created_at DESC LIMIT 1").bind(user.organizationId, user.id).first<Record<string, unknown>>();
+  const payments = subscription ? await c.env.DB.prepare("SELECT provider_event_id, provider_reference, invoice_code, event_type, amount_cents, currency, status, period_start, period_end, paid_at, created_at FROM buyer_subscription_payments WHERE subscription_id = ? ORDER BY created_at DESC LIMIT 100").bind(subscription.id).all<Record<string, unknown>>() : { results: [] };
+  return c.json({ configured: configuration.configured, hasAccess: subscription?.status === "active" || subscription?.status === "non-renewing", sourceOfTruth: "signed Paystack webhook events", plan: configuration.configured ? { amountCents: configuration.amountCents, currency: "ZAR", interval: configuration.interval } : null, subscription: subscription ?? null, payments: payments.results });
+});
+
+app.post("/api/subscription/session", async (c) => {
+  const user = await buyerAccount(c);
+  if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, 403);
+  const configuration = buyerSubscriptionConfiguration(c.env);
+  if (!configuration.configured) return c.json({ error: "The Paystack subscription plan is not fully configured" }, 503);
+  const payload = buyerSubscriptionSessionSchema.parse(await c.req.json());
+  const current = await c.env.DB.prepare("SELECT id, status FROM buyer_subscriptions WHERE organization_id = ? AND buyer_id = ? ORDER BY created_at DESC LIMIT 1").bind(user.organizationId, user.id).first<{ id: string; status: string }>();
+  if (current && ["pending", "active", "non-renewing", "attention"].includes(current.status)) return c.json({ error: "A subscription is already active or awaiting Paystack" }, 409);
+  const subscriptionId = crypto.randomUUID();
+  await c.env.DB.prepare("INSERT INTO buyer_subscriptions (id, organization_id, buyer_id, plan_code, email, amount_cents, currency, interval) VALUES (?, ?, ?, ?, ?, ?, 'ZAR', ?)").bind(subscriptionId, user.organizationId, user.id, configuration.planCode, user.email, configuration.amountCents, configuration.interval).run();
+  try {
+    const session = await new IntegrationContainer(c.env).payments.get("paystack").createCheckoutSession({
+      idempotencyKey: `buyer-subscription:${subscriptionId}`,
+      referenceId: subscriptionId,
+      productType: "platform_subscription",
+      amountCents: configuration.amountCents,
+      currency: "ZAR",
+      buyer: { id: user.id, email: user.email },
+      successUrl: payload.successUrl,
+      cancelUrl: payload.cancelUrl,
+      planCode: configuration.planCode,
+      metadata: { organizationId: user.organizationId, userId: user.id, productType: "platform_subscription", subscriptionId },
+    });
+    await c.env.DB.prepare("UPDATE buyer_subscriptions SET provider_reference = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(session.providerReference ?? subscriptionId, subscriptionId).run();
+    return c.json({ subscriptionId, provider: "paystack", checkoutUrl: session.checkoutUrl, status: session.status, amountCents: configuration.amountCents, currency: "ZAR", interval: configuration.interval }, 201);
+  } catch (error) {
+    await c.env.DB.prepare("UPDATE buyer_subscriptions SET status = 'cancelled', failure_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(error instanceof Error ? error.message : "checkout_failed", subscriptionId).run();
+    return c.json({ error: "Paystack could not create the recurring subscription checkout" }, 503);
+  }
+});
+
+app.post("/api/subscription/manage-link", async (c) => {
+  const user = await buyerAccount(c);
+  if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, 403);
+  const subscription = await c.env.DB.prepare("SELECT provider_subscription_code FROM buyer_subscriptions WHERE organization_id = ? AND buyer_id = ? AND status IN ('active', 'non-renewing', 'attention') ORDER BY created_at DESC LIMIT 1").bind(user.organizationId, user.id).first<{ provider_subscription_code: string | null }>();
+  if (!subscription?.provider_subscription_code) return c.json({ error: "No manageable Paystack subscription was found" }, 404);
+  try {
+    const provider = new IntegrationContainer(c.env).payments.get("paystack");
+    if (!provider.createSubscriptionManageLink) return c.json({ error: "Subscription management is unavailable" }, 503);
+    return c.json({ manageUrl: await provider.createSubscriptionManageLink(subscription.provider_subscription_code) });
+  } catch {
+    return c.json({ error: "Paystack could not create a subscription management link" }, 503);
+  }
 });
 
 function buyerAccount(c: { env: Bindings; req: { raw: Request } }): Promise<RequestUser | null> {
@@ -1855,66 +2064,19 @@ function paymentProviderConfigured(env: Pick<Bindings, "PAYMENT_PROVIDER" | "PAY
 app.post("/api/buyer/platform-subscription/checkout", async (c) => {
   const user = await buyerAccount(c);
   if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, 403);
-  if (!paymentProviderConfigured(c.env)) return c.json({ error: "Payment provider is not configured for recurring membership" }, 503);
-  const payload = platformSubscriptionRequestSchema.parse(await c.req.json());
-  const today = new Date().toISOString().slice(0, 10);
-  if (payload.startDate < today) return c.json({ error: "Membership start date cannot be in the past" }, 422);
-  const priceCents = Math.max(100, Number(c.env.PLATFORM_SUBSCRIPTION_PRICE_CENTS ?? PLATFORM_SUBSCRIPTION_PRICE_CENTS));
-  const existing = await c.env.DB.prepare("SELECT id, status FROM buyer_platform_subscriptions WHERE organization_id = ? AND buyer_id = ?")
-    .bind(user.organizationId, user.id).first<{ id: string; status: string }>();
-  if (existing?.status === "active" || existing?.status === "pending") return c.json({ error: "A platform membership is already active or awaiting payment" }, 409);
-  const subscriptionId = existing?.id ?? crypto.randomUUID();
-  await c.env.DB.prepare(`
-    INSERT INTO buyer_platform_subscriptions (id, organization_id, buyer_id, status, price_cents, currency, billing_day, start_date, next_charge_date)
-    VALUES (?, ?, ?, 'pending', ?, 'ZAR', ?, ?, ?)
-    ON CONFLICT(organization_id, buyer_id) DO UPDATE SET status = 'pending', price_cents = excluded.price_cents, currency = excluded.currency, billing_day = excluded.billing_day, start_date = excluded.start_date, next_charge_date = excluded.next_charge_date, cancelled_at = NULL, updated_at = CURRENT_TIMESTAMP
-  `).bind(subscriptionId, user.organizationId, user.id, priceCents, payload.billingDay, payload.startDate, payload.startDate).run();
-  try {
-    const session = await new IntegrationContainer(c.env).payments.get(c.env.PAYMENT_PROVIDER!).createCheckoutSession({
-      idempotencyKey: `platform-subscription:${subscriptionId}:${payload.startDate}:${payload.billingDay}`,
-      referenceId: subscriptionId,
-      productType: "platform_subscription",
-      amountCents: priceCents,
-      currency: "ZAR",
-      buyer: { id: user.id, email: user.email },
-      successUrl: payload.successUrl,
-      cancelUrl: payload.cancelUrl,
-      recurring: { interval: "month", billingDay: payload.billingDay, startDate: payload.startDate },
-      metadata: { organizationId: user.organizationId, userId: user.id, productType: "platform_subscription", billingDay: String(payload.billingDay), startDate: payload.startDate },
-    });
-    await c.env.DB.prepare("UPDATE buyer_platform_subscriptions SET payment_provider = ?, payment_reference = ?, provider_subscription_reference = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?")
-      .bind(c.env.PAYMENT_PROVIDER, session.providerReference ?? session.id, session.providerSubscriptionReference ?? null, subscriptionId, user.organizationId).run();
-    return c.json({ subscriptionId, provider: session.provider, checkoutUrl: session.checkoutUrl, status: session.status, priceCents, currency: "ZAR", billingDay: payload.billingDay, startDate: payload.startDate }, 201, { Location: `/api/my/platform-subscription` });
-  } catch (error) {
-    await c.env.DB.prepare("UPDATE buyer_platform_subscriptions SET status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ? AND status = 'pending'").bind(subscriptionId, user.organizationId).run();
-    logEvent("error", "payment.platform_subscription_checkout_failed", c.get("trace"), { subscriptionId, provider: c.env.PAYMENT_PROVIDER, error: error instanceof Error ? error.message : "unknown" });
-    return c.json({ error: "Payment provider could not create a recurring membership checkout session" }, 503);
-  }
+  return c.json({ error: "This legacy subscription route is retired", replacement: "/api/subscription/session" }, 410);
 });
 
 app.get("/api/my/platform-subscription", async (c) => {
   const user = await buyerAccount(c);
   if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, 403);
-  const row = await c.env.DB.prepare(`
-    SELECT id, status, price_cents, currency, billing_day, start_date, next_charge_date, last_payment_at, cancelled_at, created_at, updated_at
-    FROM buyer_platform_subscriptions WHERE organization_id = ? AND buyer_id = ?
-  `).bind(user.organizationId, user.id).first<Record<string, unknown>>();
-  const payments = row ? await c.env.DB.prepare(`
-    SELECT id AS event_id, event_type, amount_cents, currency, received_at, processed_at
-    FROM payment_webhook_events WHERE subscription_id = ? AND product_type = 'platform_subscription' ORDER BY received_at DESC LIMIT 100
-  `).bind(row.id).all<Record<string, unknown>>() : { results: [] };
-  return c.json({
-    subscription: row ? { id: row.id, status: row.status, priceCents: Number(row.price_cents), currency: row.currency, billingDay: Number(row.billing_day), startDate: row.start_date, nextChargeDate: row.next_charge_date, lastPaymentAt: row.last_payment_at, cancelledAt: row.cancelled_at, createdAt: row.created_at, updatedAt: row.updated_at } : null,
-    payments: payments.results.map((payment) => ({ id: payment.event_id, type: payment.event_type, amountCents: Number(payment.amount_cents ?? 0), currency: payment.currency, receivedAt: payment.received_at, processedAt: payment.processed_at })),
-  });
+  return c.redirect(new URL("/api/subscription", c.req.url).toString(), 308);
 });
 
 app.post("/api/my/platform-subscription/cancel", async (c) => {
   const user = await buyerAccount(c);
   if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, 403);
-  const result = await c.env.DB.prepare("UPDATE buyer_platform_subscriptions SET status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE organization_id = ? AND buyer_id = ? AND status IN ('pending', 'active', 'past_due')")
-    .bind(user.organizationId, user.id).run();
-  return Number(result.meta.changes ?? 0) ? c.json({ status: "cancelled" }) : c.json({ error: "Active platform membership not found" }, 404);
+  return c.json({ error: "Recurring billing is managed by Paystack", replacement: "/api/subscription/manage-link" }, 410);
 });
 
 const creditPurchaseRequestSchema = z.object({
@@ -1971,15 +2133,15 @@ app.get("/api/my/purchases", async (c) => {
   const [licences, photographerSubscriptions, platformSubscriptions, platformPayments, creditPurchases] = await c.env.DB.batch([
     c.env.DB.prepare(`SELECT l.id, l.asset_id, a.title AS asset_title, l.licence_type, l.territory, l.duration_days, l.price_cents, l.status, l.created_at, l.paid_at FROM licences l JOIN assets a ON a.id = l.asset_id WHERE l.organization_id = ? AND l.buyer_id = ?`).bind(user.organizationId, user.id),
     c.env.DB.prepare("SELECT s.id, u.display_name AS photographer_name, s.price_cents, s.currency, s.status, s.duration_days, s.created_at, s.paid_at FROM photographer_subscriptions s JOIN users u ON u.id = s.photographer_id WHERE s.organization_id = ? AND s.subscriber_id = ?").bind(user.organizationId, user.id),
-    c.env.DB.prepare("SELECT id, price_cents, currency, status, billing_day, start_date, created_at FROM buyer_platform_subscriptions WHERE organization_id = ? AND buyer_id = ?").bind(user.organizationId, user.id),
-    c.env.DB.prepare(`SELECT p.id AS event_id, p.subscription_id, p.event_type, p.amount_cents, p.currency, p.received_at FROM payment_webhook_events p JOIN buyer_platform_subscriptions s ON s.id = p.subscription_id WHERE s.organization_id = ? AND s.buyer_id = ? AND p.product_type = 'platform_subscription' ORDER BY p.received_at DESC`).bind(user.organizationId, user.id),
+    c.env.DB.prepare("SELECT id, amount_cents AS price_cents, currency, status, interval, created_at FROM buyer_subscriptions WHERE organization_id = ? AND buyer_id = ?").bind(user.organizationId, user.id),
+    c.env.DB.prepare(`SELECT p.provider_event_id AS event_id, p.subscription_id, p.event_type, p.amount_cents, p.currency, p.created_at AS received_at, p.status FROM buyer_subscription_payments p JOIN buyer_subscriptions s ON s.id = p.subscription_id WHERE s.organization_id = ? AND s.buyer_id = ? ORDER BY p.created_at DESC`).bind(user.organizationId, user.id),
     c.env.DB.prepare("SELECT id, credits, amount_cents, currency, status, created_at, paid_at FROM buyer_credit_purchases WHERE organization_id = ? AND buyer_id = ?").bind(user.organizationId, user.id),
   ]);
   const results = [
     ...(licences.results as Record<string, unknown>[]).map((row) => ({ id: String(row.id), kind: "licence", title: String(row.asset_title), status: String(row.status), amountCents: Number(row.price_cents), currency: "ZAR", createdAt: String(row.created_at), details: `${row.licence_type} - ${row.territory} - ${row.duration_days} days`, referenceId: String(row.asset_id) })),
     ...(photographerSubscriptions.results as Record<string, unknown>[]).map((row) => ({ id: String(row.id), kind: "photographer_subscription", title: `Subscription to ${String(row.photographer_name)}`, status: String(row.status), amountCents: Number(row.price_cents), currency: String(row.currency), createdAt: String(row.created_at), details: `${row.duration_days} days`, referenceId: String(row.id) })),
-    ...(platformSubscriptions.results as Record<string, unknown>[]).map((row) => ({ id: String(row.id), kind: "platform_subscription", title: "Veld Archive membership", status: String(row.status), amountCents: Number(row.price_cents), currency: String(row.currency), createdAt: String(row.created_at), details: `R1,299 monthly - billing day ${row.billing_day}`, referenceId: String(row.id) })),
-    ...(platformPayments.results as Record<string, unknown>[]).map((row) => ({ id: String(row.event_id), kind: "platform_subscription_payment", title: "Veld Archive membership payment", status: String(row.event_type), amountCents: Number(row.amount_cents), currency: String(row.currency), createdAt: String(row.received_at), details: "Recurring monthly payment", referenceId: String(row.subscription_id) })),
+    ...(platformSubscriptions.results as Record<string, unknown>[]).map((row) => ({ id: String(row.id), kind: "platform_subscription", title: "Veld Archive membership", status: String(row.status), amountCents: Number(row.price_cents), currency: String(row.currency), createdAt: String(row.created_at), details: `${String(row.interval)} Paystack plan`, referenceId: String(row.id) })),
+    ...(platformPayments.results as Record<string, unknown>[]).map((row) => ({ id: String(row.event_id), kind: "platform_subscription_payment", title: "Veld Archive membership payment", status: String(row.status), amountCents: Number(row.amount_cents ?? 0), currency: String(row.currency ?? "ZAR"), createdAt: String(row.received_at), details: String(row.event_type), referenceId: String(row.subscription_id) })),
     ...(creditPurchases.results as Record<string, unknown>[]).map((row) => ({ id: String(row.id), kind: "credit_purchase", title: `${Number(row.credits)} archive credit${Number(row.credits) === 1 ? "" : "s"}`, status: String(row.status), amountCents: Number(row.amount_cents), currency: String(row.currency), createdAt: String(row.created_at), details: "1 credit = R100", referenceId: String(row.id) })),
   ].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   return c.json({ results, summary: { total: results.length, paid: results.filter((item) => item.status === "paid" || item.status === "payment_succeeded").length, totalPaidCents: results.filter((item) => item.status === "paid" || item.status === "payment_succeeded").reduce((sum, item) => sum + item.amountCents, 0) } });
@@ -2023,11 +2185,69 @@ async function postPaymentReversal(env: Bindings, licenceId: string, payload: { 
   return transactionId;
 }
 
+async function applyPaystackSubscriptionLifecycle(env: Bindings, envelope: Record<string, unknown>, rawBody: string): Promise<{ handled: boolean; duplicate?: boolean; eventId?: string }> {
+  const eventType = typeof envelope.event === "string" ? envelope.event : "";
+  if (!["subscription.create", "subscription.not_renew", "subscription.disable", "invoice.create", "invoice.update", "invoice.payment_failed"].includes(eventType)) return { handled: false };
+  const data = envelope.data && typeof envelope.data === "object" ? envelope.data as Record<string, unknown> : {};
+  const nestedSubscription = data.subscription && typeof data.subscription === "object" ? data.subscription as Record<string, unknown> : {};
+  const customer = data.customer && typeof data.customer === "object" ? data.customer as Record<string, unknown> : {};
+  const plan = data.plan && typeof data.plan === "object" ? data.plan as Record<string, unknown> : {};
+  const metadataValue = data.metadata ?? nestedSubscription.metadata;
+  let metadata: Record<string, unknown> = {};
+  if (metadataValue && typeof metadataValue === "object") metadata = metadataValue as Record<string, unknown>;
+  else if (typeof metadataValue === "string") { try { metadata = JSON.parse(metadataValue) as Record<string, unknown>; } catch { metadata = {}; } }
+  const subscriptionId = typeof metadata.subscriptionId === "string" ? metadata.subscriptionId : null;
+  const subscriptionCode = typeof data.subscription_code === "string" ? data.subscription_code : typeof nestedSubscription.subscription_code === "string" ? nestedSubscription.subscription_code : null;
+  const email = typeof customer.email === "string" ? customer.email : typeof data.email === "string" ? data.email : null;
+  const planCode = typeof plan.plan_code === "string" ? plan.plan_code : typeof data.plan_code === "string" ? data.plan_code : null;
+  const subscription = subscriptionId
+    ? await env.DB.prepare("SELECT id FROM buyer_subscriptions WHERE id = ?").bind(subscriptionId).first<{ id: string }>()
+    : subscriptionCode
+      ? await env.DB.prepare("SELECT id FROM buyer_subscriptions WHERE provider_subscription_code = ?").bind(subscriptionCode).first<{ id: string }>()
+      : email && planCode
+        ? await env.DB.prepare("SELECT id FROM buyer_subscriptions WHERE lower(email) = lower(?) AND plan_code = ? ORDER BY created_at DESC LIMIT 1").bind(email, planCode).first<{ id: string }>()
+        : null;
+  if (!subscription) throw new Error("Paystack subscription event did not match a local subscription");
+  const providerEventId = `paystack:${await sha256Hex(rawBody)}`;
+  const duplicate = await env.DB.prepare("SELECT id FROM buyer_subscription_payments WHERE provider = 'paystack' AND provider_event_id = ?").bind(providerEventId).first<{ id: string }>();
+  if (duplicate) return { handled: true, duplicate: true, eventId: providerEventId };
+  const status = eventType === "subscription.not_renew" ? "non-renewing" : eventType === "subscription.disable" ? "cancelled" : eventType === "invoice.payment_failed" ? "attention" : "active";
+  const amount = Number(data.amount ?? plan.amount);
+  const amountCents = Number.isSafeInteger(amount) && amount > 0 ? amount : null;
+  const reference = typeof data.reference === "string" ? data.reference : null;
+  const invoiceCode = typeof data.invoice_code === "string" ? data.invoice_code : null;
+  const nextPaymentDate = typeof data.next_payment_date === "string" ? data.next_payment_date : typeof nestedSubscription.next_payment_date === "string" ? nestedSubscription.next_payment_date : null;
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE buyer_subscriptions SET status = ?, provider_subscription_code = COALESCE(?, provider_subscription_code), provider_customer_code = COALESCE(?, provider_customer_code), provider_email_token = COALESCE(?, provider_email_token), next_payment_date = COALESCE(?, next_payment_date), failure_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+      .bind(status, subscriptionCode, typeof customer.customer_code === "string" ? customer.customer_code : null, typeof data.email_token === "string" ? data.email_token : null, nextPaymentDate, eventType === "invoice.payment_failed" ? "Paystack invoice payment failed" : null, subscription.id),
+    env.DB.prepare("INSERT INTO buyer_subscription_payments (id, subscription_id, provider, provider_event_id, provider_reference, invoice_code, event_type, amount_cents, currency, status, payload_json) VALUES (?, ?, 'paystack', ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(crypto.randomUUID(), subscription.id, providerEventId, reference, invoiceCode, eventType, amountCents, typeof data.currency === "string" ? data.currency.toUpperCase() : "ZAR", eventType === "invoice.payment_failed" ? "failed" : "pending", rawBody),
+  ]);
+  return { handled: true, eventId: providerEventId };
+}
+
 app.post("/api/webhooks/payments", async (c) => {
   if (!c.env.PAYMENT_WEBHOOK_SECRET) return c.json({ error: "Payment webhook secret is not configured" }, 503);
   const body = await c.req.text();
-  if (!(await verifyPaymentWebhook(c.env.PAYMENT_WEBHOOK_SECRET, c.req.header("x-payment-signature") ?? "", body))) return c.json({ error: "Invalid payment webhook signature" }, 401);
-  const payload = paymentWebhookSchema.parse(JSON.parse(body));
+  let parsed: unknown;
+  try { parsed = JSON.parse(body); } catch { return c.json({ error: "Invalid webhook JSON" }, 400); }
+  const paystackSignature = c.req.header("x-paystack-signature") ?? "";
+  let normalized: unknown = parsed;
+  if (paystackSignature) {
+    if (!c.env.PAYMENT_TOKEN) return c.json({ error: "Paystack secret key is not configured" }, 503);
+    if (!(await verifyPaystackWebhook(c.env.PAYMENT_TOKEN, paystackSignature, body))) return c.json({ error: "Invalid Paystack webhook signature" }, 401);
+    try {
+      const lifecycle = await applyPaystackSubscriptionLifecycle(c.env, parsed as Record<string, unknown>, body);
+      if (lifecycle.handled) return c.json({ accepted: true, provider: "paystack", ...lifecycle });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : "Paystack subscription event could not be applied" }, 422);
+    }
+    normalized = await normalizePaystackPaymentEvent(parsed);
+    if (!normalized) return c.json({ error: "Unsupported Paystack event" }, 422);
+  } else if (!(await verifyPaymentWebhook(c.env.PAYMENT_WEBHOOK_SECRET, c.req.header("x-payment-signature") ?? "", body))) {
+    return c.json({ error: "Invalid payment webhook signature" }, 401);
+  }
+  const payload = paymentWebhookSchema.parse(normalized);
   const duplicate = await c.env.DB.prepare("SELECT id, status FROM payment_webhook_events WHERE provider = ? AND provider_event_id = ?").bind(payload.provider, payload.eventId).first<{ id: string; status: string }>();
   if (duplicate) return c.json({ accepted: true, duplicate: true, status: duplicate.status });
   const eventId = crypto.randomUUID();
@@ -2045,17 +2265,14 @@ app.post("/api/webhooks/payments", async (c) => {
         await c.env.DB.prepare("UPDATE photographer_subscriptions SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(subscription.id).run();
       }
     } else if (payload.productType === "platform_subscription") {
-      const subscription = await c.env.DB.prepare("SELECT id, price_cents, billing_day, start_date, next_charge_date, status FROM buyer_platform_subscriptions WHERE id = ?").bind(payload.subscriptionId).first<{ id: string; price_cents: number; billing_day: number; start_date: string; next_charge_date: string | null; status: string }>();
-      if (!subscription) throw new Error("Platform membership not found");
-      if (Number(subscription.price_cents) !== payload.amountCents && payload.type === "payment_succeeded") throw new Error("Payment amount does not match the platform membership price");
-      if (payload.type === "payment_succeeded") {
-        await c.env.DB.prepare("UPDATE buyer_platform_subscriptions SET status = 'active', last_payment_at = CURRENT_TIMESTAMP, next_charge_date = ?, payment_provider = ?, payment_reference = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-          .bind(nextMonthlyChargeDate(subscription.next_charge_date ?? subscription.start_date, subscription.billing_day), payload.provider, payload.paymentReference ?? payload.eventId, subscription.id).run();
-      } else if (payload.type === "payment_failed") {
-        await c.env.DB.prepare("UPDATE buyer_platform_subscriptions SET status = 'past_due', updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(subscription.id).run();
-      } else if (payload.type === "refund" || payload.type === "chargeback") {
-        await c.env.DB.prepare("UPDATE buyer_platform_subscriptions SET status = 'past_due', updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(subscription.id).run();
-      }
+      const subscription = await c.env.DB.prepare("SELECT id, amount_cents, status FROM buyer_subscriptions WHERE id = ?").bind(payload.subscriptionId).first<{ id: string; amount_cents: number; status: string }>();
+      if (!subscription) throw new Error("Buyer subscription not found");
+      if (Number(subscription.amount_cents) !== payload.amountCents && payload.type === "payment_succeeded") throw new Error("Payment amount does not match the buyer subscription plan");
+      const subscriptionStatus = payload.type === "payment_succeeded" ? "active" : "attention";
+      await c.env.DB.batch([
+        c.env.DB.prepare("UPDATE buyer_subscriptions SET status = ?, provider_reference = COALESCE(?, provider_reference), failure_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(subscriptionStatus, payload.paymentReference ?? null, payload.type === "payment_succeeded" ? null : `Paystack ${payload.type}`, subscription.id),
+        c.env.DB.prepare("INSERT OR IGNORE INTO buyer_subscription_payments (id, subscription_id, provider, provider_event_id, provider_reference, event_type, amount_cents, currency, status, paid_at, payload_json) VALUES (?, ?, 'paystack', ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'success' THEN CURRENT_TIMESTAMP ELSE NULL END, ?)").bind(crypto.randomUUID(), subscription.id, payload.eventId, payload.paymentReference ?? null, payload.type, payload.amountCents, payload.currency.toUpperCase(), payload.type === "payment_succeeded" ? "success" : payload.type === "refund" ? "refunded" : "failed", payload.type === "payment_succeeded" ? "success" : "failed", body),
+      ]);
     } else if (payload.productType === "credit_purchase") {
       const purchase = await c.env.DB.prepare("SELECT id, organization_id, buyer_id, credits, amount_cents, status FROM buyer_credit_purchases WHERE id = ?").bind(payload.creditPurchaseId).first<{ id: string; organization_id: string; buyer_id: string; credits: number; amount_cents: number; status: string }>();
       if (!purchase) throw new Error("Credit purchase not found");
@@ -2088,17 +2305,21 @@ app.post("/api/webhooks/payments", async (c) => {
         transactionId = existingSale?.id ?? null;
       } else {
       transactionId = (await postSaleSettlement(c.env, payload.licenceId!, { amountCents: payload.amountCents, currency: payload.currency, taxCents: 0, idempotencyKey: `${payload.provider}:${payload.eventId}` })).transactionId;
-      await c.env.DB.prepare("UPDATE licences SET payment_provider = ?, payment_reference = ?, paid_at = CURRENT_TIMESTAMP, status = 'paid', price_cents = ? WHERE id = ? AND status = 'pending'").bind(payload.provider, payload.paymentReference ?? payload.eventId, payload.amountCents, payload.licenceId).run();
+      await c.env.DB.batch([
+        c.env.DB.prepare("UPDATE licences SET payment_provider = ?, payment_reference = ?, paid_at = CURRENT_TIMESTAMP, status = 'paid', price_cents = ? WHERE id = ? AND status = 'pending'").bind(payload.provider, payload.paymentReference ?? payload.eventId, payload.amountCents, payload.licenceId),
+        c.env.DB.prepare("UPDATE payment_split_allocations SET status = 'settled', provider_reference = COALESCE(?, provider_reference), updated_at = CURRENT_TIMESTAMP WHERE licence_id = ?").bind(payload.paymentReference ?? null, payload.licenceId),
+      ]);
       }
     } else if (payload.type === "refund" || payload.type === "chargeback") {
       transactionId = await postPaymentReversal(c.env, payload.licenceId!, { amountCents: payload.amountCents, currency: payload.currency, idempotencyKey: `${payload.provider}:${payload.eventId}`, type: payload.type });
+      await c.env.DB.prepare("UPDATE payment_split_allocations SET status = 'reversed', updated_at = CURRENT_TIMESTAMP WHERE licence_id = ?").bind(payload.licenceId).run();
     }
     await c.env.DB.prepare("UPDATE payment_webhook_events SET status = 'processed', processed_at = CURRENT_TIMESTAMP WHERE id = ?").bind(eventId).run();
     if (payload.type === "payment_succeeded") {
       const licenceOrg = payload.productType === "photographer_subscription"
         ? await c.env.DB.prepare("SELECT organization_id FROM photographer_subscriptions WHERE id = ?").bind(payload.subscriptionId).first<{ organization_id: string }>()
         : payload.productType === "platform_subscription"
-          ? await c.env.DB.prepare("SELECT organization_id FROM buyer_platform_subscriptions WHERE id = ?").bind(payload.subscriptionId).first<{ organization_id: string }>()
+          ? await c.env.DB.prepare("SELECT organization_id FROM buyer_subscriptions WHERE id = ?").bind(payload.subscriptionId).first<{ organization_id: string }>()
           : payload.productType === "credit_purchase"
             ? await c.env.DB.prepare("SELECT organization_id FROM buyer_credit_purchases WHERE id = ?").bind(payload.creditPurchaseId).first<{ organization_id: string }>()
         : await c.env.DB.prepare("SELECT organization_id FROM licences WHERE id = ?").bind(payload.licenceId).first<{ organization_id: string }>();
@@ -2979,6 +3200,31 @@ async function verifyKycWebhook(secret: string, signature: string, body: string)
   return timingSafeEqual(expected, signature.replace(/^sha256=/, ""));
 }
 
+app.post("/api/webhooks/didit", async (c) => {
+  if (!c.env.DIDIT_WEBHOOK_SECRET) return c.json({ error: "Didit webhook secret is not configured" }, 503);
+  const rawBody = await c.req.text();
+  let payload: Record<string, unknown>;
+  try { payload = JSON.parse(rawBody) as Record<string, unknown>; } catch { return c.json({ error: "Invalid Didit webhook JSON" }, 400); }
+  const verified = await verifyDiditWebhook({ secret: c.env.DIDIT_WEBHOOK_SECRET, rawBody, payload, signatureV2: c.req.header("x-signature-v2"), signature: c.req.header("x-signature"), timestamp: c.req.header("x-timestamp") });
+  if (!verified) return c.json({ error: "Invalid or stale Didit webhook signature" }, 401);
+  const sessionId = typeof payload.session_id === "string" ? payload.session_id : "";
+  const status = typeof payload.status === "string" ? payload.status : "";
+  const webhookType = typeof payload.webhook_type === "string" ? payload.webhook_type : "status.updated";
+  if (!sessionId || !status) return c.json({ error: "Didit session_id and status are required" }, 422);
+  const eventId = typeof payload.event_id === "string" && payload.event_id ? payload.event_id : `didit:${await sha256Hex(`${sessionId}:${webhookType}:${String(payload.timestamp ?? c.req.header("x-timestamp") ?? "")}:${rawBody}`)}`;
+  const seller = await c.env.DB.prepare("SELECT contributor_id FROM seller_onboarding_profiles WHERE didit_session_id = ?").bind(sessionId).first<{ contributor_id: string }>();
+  if (!seller) return c.json({ error: "Didit session is not recognized" }, 404);
+  const inserted = await c.env.DB.prepare("INSERT OR IGNORE INTO didit_webhook_events (event_id, session_id, webhook_type, status) VALUES (?, ?, ?, ?)").bind(eventId, sessionId, webhookType, status).run();
+  if (!Number(inserted.meta.changes ?? 0)) return c.json({ accepted: true, duplicate: true, eventId });
+  const normalizedStatus = normalizeDiditStatus(status);
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE seller_onboarding_profiles SET didit_status = ?, didit_provider_reference = ?, updated_at = CURRENT_TIMESTAMP WHERE contributor_id = ? AND didit_session_id = ?").bind(normalizedStatus, sessionId, seller.contributor_id, sessionId),
+    c.env.DB.prepare("UPDATE contributor_verification_cases SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE contributor_id = ? AND provider = 'didit' AND provider_case_id = ?").bind(normalizedStatus, seller.contributor_id, sessionId),
+    c.env.DB.prepare("UPDATE contributor_profiles SET identity_status = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?").bind(normalizedStatus === "verified" ? "verified" : normalizedStatus === "rejected" ? "rejected" : "submitted", seller.contributor_id),
+  ]);
+  return c.json({ accepted: true, eventId, sessionId, status: normalizedStatus });
+});
+
 app.post("/api/webhooks/kyc", async (c) => {
   if (!c.env.KYC_WEBHOOK_SECRET) return c.json({ error: "KYC webhook secret is not configured" }, 503);
   const body = await c.req.text();
@@ -3030,7 +3276,7 @@ app.on(["GET", "HEAD"], "/api/assets/:id/preview", async (c) => {
     : await c.env.MEDIA_BUCKET.get(mediaKey, c.req.header("Range") ? { range: c.req.raw.headers } : undefined);
   if (!object) return c.json({ error: "Media preview is unavailable" }, 404);
   const response = createMediaResponse(c.req.raw, object as R2ObjectBody, previewContentType(row));
-  response.headers.set("Cache-Control", row.kind === "image" ? "public, max-age=3600, stale-while-revalidate=86400" : "private, max-age=60");
+  response.headers.set("Cache-Control", row.status === "published" && row.kind === "image" ? "public, max-age=3600, stale-while-revalidate=86400" : "private, no-store, max-age=0");
   return response;
 });
 
@@ -3389,22 +3635,62 @@ app.get("/api/assets", async (c) => {
   return c.json(validateContractResponse("GET /api/assets 200", searchResponseSchema, response));
 });
 
-app.get("/api/admin/launch-readiness", async (c) => {
+function recentAttestation(value: string | undefined, maxAgeDays = 90): boolean {
+  if (!value) return false;
+  const time = Date.parse(value);
+  return Number.isFinite(time) && time <= Date.now() && Date.now() - time <= maxAgeDays * 86_400_000;
+}
+
+async function launchReadiness(env: Bindings): Promise<Record<string, unknown>> {
+  const tableRows = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all<{ name: string }>();
+  const tables = new Set(tableRows.results.map((row) => row.name));
+  const requiredTables = ["seller_onboarding_profiles", "didit_webhook_events", "marketplace_agreement_acceptances", "payment_split_allocations", "buyer_subscriptions", "buyer_subscription_payments"];
+  const scalar = async (sql: string, key = "total"): Promise<number> => Number((await env.DB.prepare(sql).first<Record<string, unknown>>())?.[key] ?? 0);
+  const productionMembers = tables.has("organization_memberships") ? await scalar("SELECT COUNT(*) AS total FROM organization_memberships WHERE organization_id = 'org-production' AND status = 'active'") : 0;
+  const demoAssets = tables.has("assets") ? await scalar("SELECT COUNT(*) AS total FROM assets WHERE COALESCE(demo_seed, 0) = 1 OR id LIKE 'asset-demo-%' OR id LIKE 'asset-test-photo-%'") : 0;
+  const verifiedPaystackWallets = tables.has("payout_wallets") ? await scalar("SELECT COUNT(*) AS total FROM payout_wallets WHERE provider = 'paystack' AND status = 'verified' AND provider_account_id LIKE 'ACCT_%'") : 0;
+  const auth0Configured = Boolean(env.AUTH_JWKS_URL?.trim() && env.AUTH_ISSUER?.trim() && env.AUTH_AUDIENCE?.trim());
+  const supabaseConfigured = Boolean(env.SUPABASE_URL?.trim() && env.SUPABASE_AUDIENCE?.trim());
+  const subscription = buyerSubscriptionConfiguration(env);
+  let streamSecretConfigured = Boolean(env.STREAM_WEBHOOK_SECRET?.trim());
+  if (!streamSecretConfigured && env.STREAM_WEBHOOK_SECRET_STORE) {
+    try { streamSecretConfigured = Boolean(await env.STREAM_WEBHOOK_SECRET_STORE.get()); } catch { streamSecretConfigured = false; }
+  }
+  const checks = [
+    { id: "production_mode", ready: String(env.APP_ENV) === "production" && env.DEMO_AUTH_ENABLED !== "true", action: "Set APP_ENV=production and disable demo authentication." },
+    { id: "session_security", ready: Boolean(env.SESSION_SECRET?.trim()), action: "Configure a strong SESSION_SECRET." },
+    { id: "identity_provider", ready: auth0Configured || supabaseConfigured, action: "Complete Auth0 issuer/JWKS/audience or Supabase project/audience configuration." },
+    { id: "email_sender", ready: Boolean(env.EMAIL && env.EMAIL_FROM?.trim()), action: "Verify the transactional email sender and binding." },
+    { id: "turnstile", ready: Boolean(env.TURNSTILE_SECRET?.trim() && env.TURNSTILE_HOSTNAMES?.trim()), action: "Provision Turnstile and configure its secret and hostname allowlist." },
+    { id: "firma", ready: Boolean(env.FIRMA_VERIFY_URL?.trim() && env.FIRMA_API_TOKEN?.trim()), action: "Configure the Firma verification endpoint and API token." },
+    { id: "didit", ready: Boolean(env.DIDIT_API_KEY?.trim() && env.DIDIT_WEBHOOK_SECRET?.trim() && env.DIDIT_KYC_WORKFLOW_ID?.trim() && env.DIDIT_KYB_WORKFLOW_ID?.trim()), action: "Configure Didit API, webhook, KYC, and KYB credentials." },
+    { id: "cipc", ready: Boolean(env.CIPC_LOOKUP_URL?.trim() && env.CIPC_API_TOKEN?.trim()), action: "Configure the CIPC verification adapter." },
+    { id: "payments", ready: paymentProviderConfigured(env) && subscription.configured, action: "Configure Paystack checkout, signed webhooks, and the recurring plan." },
+    { id: "marketplace_terms", ready: String(env.MARKETPLACE_TERMS_APPROVED) === "true", action: "Obtain legal approval for the versioned seller, buyer, and split terms, then attest MARKETPLACE_TERMS_APPROVED=true." },
+    { id: "seller_split_rail", ready: verifiedPaystackWallets > 0, action: "Verify at least one seller Paystack subaccount before marketplace checkout." },
+    { id: "audit_signing", ready: Boolean(env.AUDIT_SIGNING_PRIVATE_JWK?.trim() && env.AUDIT_SIGNING_PUBLIC_JWK?.trim() && env.AUDIT_SIGNING_KEY_ID?.trim()), action: "Configure the Ed25519 audit signing keypair and key ID." },
+    { id: "media_scanning", ready: Boolean(env.MEDIA_SCANNER_URL?.trim() && env.MEDIA_SCANNER_SECRET?.trim()), action: "Configure fail-closed media malware scanning." },
+    { id: "stream", ready: Boolean(streamSecretConfigured && env.STREAM_CUSTOMER_CODE?.trim()), action: "Configure Stream playback identity and signed webhooks." },
+    { id: "ai_workflow", ready: Boolean(env.AI && env.PHOTO_INDEX && env.PHOTO_ENRICHMENT_QUEUE && env.PHOTO_EMBEDDING_MODEL?.trim()), action: "Bind Workers AI, Vectorize, and the enrichment queue." },
+    { id: "storage_bindings", ready: Boolean(env.MEDIA_BUCKET && env.MEDIA_DR_BUCKET && env.BACKUP_BUCKET && env.AUDIT_BUCKET_ZA && env.AUDIT_BUCKET_EU && env.KYC_BUCKET_ZA && env.KYC_BUCKET_EU), action: "Bind primary, DR, backup, audit, and regional KYC R2 buckets." },
+    { id: "migrations", ready: requiredTables.every((table) => tables.has(table)), action: `Apply missing production migrations: ${requiredTables.filter((table) => !tables.has(table)).join(", ") || "none"}.` },
+    { id: "production_membership", ready: productionMembers > 0, action: "Add an active administrator to org-production." },
+    { id: "demo_data", ready: demoAssets === 0, action: `Remove ${demoAssets} explicitly tagged demo/test assets from production after review.` },
+    { id: "edge_controls_attestation", ready: recentAttestation(env.EDGE_CONTROLS_ATTESTED_AT), action: "Run the dated edge/WAF control drill and set EDGE_CONTROLS_ATTESTED_AT." },
+    { id: "key_rotation_attestation", ready: recentAttestation(env.KEY_ROTATION_ATTESTED_AT), action: "Complete the dated key-rotation drill and set KEY_ROTATION_ATTESTED_AT." },
+    { id: "backup_restore_attestation", ready: recentAttestation(env.BACKUP_RESTORE_ATTESTED_AT), action: "Complete the dated backup restore drill and set BACKUP_RESTORE_ATTESTED_AT." },
+  ];
+  return { ready: checks.every((check) => check.ready), checkedAt: new Date().toISOString(), checks, counts: { productionMembers, demoAssets, verifiedPaystackWallets }, identity: { auth0Configured, supabaseConfigured }, requiredTables };
+}
+
+async function readinessResponse(c: AppContext): Promise<Response> {
   const admin = await requestUser(c);
   if (!admin || !allowedRole(admin, ["admin"])) return c.json({ error: "Admin access required" }, 403);
-  const emailConfigured = Boolean(c.env.EMAIL && c.env.EMAIL_FROM?.trim());
-  const payoutRails = [
-    { provider: "stripe_connect", configured: Boolean(c.env.STRIPE_SECRET_KEY?.trim()) },
-    { provider: "payfast", configured: Boolean(c.env.PAYFAST_ENDPOINT?.trim() && c.env.PAYFAST_TOKEN?.trim()) },
-    { provider: "za_bank", configured: Boolean(c.env.ZA_BANK_ENDPOINT?.trim() && c.env.ZA_BANK_TOKEN?.trim()) },
-  ];
-  const checks = [
-    { id: "production_mode", ready: String(c.env.APP_ENV) === "production" && c.env.DEMO_AUTH_ENABLED !== "true", action: "Set APP_ENV=production and disable demo authentication." },
-    { id: "email_sender", ready: emailConfigured, action: "Enroll and verify an Email Sending domain, then set EMAIL_FROM as a Worker secret." },
-    { id: "payout_rail", ready: payoutRails.some((rail) => rail.configured), action: "Configure and verify one payout provider with production credentials before approving a payout batch." },
-  ];
-  return c.json({ ready: checks.every((check) => check.ready), checks, payoutRails });
-});
+  return c.json(await launchReadiness(c.env));
+}
+
+app.get("/api/ops/readiness", readinessResponse);
+app.get("/api/admin/launch-readiness", readinessResponse);
 
 app.get("/api/assets/facets", async (c) => {
   const params = searchSchema.parse({ q: c.req.query("q") ?? "", kind: c.req.query("kind") ?? "all", status: "published" });
@@ -4696,27 +4982,34 @@ app.post("/api/uploads/:uploadId/complete", async (c) => {
 
 const turnstileSchema = z.object({ token: z.string().min(1).max(2048), action: z.string().min(1).max(64) });
 
-async function verifyTurnstileToken(env: Bindings, token: string | undefined, action: string, traceparent?: string): Promise<{ verified: boolean; reason?: string }> {
+async function verifyTurnstileToken(env: Bindings, token: string | undefined, action: string, traceparent?: string, remoteIp?: string): Promise<{ verified: boolean; reason?: string }> {
   if (!token) return String(env.APP_ENV) === "production" ? { verified: false, reason: "Turnstile token is required" } : { verified: true, reason: "development bypass" };
   if (!env.TURNSTILE_SECRET) return { verified: false, reason: "Turnstile is not configured for this environment" };
-  const verification = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded", ...(traceparent ? { traceparent } : {}) },
-    body: new URLSearchParams({ secret: env.TURNSTILE_SECRET, response: token }),
-  });
-  if (!verification.ok) return { verified: false, reason: "Turnstile verification service unavailable" };
-  const result = await verification.json() as { success: boolean; action?: string; hostname?: string; [key: string]: unknown };
+  if (token.length > 2048) return { verified: false, reason: "Turnstile token is too long" };
   const allowedHosts = new Set((env.TURNSTILE_HOSTNAMES ?? "").split(",").map((host) => host.trim()).filter(Boolean));
-  const hostnameValid = typeof result.hostname === "string" && (allowedHosts.size === 0 || allowedHosts.has(result.hostname));
-  const actionValid = result.action === action;
-  return result.success === true && hostnameValid && actionValid
-    ? { verified: true }
-    : { verified: false, reason: "Turnstile token did not match the expected action or hostname" };
+  if (String(env.APP_ENV) === "production" && allowedHosts.size === 0) return { verified: false, reason: "Turnstile hostname allowlist is not configured" };
+  try {
+    const verification = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", ...(traceparent ? { traceparent } : {}) },
+      body: new URLSearchParams({ secret: env.TURNSTILE_SECRET, response: token, ...(remoteIp ? { remoteip: remoteIp } : {}), idempotency_key: crypto.randomUUID() }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!verification.ok) return { verified: false, reason: "Turnstile verification service unavailable" };
+    const result = await verification.json() as { success: boolean; action?: string; hostname?: string; [key: string]: unknown };
+    const hostnameValid = typeof result.hostname === "string" && allowedHosts.has(result.hostname);
+    const actionValid = result.action === action;
+    return result.success === true && hostnameValid && actionValid
+      ? { verified: true }
+      : { verified: false, reason: "Turnstile token did not match the expected action or hostname" };
+  } catch {
+    return { verified: false, reason: "Turnstile verification service unavailable" };
+  }
 }
 
 app.post("/api/security/turnstile", async (c) => {
   const payload = turnstileSchema.parse(await c.req.json());
-  const result = await verifyTurnstileToken(c.env, payload.token, payload.action, c.get("trace").traceparent);
+  const result = await verifyTurnstileToken(c.env, payload.token, payload.action, c.get("trace").traceparent, c.req.header("CF-Connecting-IP"));
   return c.json(result, result.verified ? 200 : 403);
 });
 
@@ -4737,10 +5030,14 @@ async function verifyStreamWebhook(secret: string, signature: string, body: stri
 
 app.post("/api/webhooks/stream", async (c) => {
   const trace = c.get("trace");
-  if (!c.env.STREAM_WEBHOOK_SECRET) return c.json({ error: "Stream webhook secret is not configured" }, 503);
+  let streamWebhookSecret = c.env.STREAM_WEBHOOK_SECRET;
+  if (!streamWebhookSecret && c.env.STREAM_WEBHOOK_SECRET_STORE) {
+    try { streamWebhookSecret = await c.env.STREAM_WEBHOOK_SECRET_STORE.get(); } catch { streamWebhookSecret = undefined; }
+  }
+  if (!streamWebhookSecret) return c.json({ error: "Stream webhook secret is not configured" }, 503);
   const body = await c.req.text();
   const signature = c.req.header("Webhook-Signature") ?? "";
-  if (!(await verifyStreamWebhook(c.env.STREAM_WEBHOOK_SECRET, signature, body))) {
+  if (!(await verifyStreamWebhook(streamWebhookSecret, signature, body))) {
     recordMetric(c.env, "stream_webhook_rejected", trace, 1, ["signature"]);
     return c.json({ error: "Invalid Stream webhook signature" }, 401);
   }

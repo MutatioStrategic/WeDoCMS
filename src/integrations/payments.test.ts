@@ -191,4 +191,16 @@ describe("PaystackPaymentAdapter", () => {
     });
     expect(await request?.json()).toMatchObject({ reference: "sub_subscription-1", plan: "PLN_monthly", metadata: { subscriptionId: "subscription-1", subscriptionPlanCode: "PLN_monthly" } });
   });
+
+  it("creates a provider-hosted subscription management link", async () => {
+    let request: Request | undefined;
+    const adapter = new PaystackPaymentAdapter({
+      endpoint: "https://api.paystack.co/transaction/initialize",
+      secretKey: "test-secret",
+      fetcher: async (input, init) => { request = new Request(input, init); return new Response(JSON.stringify({ status: true, data: { link: "https://paystack.com/manage/sub-1" } })); },
+    });
+    await expect(adapter.createSubscriptionManageLink("SUB_code")).resolves.toBe("https://paystack.com/manage/sub-1");
+    expect(request?.url).toBe("https://api.paystack.co/subscription/SUB_code/manage/link");
+    expect(request?.headers.get("Authorization")).toBe("Bearer test-secret");
+  });
 });

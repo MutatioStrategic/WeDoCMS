@@ -26,7 +26,7 @@
     "binding": "IMAGES"
   },
   "cache": {
-    "enabled": true
+    "enabled": false
   },
   "secrets_store_secrets": [
     {
@@ -153,6 +153,7 @@
     "KYC_PROVIDER": "replace-with-your-kyc-provider",
     "DIDIT_KYC_WORKFLOW_ID": "",
     "DIDIT_KYB_WORKFLOW_ID": "",
+    "DIDIT_API_URL": "https://verification.didit.me/v3/session/",
     "APP_PUBLIC_URL": "https://veld-archive.pages.dev",
     "CIPC_LOOKUP_URL": "",
     "OCR_ENABLED": "false",
@@ -167,6 +168,10 @@
     "PAYSTACK_SUBSCRIPTION_PLAN_CODE": "PLN_aoo1xazr02olbru",
     "BUYER_SUBSCRIPTION_AMOUNT_CENTS": "120000",
     "BUYER_SUBSCRIPTION_INTERVAL": "monthly",
+    "MARKETPLACE_TERMS_APPROVED": "false",
+    "EDGE_CONTROLS_ATTESTED_AT": "",
+    "KEY_ROTATION_ATTESTED_AT": "",
+    "BACKUP_RESTORE_ATTESTED_AT": "",
     "PAYMENT_PROVIDER": "paystack",
     "PAYMENT_ENDPOINT": "https://api.paystack.co/transaction/initialize",
     "STREAM_ACCOUNT_ID": "37e92dc58245d6eab6517a916bd4d9d6",
@@ -179,7 +184,7 @@
       "compatibility_date": "2026-08-13",
       "compatibility_flags": ["nodejs_compat"],
       "secrets": {
-        "required": ["R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "REMOTE_VISION_TOKEN"]
+        "required": ["R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "REMOTE_VISION_TOKEN", "SESSION_SECRET", "TURNSTILE_SECRET", "FIRMA_API_TOKEN", "DIDIT_API_KEY", "DIDIT_WEBHOOK_SECRET", "CIPC_API_TOKEN", "PAYMENT_TOKEN", "PAYMENT_WEBHOOK_SECRET", "AUDIT_SIGNING_PRIVATE_JWK", "AUDIT_SIGNING_PUBLIC_JWK", "MEDIA_SCANNER_SECRET"]
       },
       "send_email": [
         { "name": "EMAIL" }
@@ -200,7 +205,7 @@
         "binding": "IMAGES"
       },
       "cache": {
-        "enabled": true
+        "enabled": false
       },
       "secrets_store_secrets": [
         {
@@ -325,6 +330,7 @@
         "CHAOS_TESTING_ENABLED": "false",
         "AUTH_JWKS_URL": "https://dev-irn8jgmlsiudjo2l.us.auth0.com/.well-known/jwks.json",
         "AUTH_ISSUER": "https://dev-irn8jgmlsiudjo2l.us.auth0.com/",
+        "AUTH_AUDIENCE": "https://veld-archive-api.blewisorlando.workers.dev",
         "UPLOAD_MAX_SIZE_BYTES": "30000000000",
         "AUDIT_SIGNING_KEY_ID": "audit-ed25519-v1",
         "AUDIT_RETENTION_DAYS": "2555",
@@ -332,6 +338,7 @@
         "KYC_PROVIDER": "",
         "DIDIT_KYC_WORKFLOW_ID": "",
         "DIDIT_KYB_WORKFLOW_ID": "",
+        "DIDIT_API_URL": "https://verification.didit.me/v3/session/",
         "APP_PUBLIC_URL": "https://veld-archive.pages.dev",
         "CIPC_LOOKUP_URL": "",
         "OCR_ENABLED": "false",
@@ -351,6 +358,10 @@
       "PAYSTACK_SUBSCRIPTION_PLAN_CODE": "PLN_aoo1xazr02olbru",
       "BUYER_SUBSCRIPTION_AMOUNT_CENTS": "120000",
       "BUYER_SUBSCRIPTION_INTERVAL": "monthly",
+      "MARKETPLACE_TERMS_APPROVED": "false",
+      "EDGE_CONTROLS_ATTESTED_AT": "",
+      "KEY_ROTATION_ATTESTED_AT": "",
+      "BACKUP_RESTORE_ATTESTED_AT": "",
       "PAYMENT_PROVIDER": "paystack",
         "PAYMENT_ENDPOINT": "https://api.paystack.co/transaction/initialize",
         "STREAM_ACCOUNT_ID": "37e92dc58245d6eab6517a916bd4d9d6",

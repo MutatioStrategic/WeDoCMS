@@ -35,6 +35,7 @@ export type PaymentSession = {
 export interface PaymentProvider {
   readonly provider: string;
   createCheckoutSession(request: PaymentSessionRequest): Promise<PaymentSession>;
+  createSubscriptionManageLink?(subscriptionCode: string): Promise<string>;
 }
 
 type JsonPaymentResponse = {
@@ -165,6 +166,17 @@ export class PaystackPaymentAdapter implements PaymentProvider {
       providerReference: reference,
       raw: value,
     };
+  }
+
+  async createSubscriptionManageLink(subscriptionCode: string): Promise<string> {
+    const origin = new URL(this.config.endpoint).origin;
+    const response = await this.fetcher(`${origin}/subscription/${encodeURIComponent(subscriptionCode)}/manage/link`, {
+      method: "GET",
+      headers: bearerHeaders(this.config.secretKey),
+    });
+    const value = await readJson<{ status?: boolean; data?: { link?: string } }>(response, this.provider);
+    if (value.status !== true || !value.data?.link) throw new IntegrationError(this.provider, "Paystack returned no subscription management link", { details: value });
+    return value.data.link;
   }
 }
 

@@ -5,6 +5,9 @@ export * from "./payments";
 export * from "./email";
 export * from "./payfast";
 export * from "./paystack-splits";
+export * from "./paystack-webhooks";
+export * from "./didit";
+export * from "./cipc";
 export * from "./zoho";
 
 import { PayFastPayoutAdapter, PayoutProviderRegistry, SouthAfricanBankPayoutAdapter, StripeConnectPayoutAdapter } from "./payouts";
@@ -12,6 +15,8 @@ import { JsonPaymentAdapter, PaymentProviderRegistry, PaystackPaymentAdapter } f
 import { PayFastPaymentAdapter } from "./payfast";
 import { ZohoIntegration, type ZohoIntegrationEnvironment } from "./zoho";
 import { CloudflareEmailAdapter, EmailProviderRegistry, JsonEmailAdapter } from "./email";
+import { DiditVerificationAdapter } from "./didit";
+import { CipcLookupAdapter } from "./cipc";
 
 /** The environment values needed to compose the available integrations. */
 export type IntegrationEnvironment = {
@@ -34,6 +39,12 @@ export type IntegrationEnvironment = {
   EMAIL_FROM?: string;
   EMAIL_FROM_NAME?: string;
   EMAIL?: SendEmail;
+  DIDIT_API_KEY?: string;
+  DIDIT_KYC_WORKFLOW_ID?: string;
+  DIDIT_KYB_WORKFLOW_ID?: string;
+  DIDIT_API_URL?: string;
+  CIPC_LOOKUP_URL?: string;
+  CIPC_API_TOKEN?: string;
 } & ZohoIntegrationEnvironment;
 
 /**
@@ -48,12 +59,16 @@ export class IntegrationContainer {
   readonly payouts: PayoutProviderRegistry;
   readonly zoho: ZohoIntegration;
   readonly email: EmailProviderRegistry;
+  readonly didit?: DiditVerificationAdapter;
+  readonly cipc?: CipcLookupAdapter;
 
   constructor(environment: IntegrationEnvironment) {
     this.payments = new PaymentProviderRegistry();
     this.payouts = new PayoutProviderRegistry();
     this.zoho = new ZohoIntegration(environment);
     this.email = new EmailProviderRegistry();
+    if (environment.DIDIT_API_KEY && environment.DIDIT_KYC_WORKFLOW_ID && environment.DIDIT_KYB_WORKFLOW_ID) this.didit = new DiditVerificationAdapter({ apiKey: environment.DIDIT_API_KEY, kycWorkflowId: environment.DIDIT_KYC_WORKFLOW_ID, kybWorkflowId: environment.DIDIT_KYB_WORKFLOW_ID, endpoint: environment.DIDIT_API_URL });
+    if (environment.CIPC_LOOKUP_URL && environment.CIPC_API_TOKEN) this.cipc = new CipcLookupAdapter({ endpoint: environment.CIPC_LOOKUP_URL, token: environment.CIPC_API_TOKEN });
 
     if (environment.PAYMENT_PROVIDER === "payfast" && environment.PAYFAST_MERCHANT_ID && environment.PAYFAST_MERCHANT_KEY && environment.PAYFAST_NOTIFY_URL) {
       this.payments.register(new PayFastPaymentAdapter({
