@@ -1,4 +1,5 @@
 import http from "node:http";
+import { createHmac } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -66,7 +67,7 @@ const provider = http.createServer(async (request, response) => {
   if (flowMatch && request.method === "POST") {
     const flow = flowMatch[1];
     state.flowCalls[flow] += 1;
-    if (flow === "analytics" && state.failFirstAnalytics) {
+    if (flow === "analytics" && body?.payload?.eventName === "analytics.asset_view" && state.failFirstAnalytics) {
       state.failFirstAnalytics = false;
       // Simulate a provider/network outcome that cannot be classified as
       // accepted or rejected by the caller.
@@ -129,6 +130,7 @@ const workerArgs = [
   "--var", "ZOHO_CRM_EXTERNAL_FIELD:External_ID",
   "--var", "ZOHO_CRM_NAME_FIELD:Campaign_Name",
   "--var", "ZOHO_CRM_DESCRIPTION_FIELD:Description",
+  "--var", "PAYMENT_WEBHOOK_SECRET:zoho-smoke-payment-secret",
   "--var", `ZOHO_SOCIAL_FLOW_WEBHOOK_URL:${providerUrl}/flow/social`,
   "--var", `ZOHO_DESK_FLOW_WEBHOOK_URL:${providerUrl}/flow/desk`,
   "--var", `ZOHO_CAMPAIGNS_FLOW_WEBHOOK_URL:${providerUrl}/flow/campaigns`,
@@ -158,6 +160,12 @@ async function call(path, init = {}) {
   const text = await response.text();
   try { body = text ? JSON.parse(text) : null; } catch { body = text; }
   return { response, body };
+}
+
+async function paymentWebhook(body) {
+  const raw = JSON.stringify(body);
+  const signature = createHmac("sha512", "zoho-smoke-payment-secret").update(raw).digest("hex");
+  return call("/api/webhooks/payments", { method: "POST", headers: { "Content-Type": "application/json", "x-paystack-signature": signature }, body: raw });
 }
 
 async function runScheduledDispatch() {
@@ -192,6 +200,8 @@ try {
   const campaignCreate = await call("/api/campaigns", { method: "POST", headers: mutationHeaders, body: JSON.stringify({ name: `Zoho smoke ${Date.now()}`, brief: "A Cape Town campaign for commercial social use", platforms: ["instagram", "linkedin"] }) });
   assert(campaignCreate.response.status === 201, `campaign creation failed: ${campaignCreate.response.status}`);
   const campaignId = campaignCreate.body.id;
+  const staged = await call(`/api/campaigns/${campaignId}/assets`, { method: "POST", headers: mutationHeaders, body: JSON.stringify({ assetId: "asset-table-mountain", stage: "approved", note: "Approved for provider contract smoke" }) });
+  assert(staged.response.ok, `campaign asset staging failed: ${staged.response.status}`);
   const rights = await call("/api/rights/takedown", { method: "POST", headers: mutationHeaders, body: JSON.stringify({ assetId: "asset-table-mountain", reason: "metadata", summary: "The metadata requires editorial review before external publication." }) });
   assert(rights.response.status === 201, `rights case creation failed: ${rights.response.status}`);
 
@@ -214,6 +224,14 @@ try {
 
   const validation = await call("/api/integrations/zoho/crm/validate", { method: "POST", headers: mutationHeaders, body: JSON.stringify({}) });
   assert(validation.response.ok && validation.body.status === "valid", `CRM metadata validation failed: ${validation.response.status}`);
+
+  const agreements = await call("/api/legal/agreements?type=buyer");
+  const buyerAgreementVersion = agreements.body?.documents?.[0]?.version;
+  assert(agreements.response.ok && buyerAgreementVersion, "buyer agreement version was not available for checkout");
+  const checkout = await call("/api/checkout", { method: "POST", headers: mutationHeaders, body: JSON.stringify({ assetId: "asset-table-mountain", licenceType: "advertising", territory: "South Africa", durationDays: 90, buyerAgreementVersion, acceptBuyerTerms: true }) });
+  assert(checkout.response.status === 201 && checkout.body.licenceId, `licence checkout failed: ${checkout.response.status}`);
+  const payment = await paymentWebhook({ event: "charge.success", data: { id: "zoho-smoke-payment-1", reference: "zoho-smoke-reference-1", amount: checkout.body.priceCents, currency: "ZAR", metadata: { licenceId: checkout.body.licenceId } } });
+  assert(payment.response.ok && payment.body.accepted, `signed payment webhook failed: ${payment.response.status}`);
 
   const crmQueue = await call(`/api/campaigns/${campaignId}/integrations/zoho/crm`, { method: "POST", headers: mutationHeaders, body: JSON.stringify({}) });
   assert([200, 202].includes(crmQueue.response.status) && crmQueue.body.jobId, `CRM route did not expose a job: ${crmQueue.response.status} ${JSON.stringify(crmQueue.body)}`);
@@ -246,11 +264,13 @@ try {
   assert(state.flowCalls.analytics === 2, "analytics unknown outcome was not reconciled with one explicit retry");
 
   const social = await call(`/api/campaigns/${campaignId}/integrations/zoho/social`, { method: "POST", headers: mutationHeaders, body: JSON.stringify({ copy: "Smoke test", channels: ["instagram"] }) });
-  assert([202, 422].includes(social.response.status), `Social route returned unexpected status: ${social.response.status}`);
+  assert(social.response.status === 202 && social.body.jobId, `Social route did not queue an approved/licensed handoff: ${social.response.status} ${JSON.stringify(social.body)}`);
+  await pollJob(social.body.jobId, "succeeded");
+  assert(state.flowCalls.social === 1, "Social provider was not called exactly once");
   const outbox = await call("/api/integrations/zoho/outbox");
   assert(outbox.response.ok && outbox.body.results.length >= 4, "outbox endpoint did not expose correlated delivery jobs");
 
-  const expectedPaths = ["/oauth/v2/token", "/crm/v8/settings/modules", "/crm/v8/settings/fields", "/crm/v8/Campaigns/upsert", "/flow/desk", "/flow/analytics"];
+  const expectedPaths = ["/oauth/v2/token", "/crm/v8/settings/modules", "/crm/v8/settings/fields", "/crm/v8/Campaigns/upsert", "/flow/social", "/flow/desk", "/flow/analytics"];
   for (const path of expectedPaths) assert(state.requests.some((request) => request.path === path), `mock Zoho server did not receive ${path}`);
   console.log(JSON.stringify({ ok: true, workerUrl, providerUrl, checks: ["auth", "oauth-state", "tenant-encryption-boundary", "crm-metadata", "crm-retry", "crm-idempotency", "desk-delivery", "analytics-unknown-reconciliation", "social-rights-guard", "outbox-listing"], providerRequests: state.requests.length, crmUpserts: state.crmUpserts, flowCalls: state.flowCalls }, null, 2));
 } catch (error) {
