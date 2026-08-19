@@ -1,6 +1,7 @@
 const base = process.argv[2] ?? process.env.QA_URL;
 if (!base) throw new Error("Usage: npm run test:live -- https://your-deployment.example");
 
+let visualSeed;
 for (const path of ["/api/health", "/api/assets?q=forest&kind=image&status=published", "/api/creators", "/api/licence-products"]) {
   let response;
   try {
@@ -16,13 +17,19 @@ for (const path of ["/api/health", "/api/assets?q=forest&kind=image&status=publi
   if (path.startsWith("/api/assets?q=")) {
     const body = await response.json();
     if (body.mode === "keyword") throw new Error(`${path} fell back to keyword mode; Workers AI or Vectorize was not exercised successfully.`);
+    visualSeed = body.results?.find((asset) => typeof asset.previewUrl === "string" && asset.previewUrl);
   }
 }
 
+if (!visualSeed) throw new Error("Semantic search returned no preview-backed image for the visual-search smoke.");
+const preview = await fetch(new URL(visualSeed.previewUrl, base));
+const previewType = preview.headers.get("content-type")?.split(";")[0]?.trim() ?? "";
+if (!preview.ok || !previewType.startsWith("image/")) throw new Error(`Visual-search seed preview returned ${preview.status} ${previewType}.`);
 const visualForm = new FormData();
-visualForm.set("image", "missing-file");
+visualForm.set("image", new File([await preview.arrayBuffer()], `visual-smoke.${previewType.split("/")[1] || "jpg"}`, { type: previewType }));
 const visual = await fetch(new URL("/api/search/visual", base), { method: "POST", body: visualForm });
-if (visual.status === 404 || !(visual.headers.get("content-type") ?? "").toLowerCase().includes("application/json")) {
-  throw new Error(`/api/search/visual is not routed to the Worker (HTTP ${visual.status}).`);
+const visualBody = await visual.json();
+if (!visual.ok || visualBody.mode !== "visual-to-semantic" || visualBody.usedVectorIndex !== true) {
+  throw new Error(`/api/search/visual did not complete visual-to-semantic search (HTTP ${visual.status}, mode ${visualBody.mode ?? "none"}).`);
 }
-console.log(`OK /api/search/visual route: ${visual.status} application/json`);
+console.log(`OK /api/search/visual: ${visual.status} ${visualBody.mode}`);
