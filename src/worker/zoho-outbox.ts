@@ -124,7 +124,7 @@ export async function dispatchZohoOutboxJob(env: ZohoOutboxBindings, jobId: stri
     await env.DB.batch([
       env.DB.prepare("UPDATE zoho_outbox_jobs SET status = 'succeeded', provider_reference = ?, last_error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(result.providerReference ?? null, job.id),
       env.DB.prepare(`INSERT INTO zoho_integration_events (id, organization_id, actor_id, app, action, entity_type, entity_id, idempotency_key, status, provider_reference, metadata_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'succeeded', ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'succeeded', ?, ?)
         ON CONFLICT(organization_id, app, action, entity_type, entity_id, idempotency_key) DO UPDATE SET status = 'succeeded', provider_reference = excluded.provider_reference, metadata_json = excluded.metadata_json, error_message = NULL`)
         .bind(crypto.randomUUID(), job.organization_id, job.actor_id, job.app, job.action, job.entity_type, job.entity_id, job.idempotency_key, result.providerReference ?? null, JSON.stringify({ outboxJobId: job.id, attempts: job.attempts }),),
     ]);

@@ -334,7 +334,7 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
     {view === "search" && <SearchResultsView query={query} setQuery={setQuery} activeQuery={activeQuery} runSearch={runSearch} assets={assets} assetsLoading={assetsLoading} filter={filter} setFilter={setFilter} sort={sort} setSort={setSort} orientation={orientation} setOrientation={setOrientation} notice={notice} onOpen={openAsset} />}
     {view === "campaigns" && <CampaignWorkspace api={api} onNotice={setNotice} onOpen={openAsset} />}
     {view === "contributors" && <CreatorMarketplace onOpen={openAsset} />}
-    {view === "contributor" && <><AnalyticsDashboard role="contributor" /><MarketplaceLegalDocuments api={api} /><SellerVerificationPanel api={api} onNotice={setNotice} /><ContributorWorkspace api={api} onNotice={setNotice} /></>}
+    {view === "contributor" && <><AnalyticsDashboard role="contributor" /><MarketplaceLegalDocuments api={api} /><SellerVerificationPanel api={api} onNotice={setNotice} /><ContributorWorkspace api={api} onNotice={setNotice} /><ContributorAssetLibrary api={api} onNotice={setNotice} /></>}
     {view === "buyer" && <AnalyticsDashboard role="buyer" onOpenAccount={() => navigate("account")} />}
     {view === "review" && <ReviewWorkspace items={reviewItems} api={api} onNotice={setNotice} onReload={loadReviewQueue} />}
     {view === "governance" && <><MarketplaceLegalDocuments api={api} /><GovernanceWorkspace api={api} onNotice={setNotice} /></>}
@@ -1055,6 +1055,146 @@ function ContributorWorkspace({ api, onNotice }: { api: (path: string, init?: Re
   return <main className="workspace-page"><div className="workspace-intro"><span className="section-kicker">CONTRIBUTOR WORKSPACE</span><h1>Keep the <em>context.</em></h1><p>Submit a record with the location, rights, and cultural context an editor needs to trust it.</p></div><div className="workspace-grid"><form className="workspace-card" onSubmit={saveOnboarding}><div className="card-heading"><span className="section-kicker">01 · PROFILE</span><span className="status-pill">Draft</span></div><h2>Your contributor profile</h2><label>Organisation or public name<input value={form.organisationName} onChange={(event) => setForm({ ...form, organisationName: event.target.value })} /></label><label>Biography<textarea value={form.bio} onChange={(event) => setForm({ ...form, bio: event.target.value })} /></label><div className="two-fields"><label>Contributor type<select value={form.contributorType} onChange={(event) => setForm({ ...form, contributorType: event.target.value })}><option value="individual">Individual</option><option value="agency">Agency</option><option value="archive">Archive</option><option value="institution">Institution</option></select></label><label>Base location<input value={form.location} onChange={(event) => setForm({ ...form, location: event.target.value })} /></label></div><label>Portfolio URL<input value={form.portfolioUrl} onChange={(event) => setForm({ ...form, portfolioUrl: event.target.value })} placeholder="https://…" /></label><label className="checkbox-row"><input type="checkbox" checked={form.acceptTerms} onChange={(event) => setForm({ ...form, acceptTerms: event.target.checked })} /> I accept the contributor terms</label><button className="dark-button" disabled={saving}>Save profile <span>↗</span></button></form>
     <form className="workspace-card" onSubmit={submitSellerWorkflow}><div className="card-heading"><span className="section-kicker">02 · SELLER SETUP</span><span className="status-pill warm">Pending tender</span></div><h2>Sign terms & set payout</h2><p className="dialog-intro">Your signed terms hash, KYC case, and payout wallet are linked to one internal approval record. Raw bank credentials are never stored here.</p><label>Signer name<input required value={seller.signerName} onChange={(event) => setSeller({ ...seller, signerName: event.target.value })} /></label><label>Firma signature reference<input required minLength={8} value={seller.signatureReference} onChange={(event) => setSeller({ ...seller, signatureReference: event.target.value })} placeholder="Reference returned by Firma" /></label><div className="two-fields"><label>Payout rail<select value={seller.provider} onChange={(event) => setSeller({ ...seller, provider: event.target.value })}><option value="stripe_connect">Stripe Connect</option><option value="payfast">PayFast</option><option value="za_bank">South African bank adapter</option></select></label><label>Provider account ID<input value={seller.providerAccountId} onChange={(event) => setSeller({ ...seller, providerAccountId: event.target.value })} placeholder="Connected account / recipient reference" /></label></div><label>Account holder<input required value={seller.accountHolderName} onChange={(event) => setSeller({ ...seller, accountHolderName: event.target.value })} /></label><div className="two-fields"><label>Account last 4<input inputMode="numeric" pattern="\d{4}" value={seller.accountLast4} onChange={(event) => setSeller({ ...seller, accountLast4: event.target.value })} /></label><label>Branch last 4<input inputMode="numeric" pattern="\d{4}" value={seller.branchLast4} onChange={(event) => setSeller({ ...seller, branchLast4: event.target.value })} /></label></div><TurnstileChallenge onToken={setTurnstileToken} /><label className="checkbox-row"><input type="checkbox" required /> I agree to the current Contributor Terms of Service and authorize this digital signature record.</label><button className="dark-button" disabled={saving}>Submit seller tender <span>↗</span></button></form>
     <form className="workspace-card" onSubmit={createAsset}><div className="card-heading"><span className="section-kicker">02 · INGESTION</span><span className="status-pill warm">Needs review</span></div><h2>Submit a record</h2><AssetPricingFields asset={asset} setAsset={setAsset} /><div className="two-fields"><label>Media type<select value={asset.kind} onChange={(event) => setAsset({ ...asset, kind: event.target.value })}><option value="image">Photography</option><option value="video">Film & video</option></select></label><label>File<input type="file" accept="image/*,video/*" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label></div><label>Title<input required value={asset.title} onChange={(event) => setAsset({ ...asset, title: event.target.value })} placeholder="A precise, human title" /></label><label>Caption<textarea value={asset.caption} onChange={(event) => setAsset({ ...asset, caption: event.target.value })} placeholder="What is actually happening in the frame?" /></label><div className="two-fields"><label>City<input value={asset.city} onChange={(event) => setAsset({ ...asset, city: event.target.value })} /></label><label>Locality<input value={asset.locality} onChange={(event) => setAsset({ ...asset, locality: event.target.value })} placeholder="Cape Flats, Bo-Kaap…" /></label></div><label>Subject tags<input value={asset.subjectTags} onChange={(event) => setAsset({ ...asset, subjectTags: event.target.value })} placeholder="people, food, community" /></label><label>Cultural context tags<input value={asset.culturalTags} onChange={(event) => setAsset({ ...asset, culturalTags: event.target.value })} placeholder="South African braai, wood-fire braai" /></label><div className="two-fields"><label>Rights<select value={asset.rightsStatus} onChange={(event) => setAsset({ ...asset, rightsStatus: event.target.value })}><option value="pending">Pending verification</option><option value="editorial_only">Editorial only</option><option value="verified">Verified</option></select></label><label>Model release<select value={asset.modelReleaseStatus} onChange={(event) => setAsset({ ...asset, modelReleaseStatus: event.target.value })}><option value="unknown">Unknown</option><option value="not_required">Not required</option><option value="pending">Pending</option><option value="verified">Verified</option></select></label></div><button className="dark-button" disabled={saving || !asset.title}>{saving ? "Submitting…" : "Submit for review"} <span>↗</span></button></form></div></main>;
+}
+
+type ContributorMetadataDraft = {
+  id: string;
+  kind: Asset["kind"];
+  title: string;
+  description: string;
+  caption: string;
+  province: string;
+  city: string;
+  locality: string;
+  landmark: string;
+  subjectTags: string;
+  culturalTags: string;
+  rightsStatus: Asset["rightsStatus"];
+  modelReleaseStatus: Asset["modelReleaseStatus"];
+  propertyReleaseStatus: Asset["propertyReleaseStatus"];
+  monetizationModel: MonetizationModel;
+  licensePriceZar: string;
+  artistLicenseKey: NonNullable<Asset["artistLicenseKey"]>;
+  artistLicenseVersion: string;
+  artistLicenseUrl: string;
+  artistLicenseTerms: string;
+};
+
+function contributorMetadataDraft(asset: Asset): ContributorMetadataDraft {
+  return {
+    id: asset.id,
+    kind: asset.kind,
+    title: asset.title,
+    description: asset.description,
+    caption: asset.caption,
+    province: asset.province ?? "",
+    city: asset.city ?? "",
+    locality: asset.locality ?? "",
+    landmark: asset.landmark ?? "",
+    subjectTags: asset.subjectTags.join(", "),
+    culturalTags: asset.culturalTags.join(", "),
+    rightsStatus: asset.rightsStatus,
+    modelReleaseStatus: asset.modelReleaseStatus,
+    propertyReleaseStatus: asset.propertyReleaseStatus,
+    monetizationModel: asset.monetizationModel ?? "membership",
+    licensePriceZar: asset.licensePriceCents == null ? "" : (asset.licensePriceCents / 100).toFixed(2),
+    artistLicenseKey: asset.artistLicenseKey ?? "custom",
+    artistLicenseVersion: asset.artistLicenseVersion ?? "",
+    artistLicenseUrl: asset.artistLicenseUrl ?? "",
+    artistLicenseTerms: asset.artistLicenseTerms ?? "",
+  };
+}
+
+function ContributorAssetLibrary({ api, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
+  const [assets, setAssets] = useState<Asset[]>([]);
+  const [selectedId, setSelectedId] = useState("");
+  const [draft, setDraft] = useState<ContributorMetadataDraft | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const reloadAssets = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const response = await api("/api/my/assets");
+      const body = await response.json().catch(() => ({})) as { results?: Asset[]; error?: string };
+      if (!response.ok) throw new Error(body.error ?? "Your seller assets could not be loaded.");
+      const results = body.results ?? [];
+      setAssets(results);
+      setSelectedId((current) => current && results.some((asset) => asset.id === current) ? current : results[0]?.id ?? "");
+      setDraft((current) => {
+        const next = results.find((asset) => asset.id === (current?.id ?? selectedId)) ?? results[0];
+        return next ? contributorMetadataDraft(next) : null;
+      });
+    } catch (caught) {
+      setAssets([]);
+      setDraft(null);
+      setError(caught instanceof Error ? caught.message : "Your seller assets could not be loaded.");
+    } finally {
+      setLoading(false);
+    }
+  }, [api]);
+
+  useEffect(() => { void reloadAssets(); }, [reloadAssets]);
+
+  function selectAsset(asset: Asset) {
+    setSelectedId(asset.id);
+    setDraft(contributorMetadataDraft(asset));
+  }
+
+  function updateDraft<K extends keyof ContributorMetadataDraft>(key: K, value: ContributorMetadataDraft[K]) {
+    setDraft((current) => current ? { ...current, [key]: value } : current);
+  }
+
+  async function saveMetadata(event: React.FormEvent) {
+    event.preventDefault();
+    if (!draft) return;
+    setSaving(true);
+    try {
+      const response = await api(`/api/assets/${encodeURIComponent(draft.id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          kind: draft.kind,
+          title: draft.title,
+          description: draft.description,
+          caption: draft.caption,
+          province: draft.province || null,
+          city: draft.city || null,
+          locality: draft.locality || null,
+          landmark: draft.landmark || null,
+          subjectTags: draft.subjectTags.split(",").map((tag) => tag.trim()).filter(Boolean),
+          culturalTags: draft.culturalTags.split(",").map((tag) => tag.trim()).filter(Boolean),
+          rightsStatus: draft.rightsStatus,
+          modelReleaseStatus: draft.modelReleaseStatus,
+          propertyReleaseStatus: draft.propertyReleaseStatus,
+          monetizationModel: draft.monetizationModel,
+          licensePriceCents: draft.monetizationModel === "individual_license" && draft.licensePriceZar.trim() ? Math.round(Number(draft.licensePriceZar) * 100) : null,
+          artistLicenseKey: draft.artistLicenseKey,
+          artistLicenseVersion: draft.artistLicenseVersion || null,
+          artistLicenseUrl: draft.artistLicenseUrl || null,
+          artistLicenseTerms: draft.artistLicenseTerms,
+        }),
+      });
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) throw new Error(body.error ?? "Metadata could not be saved.");
+      await reloadAssets();
+      onNotice("Your photo metadata was saved and remains in the editorial review queue.");
+    } catch (caught) {
+      onNotice(caught instanceof Error ? caught.message : "Metadata could not be saved.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return <section className="contributor-assets-section" aria-labelledby="contributor-assets-title">
+    <div className="contributor-assets-heading"><div><span className="section-kicker">03 · YOUR PHOTO LIBRARY</span><h2 id="contributor-assets-title">Update your metadata.</h2><p>Edit descriptions, captions, places, tags, and rights context for assets you own. Changes are saved to the editorial record and never auto-publish.</p></div><button type="button" className="outline-button" onClick={() => void reloadAssets()} disabled={loading}><Icon name="workflow" /> {loading ? "Loading…" : "Refresh assets"}</button></div>
+    {error && <div className="contributor-assets-error" role="alert"><Icon name="shield" /><span>{error} If you are testing locally, choose <strong>Contributor</strong> in Local role, sign in, then open Contributor insights.</span></div>}
+    {loading && !assets.length ? <div className="empty-state contributor-assets-empty">Loading your owned assets…</div> : !assets.length ? <div className="empty-state contributor-assets-empty"><Icon name="image" /><strong>No uploaded photos yet.</strong><span>Submit a record above and it will appear here for future metadata updates.</span></div> : <div className="contributor-assets-layout">
+      <div className="contributor-asset-list" aria-label="Your uploaded assets">{assets.map((asset) => <button type="button" className={`contributor-asset-row ${selectedId === asset.id ? "active" : ""}`} key={asset.id} onClick={() => selectAsset(asset)}><span className="contributor-asset-thumb"><Icon name={asset.kind === "image" ? "image" : "workflow"} /></span><span className="contributor-asset-copy"><strong>{asset.title || "Untitled asset"}</strong><small>{asset.city || asset.country || "Location not set"} · {asset.status.replaceAll("_", " ")}</small></span><Icon name="chevron" size={15} /></button>)}</div>
+      {draft && <form className="workspace-card contributor-metadata-editor" onSubmit={(event) => void saveMetadata(event)} aria-label={`Edit metadata for ${draft.title || "asset"}`}><div className="card-heading"><span className="section-kicker">SELLER-OWNED RECORD</span><span className={`status-pill ${assets.find((asset) => asset.id === draft.id)?.status === "published" ? "cool" : "warm"}`}>{assets.find((asset) => asset.id === draft.id)?.status.replaceAll("_", " ")}</span></div><h3>{draft.title || "Edit asset"}</h3><p className="metadata-editor-note">These fields are yours to maintain. Editorial review still controls publication and search visibility.</p><label>Title<input required maxLength={180} value={draft.title} onChange={(event) => updateDraft("title", event.target.value)} /></label><label>Description<textarea required maxLength={4000} value={draft.description} onChange={(event) => updateDraft("description", event.target.value)} placeholder="Describe what is actually visible and the story context you can verify." /></label><label>Caption<textarea maxLength={2000} value={draft.caption} onChange={(event) => updateDraft("caption", event.target.value)} placeholder="A concise caption for buyers and editors." /></label><div className="two-fields"><label>Province<input value={draft.province} onChange={(event) => updateDraft("province", event.target.value)} /></label><label>City<input value={draft.city} onChange={(event) => updateDraft("city", event.target.value)} /></label></div><div className="two-fields"><label>Locality<input value={draft.locality} onChange={(event) => updateDraft("locality", event.target.value)} /></label><label>Landmark<input value={draft.landmark} onChange={(event) => updateDraft("landmark", event.target.value)} /></label></div><label>Subject tags<input value={draft.subjectTags} onChange={(event) => updateDraft("subjectTags", event.target.value)} placeholder="people, food, community" /><small className="field-help">Separate tags with commas.</small></label><label>Cultural context tags<input value={draft.culturalTags} onChange={(event) => updateDraft("culturalTags", event.target.value)} placeholder="Only add context you can evidence" /><small className="field-help">Avoid identity or cultural claims that cannot be supported; these are checked before saving.</small></label><div className="two-fields"><label>Rights<select value={draft.rightsStatus} onChange={(event) => updateDraft("rightsStatus", event.target.value as Asset["rightsStatus"])}><option value="pending">Pending verification</option><option value="editorial_only">Editorial only</option><option value="verified">Verified</option><option value="restricted">Restricted</option></select></label><label>Model release<select value={draft.modelReleaseStatus} onChange={(event) => updateDraft("modelReleaseStatus", event.target.value as Asset["modelReleaseStatus"])}><option value="unknown">Unknown</option><option value="not_required">Not required</option><option value="pending">Pending</option><option value="verified">Verified</option></select></label></div><div className="two-fields"><label>Property release<select value={draft.propertyReleaseStatus} onChange={(event) => updateDraft("propertyReleaseStatus", event.target.value as Asset["propertyReleaseStatus"])}><option value="unknown">Unknown</option><option value="not_required">Not required</option><option value="pending">Pending</option><option value="verified">Verified</option></select></label><label>Listing access<select value={draft.monetizationModel} onChange={(event) => updateDraft("monetizationModel", event.target.value as MonetizationModel)}><option value="membership">Membership</option><option value="individual_license">Individual licence</option><option value="custom_quote">Custom quote</option></select></label></div>{draft.monetizationModel === "individual_license" && <label>Price in ZAR<input type="number" min="1" step="0.01" value={draft.licensePriceZar} onChange={(event) => updateDraft("licensePriceZar", event.target.value)} /></label>}<details className="metadata-license-details"><summary>Artist licence evidence</summary><div><label>Licence key<input value={draft.artistLicenseKey} onChange={(event) => updateDraft("artistLicenseKey", event.target.value as NonNullable<Asset["artistLicenseKey"]>)} /></label><label>Version<input value={draft.artistLicenseVersion} onChange={(event) => updateDraft("artistLicenseVersion", event.target.value)} /></label><label>Proof URL<input type="url" value={draft.artistLicenseUrl} onChange={(event) => updateDraft("artistLicenseUrl", event.target.value)} /></label><label>Licence terms<textarea required={draft.artistLicenseKey === "custom" || draft.artistLicenseKey === "other"} value={draft.artistLicenseTerms} onChange={(event) => updateDraft("artistLicenseTerms", event.target.value)} /></label></div></details><div className="metadata-editor-footer"><span>Last saved records remain auditable.</span><button type="submit" className="dark-button" disabled={saving || !draft.title.trim() || !draft.description.trim()}>{saving ? "Saving metadata…" : "Save metadata"} <Icon name="arrow" size={15} /></button></div></form>}
+    </div>}
+  </section>;
 }
 
 type TenderRecord = { [key: string]: string | null | undefined; wallet_id?: string | null };

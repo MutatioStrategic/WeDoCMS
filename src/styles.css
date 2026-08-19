@@ -562,6 +562,40 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .better-shell .better-sidebar-footer-copy small { color: #c2d0c3 !important; }
 .better-shell .better-context span { color: #536356; }
 
+.contributor-assets-section { max-width: 1190px; margin: -52px auto 125px; padding: 0 0; }
+.contributor-assets-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 24px; }
+.contributor-assets-heading h2 { margin: 13px 0 8px; font-size: clamp(30px, 4vw, 48px); line-height: .98; letter-spacing: -.06em; }
+.contributor-assets-heading p { max-width: 620px; margin: 0; color: #34443a; font-size: 12px; line-height: 1.55; }
+.contributor-assets-heading .outline-button { flex: 0 0 auto; }
+.contributor-assets-error { display: flex; align-items: start; gap: 10px; margin-bottom: 14px; padding: 13px 15px; border: 1px solid #e0bbaa; color: #72321f; background: #fbede7; font-size: 11px; line-height: 1.45; }
+.contributor-assets-error svg { flex: 0 0 auto; margin-top: 1px; }
+.contributor-assets-empty { display: grid; place-items: center; gap: 8px; min-height: 170px; text-align: center; }
+.contributor-assets-empty svg { color: #7a3524; }
+.contributor-assets-layout { display: grid; grid-template-columns: minmax(230px, .66fr) minmax(0, 1.34fr); gap: 12px; align-items: start; }
+.contributor-asset-list { display: grid; gap: 6px; padding: 8px; border: 1px solid #d9dfd5; background: #e9eee7; }
+.contributor-asset-row { display: flex; min-width: 0; align-items: center; gap: 10px; padding: 11px 10px; color: #34443a; background: #f8faf6; border: 1px solid transparent; border-radius: 8px; text-align: left; }
+.contributor-asset-row:hover { border-color: #b7c9b4; background: #fff; }
+.contributor-asset-row.active { color: #17231d; background: #fff; border-color: #d58a59; box-shadow: inset 3px 0 0 #d58a59; }
+.contributor-asset-thumb { display: grid; flex: 0 0 34px; place-items: center; width: 34px; height: 34px; color: #6b856c; background: #e2eadf; border-radius: 7px; }
+.contributor-asset-row.active .contributor-asset-thumb { color: #8b452d; background: #f2ded3; }
+.contributor-asset-copy { display: grid; min-width: 0; flex: 1; gap: 4px; }
+.contributor-asset-copy strong, .contributor-asset-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.contributor-asset-copy strong { font-size: 11px; }
+.contributor-asset-copy small { color: #617265; font: 9px 'DM Mono', monospace; }
+.contributor-asset-row > svg { color: #91a092; }
+.contributor-metadata-editor { padding: 24px; }
+.contributor-metadata-editor h3 { margin: 14px 0 7px; font-size: 25px; letter-spacing: -.045em; }
+.metadata-editor-note { margin: 0 0 20px; color: #536356; font-size: 11px; line-height: 1.5; }
+.contributor-metadata-editor textarea { min-height: 92px; }
+.metadata-license-details { margin-top: 3px; border-top: 1px solid #e0ddd4; border-bottom: 1px solid #e0ddd4; }
+.metadata-license-details summary { padding: 13px 0; color: #596b5c; cursor: pointer; font-size: 11px; font-weight: 700; }
+.metadata-license-details > div { padding-bottom: 7px; }
+.metadata-editor-footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 8px; padding-top: 17px; border-top: 1px solid #e0ddd4; }
+.metadata-editor-footer > span { color: #617265; font: 9px 'DM Mono', monospace; }
+.metadata-editor-footer .dark-button { display: inline-flex; align-items: center; gap: 8px; }
+@media (max-width: 900px) { .contributor-assets-section { margin: -25px 22px 90px; }.contributor-assets-heading { display: block; }.contributor-assets-heading .outline-button { margin-top: 18px; }.contributor-assets-layout { grid-template-columns: 1fr; } }
+@media (max-width: 520px) { .contributor-assets-section { margin-right: 18px; margin-left: 18px; }.contributor-metadata-editor { padding: 20px; }.metadata-editor-footer { display: block; }.metadata-editor-footer .dark-button { width: 100%; justify-content: center; margin-top: 13px; } }
+
 /* Stakeholder system overview */
 .stakeholder-nav-link { color: #7a3524 !important; }
 .stakeholder-nav-link span { margin-left: 4px; color: #7a3524; font: 8px 'DM Mono', monospace; letter-spacing: .06em; }
