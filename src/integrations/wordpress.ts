@@ -30,8 +30,8 @@ export function wordPressApiBaseUrl(request: Request, configured?: string): stri
   return (configured?.trim() || new URL(request.url).origin).replace(/\/$/, '');
 }
 
-export function wordPressNoticeSeverity(status: { assetStatus: string; rightsStatus: string; licenceStatus: string; expiresAt: string | null }): "warning" | "blocked" {
+export function wordPressNoticeSeverity(status: { assetStatus: string; rightsStatus: string; licenceStatus: string; expiresAt: string | null }): "ok" | "warning" | "blocked" {
   if (status.assetStatus !== "published" || ["restricted", "pending"].includes(status.rightsStatus) || !["paid"].includes(status.licenceStatus)) return "blocked";
   if (status.expiresAt && Date.parse(status.expiresAt) <= Date.now() + 30 * 86_400_000) return "warning";
-  return "warning";
+  return "ok";
 }

@@ -2931,7 +2931,7 @@ app.get("/api/assets", async (c) => {
 
     if (String(c.env.APP_ENV) === "production") {
       clauses.push("((COALESCE(a.demo_seed, 0) = 0 AND a.id NOT LIKE 'asset-demo-%' AND a.id NOT LIKE 'asset-test-photo-%') OR (a.status = 'published' AND a.kind IN ('image', 'video') AND a.rights_status = 'verified' AND a.human_verified = 1 AND a.source_url IS NOT NULL AND a.source_license IS NOT NULL AND a.source_attribution IS NOT NULL AND (a.preview_key IS NOT NULL OR a.original_key IS NOT NULL)))");
-      clauses.push("(a.preview_key IS NOT NULL OR a.original_key IS NOT NULL)");
+      clauses.push("COALESCE(a.preview_key, a.original_key, '') <> ''");
     }
 
     if (params.kind !== "all") {

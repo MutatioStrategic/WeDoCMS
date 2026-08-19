@@ -87,35 +87,9 @@ function base64UrlEncode(bytes: Uint8Array): string {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
-function base64UrlDecode(value: string): Uint8Array<ArrayBuffer> {
-  const normalized = value.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - value.length % 4) % 4);
-  const binary = atob(normalized);
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0)) as Uint8Array<ArrayBuffer>;
-}
-
 async function hmac(secret: string, value: string): Promise<Uint8Array<ArrayBuffer>> {
   const key = await crypto.subtle.importKey("raw", utf8(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   return new Uint8Array(await crypto.subtle.sign("HMAC", key, utf8(value))) as Uint8Array<ArrayBuffer>;
-}
-
-async function verifyRsa256(jwksUrl: string, header: { alg?: string; kid?: string }, signingInput: string, signature: string): Promise<boolean> {
-  if (!header.kid) return false;
-  let jwks: { keys?: Array<JsonWebKey & { kid?: string }> };
-  try {
-    const response = await fetch(jwksUrl, { headers: { Accept: "application/json" } });
-    if (!response.ok) return false;
-    jwks = await response.json() as { keys?: Array<JsonWebKey & { kid?: string }> };
-  } catch {
-    return false;
-  }
-  const jwk = jwks.keys?.find((candidate) => candidate.kid === header.kid && candidate.kty === "RSA");
-  if (!jwk) return false;
-  try {
-    const key = await crypto.subtle.importKey("jwk", jwk, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]);
-    return crypto.subtle.verify({ name: "RSASSA-PKCS1-v1_5" }, key, base64UrlDecode(signature), utf8(signingInput));
-  } catch {
-    return false;
-  }
 }
 
 async function sha256Hex(value: string): Promise<string> {

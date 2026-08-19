@@ -26,6 +26,12 @@
     "worker:dev": "wrangler dev",
     "worker:deploy": "npm run build && npm run release:check && node scripts/release-gate.mjs --production && wrangler deploy --env production",
     "worker:deploy:development": "wrangler deploy",
+    "mobile:start": "npm --prefix apps/mobile run start",
+    "mobile:metro": "npm --prefix apps/mobile run start:clear",
+    "mobile:android": "npm --prefix apps/mobile run android",
+    "mobile:ios": "npm --prefix apps/mobile run ios",
+    "mobile:typecheck": "npm --prefix apps/mobile run typecheck",
+    "mobile:doctor": "npm --prefix apps/mobile run doctor",
     "backup:d1": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/backup-d1.ps1",
     "chaos:uploads": "node scripts/chaos-upload.mjs"
   },

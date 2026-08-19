@@ -15,7 +15,8 @@ describe("WordPress connector boundary", () => {
   });
 
   it("blocks revoked or non-published usage and warns on upcoming expiry", () => {
-    expect(wordPressNoticeSeverity({ assetStatus: "withdrawn", rightsStatus: "verified", licenceStatus: "paid", expiresAt: null })).toBe("blocked");
-    expect(wordPressNoticeSeverity({ assetStatus: "published", rightsStatus: "verified", licenceStatus: "paid", expiresAt: new Date(Date.now() + 2 * 86_400_000).toISOString() })).toBe("warning");
-  });
+  expect(wordPressNoticeSeverity({ assetStatus: "withdrawn", rightsStatus: "verified", licenceStatus: "paid", expiresAt: null })).toBe("blocked");
+  expect(wordPressNoticeSeverity({ assetStatus: "published", rightsStatus: "verified", licenceStatus: "paid", expiresAt: new Date(Date.now() + 2 * 86_400_000).toISOString() })).toBe("warning");
+  expect(wordPressNoticeSeverity({ assetStatus: "published", rightsStatus: "verified", licenceStatus: "paid", expiresAt: null })).toBe("ok");
+});
 });

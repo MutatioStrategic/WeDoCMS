@@ -59,7 +59,7 @@ try {
   await page.getByLabel("Search photo and video").fill("Table Mountain");
   await page.locator("form.search-box button[type=submit]").click();
   await page.locator(".search-trace-card.is-loading .search-trace-scan").first().waitFor();
-  console.log("âœ“ archive search: scanning feedback is visible while results load");
+  console.log("\\u2713 archive search: scanning feedback is visible while results load");
   await page.locator(".search-status-dot.complete").waitFor();
   const searchResults = await scan();
   const searchPassed = report("archive search results", searchResults);

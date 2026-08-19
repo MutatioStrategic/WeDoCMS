@@ -38,6 +38,18 @@ function ratioClass(preset: PlatformPreset): string {
 }
 function presetById(id: string): PlatformPreset { return presets.find((preset) => preset.id === id) ?? presets[0]; }
 function sourceFromAsset(asset: Asset) { return { id: asset.id, title: asset.title, kind: asset.kind, duration: asset.mediaDurationSeconds ?? 34, previewUrl: asset.previewUrl ?? null, sourceFileName: asset.sourceFileName ?? `${asset.title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.${asset.kind === "video" ? "mp4" : "jpg"}` }; }
+function safeMediaUrl(value: string | null): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value, window.location.origin);
+    if (url.protocol === "blob:") return url.href;
+    if (url.protocol !== "https:" && !(url.protocol === "http:" && url.origin === window.location.origin)) return null;
+    if (url.username || url.password) return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
 
 function Toggle({ label, checked, onChange, note }: { label: string; checked: boolean; onChange: (value: boolean) => void; note?: string }) {
   return <label className="studio-toggle"><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><span><b>{label}</b>{note && <small>{note}</small>}</span><i aria-hidden="true" /></label>;
@@ -108,7 +120,7 @@ export function StudioWorkspace({ assets, onNotice }: { assets: Asset[]; onNotic
   function retryJob(job: RenderJob) { setJobs((current) => current.map((item) => item.id === job.id ? { ...item, status: "queued", progress: 0 } : item)); onNotice(`${presetById(job.presetId).label} was returned to the render queue.`); }
   function exportCaptions(format: "SRT" | "VTT") { onNotice(`${format} caption export prepared for ${selectedSource.title}.`); }
 
-  const sourcePreview = sourceId === "local-upload" ? localUrl : selectedSource.previewUrl;
+  const sourcePreview = safeMediaUrl(sourceId === "local-upload" ? localUrl : selectedSource.previewUrl);
   const sourceIsImage = sourceId === "local-upload" ? Boolean(localName && /\.(jpe?g|png|webp|avif)$/i.test(localName)) : selectedSource.kind === "image";
 
   return <main className="studio-page">
