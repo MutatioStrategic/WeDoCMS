@@ -559,7 +559,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .better-shell .better-brand-name .muted { color: #b6c5b7 !important; }
 .better-shell .better-nav-label { color: #b5c2b6; }
-.better-shell .better-sidebar-footer-copy small { color: #aab9ab; }
+.better-shell .better-sidebar-footer-copy small { color: #c2d0c3 !important; }
 .better-shell .better-context span { color: #536356; }
 
 /* Stakeholder system overview */

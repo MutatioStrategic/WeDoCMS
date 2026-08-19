@@ -57,7 +57,7 @@ try {
     return button instanceof HTMLButtonElement && !button.disabled;
   });
   await page.getByLabel("Search photo and video").fill("Table Mountain");
-  await page.locator(".better-command-button").click();
+  await page.locator("form.search-box button[type=submit]").click();
   await page.locator(".search-trace-card.is-loading .search-trace-scan").first().waitFor();
   console.log("âœ“ archive search: scanning feedback is visible while results load");
   await page.locator(".search-status-dot.complete").waitFor();
