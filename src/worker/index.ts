@@ -4861,19 +4861,11 @@ const worker: ExportedHandler<Bindings, QueueMessage> = {
     try {
       await catchUpR2Replication(env, trace);
       const requeued = await retryQueuedPhotoJobs(photoPipeline(env));
-      const repaired = { queued: 0, recovered: 0, stale: 0, resolvedReviews: 0 };
-      for (let pass = 0; pass < 3; pass += 1) {
-        const batch = await repairPendingPhotoPipeline(photoPipeline(env), 50);
-        repaired.queued += batch.queued;
-        repaired.recovered += batch.recovered;
-        repaired.stale += batch.stale;
-        repaired.resolvedReviews += batch.resolvedReviews;
-        if (batch.queued < 50) break;
-      }
+      const repaired = await repairPendingPhotoPipeline(photoPipeline(env), 40);
       await runMaintenance(env);
       const alerted = await dispatchSavedSearchAlerts(env);
       recordMetric(env, "photo_jobs_requeued", trace, requeued, ["cron"]);
-      recordMetric(env, "photo_pipeline_repairs", trace, repaired.queued + repaired.recovered + repaired.stale + repaired.resolvedReviews, ["cron"]);
+      recordMetric(env, "photo_pipeline_repairs", trace, repaired.queued + repaired.recovered + repaired.stale + repaired.resolvedReviews + repaired.reconciledIndexes, ["cron"]);
       recordMetric(env, "saved_search_alerts_sent", trace, alerted, ["cron"]);
     } catch (error) {
       logEvent("error", "r2.replication.failed", trace, {

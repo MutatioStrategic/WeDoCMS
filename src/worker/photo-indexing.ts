@@ -624,8 +624,8 @@ export async function retryQueuedPhotoJobs(env: PhotoPipelineBindings): Promise<
 export async function repairPendingPhotoPipeline(
   env: PhotoPipelineBindings,
   limit = 40,
-): Promise<{ queued: number; recovered: number; stale: number; resolvedReviews: number }> {
-  if (!env.PHOTO_ENRICHMENT_QUEUE) return { queued: 0, recovered: 0, stale: 0, resolvedReviews: 0 };
+): Promise<{ queued: number; recovered: number; stale: number; resolvedReviews: number; reconciledIndexes: number }> {
+  if (!env.PHOTO_ENRICHMENT_QUEUE) return { queued: 0, recovered: 0, stale: 0, resolvedReviews: 0, reconciledIndexes: 0 };
 
   // Preserve historical failure/validation evidence in provenance while
   // removing records that no longer require an operational response.
@@ -644,6 +644,17 @@ export async function repairPendingPhotoPipeline(
         AND a.metadata_review_status = 'reviewed'
         AND COALESCE(a.reviewed_revision, 0) >= photo_ai_jobs.asset_revision
     )`).run();
+  const reconciledIndexResult = await env.DB.prepare(`UPDATE photo_ai_jobs SET status = 'completed',
+    error_class = NULL, last_error = NULL, completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
+    next_attempt_at = NULL, updated_at = CURRENT_TIMESTAMP
+    WHERE operation = 'sync_index' AND status = 'failed' AND EXISTS (
+      SELECT 1 FROM assets a WHERE a.id = photo_ai_jobs.asset_id
+        AND a.status <> 'published' AND a.asset_revision = photo_ai_jobs.asset_revision
+        AND a.candidate_vector_status = 'indexed'
+    )`).run();
+  await env.DB.prepare(`UPDATE assets SET vector_index_status = 'not_indexed', index_terminal_reason = status,
+    updated_at = CURRENT_TIMESTAMP
+    WHERE status <> 'published' AND candidate_vector_status = 'indexed' AND vector_index_status = 'error'`).run();
 
   // Older pipeline versions used the public vector status for review assets.
   // Move those records into the private candidate namespace before queueing.
@@ -685,6 +696,7 @@ export async function repairPendingPhotoPipeline(
     recovered,
     stale: Number(staleResult.meta.changes ?? 0),
     resolvedReviews: Number(resolvedReviewResult.meta.changes ?? 0),
+    reconciledIndexes: Number(reconciledIndexResult.meta.changes ?? 0),
   };
 }
 
@@ -838,6 +850,20 @@ async function deleteAssetSearchDocuments(env: PhotoPipelineBindings, asset: Ass
     .bind(asset.status, asset.id).run();
 }
 
+async function cleanupPublishedDocumentsForIndexedCandidate(env: PhotoPipelineBindings, asset: AssetRow): Promise<void> {
+  await env.DB.prepare("DELETE FROM asset_search_fts WHERE asset_id = ?").bind(asset.id).run();
+  const vectorRows = await env.DB.prepare("SELECT DISTINCT vector_id FROM photo_ai_jobs WHERE asset_id = ? AND vector_id IS NOT NULL")
+    .bind(asset.id).all<{ vector_id: string }>();
+  const publicVectorIds = [...new Set([asset.vector_index_id, ...vectorRows.results.map((row) => row.vector_id)]
+    .filter((value): value is string => typeof value === "string")
+    .filter((value) => value !== asset.candidate_vector_id && !value.startsWith("candidate::")))];
+  if (env.PHOTO_INDEX && publicVectorIds.length) await env.PHOTO_INDEX.deleteByIds(publicVectorIds.slice(0, 1000));
+  await env.DB.prepare(`UPDATE assets SET vector_index_status = 'not_indexed', vector_indexed_at = NULL,
+    vector_index_version = NULL, vector_index_id = NULL, indexed_revision = NULL, index_terminal_reason = status,
+    updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status <> 'published' AND candidate_vector_status = 'indexed'`)
+    .bind(asset.id).run();
+}
+
 async function syncCandidatePhotoIndex(env: PhotoPipelineBindings, job: PhotoEnrichmentJob, trace: TraceContext, attempt: number): Promise<void> {
   const asset = await getAsset(env, job.assetId);
   if (!asset) {
@@ -880,7 +906,17 @@ async function syncCandidatePhotoIndex(env: PhotoPipelineBindings, job: PhotoEnr
     await markStale(env, job, attempt, "conditional-candidate-index-write-was-stale");
     return;
   }
-  if (asset.vector_index_id && asset.vector_index_id !== vectorId) await env.PHOTO_INDEX.deleteByIds([asset.vector_index_id]);
+  if (asset.vector_index_id && asset.vector_index_id !== vectorId) {
+    try {
+      await env.PHOTO_INDEX.deleteByIds([asset.vector_index_id]);
+    } catch (error) {
+      logEvent("warn", "photo.candidate_vector_cleanup_deferred", trace, {
+        assetId: asset.id,
+        vectorId: asset.vector_index_id,
+        error: error instanceof Error ? error.message : "unknown-error",
+      });
+    }
+  }
   await markJob(env, job.jobId, "completed", { vectorId });
   await recordProvenance(env, job, attempt, "indexed", { model: embeddingModel, actorId: "photo-indexer", result: { vectorId, namespace, dimensions: vector.length, scope: "candidate" } });
   recordMetric(env, "photo_candidate_vector_indexed", trace, 1, [asset.id]);
@@ -913,6 +949,12 @@ async function syncPhotoIndex(env: PhotoPipelineBindings, job: PhotoEnrichmentJo
   if (asset.status !== "published" || asset.kind !== "image") {
     if (asset.kind === "image" && asset.status !== "published" && asset.candidate_vector_status === "pending") {
       await syncCandidatePhotoIndex(env, job, trace, attempt);
+      return;
+    }
+    if (asset.kind === "image" && asset.status !== "published" && asset.candidate_vector_status === "indexed") {
+      await cleanupPublishedDocumentsForIndexedCandidate(env, asset);
+      await markJob(env, job.jobId, "completed", { vectorId: asset.candidate_vector_id ?? undefined });
+      await recordProvenance(env, job, attempt, "indexed", { actorId: "photo-indexer", validation: { reason: "candidate-index-retained-public-document-cleanup-completed" } });
       return;
     }
     await deleteAssetSearchDocuments(env, asset);
@@ -966,7 +1008,17 @@ async function syncPhotoIndex(env: PhotoPipelineBindings, job: PhotoEnrichmentJo
     await markStale(env, job, attempt, "conditional-index-write-was-stale");
     return;
   }
-  if (asset.vector_index_id && asset.vector_index_id !== vectorId) await env.PHOTO_INDEX.deleteByIds([asset.vector_index_id]);
+  if (asset.vector_index_id && asset.vector_index_id !== vectorId) {
+    try {
+      await env.PHOTO_INDEX.deleteByIds([asset.vector_index_id]);
+    } catch (error) {
+      logEvent("warn", "photo.vector_cleanup_deferred", trace, {
+        assetId: asset.id,
+        vectorId: asset.vector_index_id,
+        error: error instanceof Error ? error.message : "unknown-error",
+      });
+    }
+  }
   await env.DB.prepare("DELETE FROM asset_search_fts WHERE asset_id = ? AND document_id <> ?").bind(asset.id, ftsDocumentId).run();
   await markJob(env, job.jobId, "completed", { vectorId });
   await recordProvenance(env, job, attempt, "indexed", { model: embeddingModel, actorId: "photo-indexer", result: { vectorId, dimensions: vector.length, ftsDocumentId } });
@@ -999,12 +1051,19 @@ export async function processPhotoJob(env: PhotoPipelineBindings, job: PhotoEnri
     });
     if (job.operation === "sync_index") {
       const failedAsset = await getAsset(env, job.assetId);
-      if (failedAsset?.status !== "published" && failedAsset?.candidate_vector_status === "pending") {
-        await env.DB.prepare("UPDATE assets SET candidate_vector_status = 'error', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND asset_revision = ?")
-          .bind(job.assetId, job.assetRevision).run();
+      if (failedAsset?.status !== "published") {
+        if (failedAsset?.candidate_vector_status === "pending") {
+          if (deadLettered) {
+            await env.DB.prepare("UPDATE assets SET candidate_vector_status = 'error', vector_index_status = 'not_indexed', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND asset_revision = ?")
+              .bind(job.assetId, job.assetRevision).run();
+          }
+        } else {
+          await env.DB.prepare("UPDATE assets SET vector_index_status = 'not_indexed', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND asset_revision = ?")
+            .bind(job.assetId, job.assetRevision).run();
+        }
       } else {
-        await env.DB.prepare("UPDATE assets SET vector_index_status = 'error', index_terminal_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND asset_revision = ?")
-          .bind(deadLettered ? "dead_lettered" : "retry_pending", job.assetId, job.assetRevision).run();
+        await env.DB.prepare("UPDATE assets SET vector_index_status = ?, index_terminal_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND asset_revision = ?")
+          .bind(deadLettered ? "error" : "pending", deadLettered ? "dead_lettered" : "retry_pending", job.assetId, job.assetRevision).run();
       }
     } else {
       await env.DB.prepare(`UPDATE assets SET status = 'needs_review', workflow_stage = ?, metadata_review_status = ?,
