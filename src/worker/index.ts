@@ -148,6 +148,16 @@ type SecretBindings = {
   AUTH_JWT_SECRET?: string;
   AUTH_ISSUER?: string;
   AUTH_AUDIENCE?: string;
+  AUTH_ROLES_CLAIM?: string;
+  AUTH_USERINFO_URL?: string;
+  AUTH_PROVIDER?: "auth0" | "supabase" | "both" | string;
+  SUPABASE_URL?: string;
+  SUPABASE_ANON_KEY?: string;
+  SUPABASE_JWT_SECRET?: string;
+  SUPABASE_JWKS_URL?: string;
+  SUPABASE_ISSUER?: string;
+  SUPABASE_AUDIENCE?: string;
+  SUPABASE_ROLES_CLAIM?: string;
   AUTH_COOKIE_DOMAIN?: string;
   AUTH_ALLOW_ORG_PROVISIONING?: string;
   DEMO_AUTH_ENABLED?: string;
@@ -3650,7 +3660,7 @@ async function launchReadiness(env: Bindings): Promise<Record<string, unknown>> 
   const demoAssets = tables.has("assets") ? await scalar("SELECT COUNT(*) AS total FROM assets WHERE COALESCE(demo_seed, 0) = 1 OR id LIKE 'asset-demo-%' OR id LIKE 'asset-test-photo-%'") : 0;
   const verifiedPaystackWallets = tables.has("payout_wallets") ? await scalar("SELECT COUNT(*) AS total FROM payout_wallets WHERE provider = 'paystack' AND status = 'verified' AND provider_account_id LIKE 'ACCT_%'") : 0;
   const auth0Configured = Boolean(env.AUTH_JWKS_URL?.trim() && env.AUTH_ISSUER?.trim() && env.AUTH_AUDIENCE?.trim());
-  const supabaseConfigured = Boolean(env.SUPABASE_URL?.trim() && env.SUPABASE_AUDIENCE?.trim());
+    const supabaseConfigured = Boolean(env.SUPABASE_URL?.trim() && env.SUPABASE_AUDIENCE?.trim() && (env.SUPABASE_JWT_SECRET?.trim() || env.SUPABASE_JWKS_URL?.trim() || env.SUPABASE_ANON_KEY?.trim()));
   const subscription = buyerSubscriptionConfiguration(env);
   let streamSecretConfigured = Boolean(env.STREAM_WEBHOOK_SECRET?.trim());
   if (!streamSecretConfigured && env.STREAM_WEBHOOK_SECRET_STORE) {

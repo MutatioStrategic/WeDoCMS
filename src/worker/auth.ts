@@ -14,6 +14,7 @@ export type AuthBindings = {
   AUTH_USERINFO_URL?: string;
   AUTH_PROVIDER?: "auth0" | "supabase" | "both" | string;
   SUPABASE_URL?: string;
+  SUPABASE_ANON_KEY?: string;
   SUPABASE_JWT_SECRET?: string;
   SUPABASE_JWKS_URL?: string;
   SUPABASE_ISSUER?: string;
@@ -78,6 +79,13 @@ const auth0UserInfoSchema = z.object({
   email: z.string().email().max(320).optional(),
   email_verified: z.boolean().optional(),
   name: z.string().trim().min(1).max(180).optional(),
+}).passthrough();
+
+const supabaseUserSchema = z.object({
+  id: z.string().min(1).max(200),
+  email: z.string().email().max(320).nullable().optional(),
+  email_confirmed_at: z.string().nullable().optional(),
+  user_metadata: z.record(z.unknown()).optional(),
 }).passthrough();
 
 const utf8 = (value: string): Uint8Array<ArrayBuffer> => new TextEncoder().encode(value) as Uint8Array<ArrayBuffer>;
@@ -219,11 +227,42 @@ function supabaseProfile(env: AuthBindings) {
   const baseUrl = env.SUPABASE_URL?.replace(/\/$/, "");
   return {
     secret: env.SUPABASE_JWT_SECRET,
+    anonKey: env.SUPABASE_ANON_KEY,
     issuer: env.SUPABASE_ISSUER ?? (baseUrl ? `${baseUrl}/auth/v1` : undefined),
     jwksUrl: env.SUPABASE_JWKS_URL ?? (baseUrl ? `${baseUrl}/auth/v1/.well-known/jwks.json` : undefined),
     audience: env.SUPABASE_AUDIENCE ?? "authenticated",
     rolesClaim: env.SUPABASE_ROLES_CLAIM,
   };
+}
+
+async function verifySupabaseAccessToken(env: AuthBindings, token: string): Promise<JwtClaims | null> {
+  const baseUrl = env.SUPABASE_URL?.replace(/\/$/, "");
+  const anonKey = env.SUPABASE_ANON_KEY?.trim();
+  if (!baseUrl || !anonKey) return null;
+  try {
+    const response = await fetch(`${baseUrl}/auth/v1/user`, {
+      headers: {
+        Accept: "application/json",
+        apikey: anonKey,
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    if (!response.ok) return null;
+    const user = supabaseUserSchema.parse(await response.json());
+    const displayName = typeof user.user_metadata?.display_name === "string" && user.user_metadata.display_name.trim()
+      ? user.user_metadata.display_name.trim()
+      : user.email ?? undefined;
+    return jwtClaimsSchema.parse({
+      sub: user.id,
+      email: user.email ?? undefined,
+      name: displayName,
+      iss: `${baseUrl}/auth/v1`,
+      aud: env.SUPABASE_AUDIENCE ?? "authenticated",
+      email_verified: Boolean(user.email_confirmed_at),
+    });
+  } catch {
+    return null;
+  }
 }
 
 async function verifyJoseToken(token: string, profile: { secret?: string; jwksUrl?: string; issuer?: string; audience?: string }, algorithms: string[]): Promise<JwtClaims | null> {
@@ -261,6 +300,8 @@ export async function verifyExternalJwtWithProvider(env: AuthBindings, token: st
     const profile = supabaseProfile(env);
     const supabaseClaims = await verifyJoseToken(token, profile, profile.secret ? ["HS256"] : ["RS256", "ES256"]);
     if (supabaseClaims) return { provider: "supabase", claims: supabaseClaims };
+    const remotelyVerifiedClaims = await verifySupabaseAccessToken(env, token);
+    if (remotelyVerifiedClaims) return { provider: "supabase", claims: remotelyVerifiedClaims };
   }
   return null;
 }

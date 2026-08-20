@@ -58,6 +58,20 @@ describe("verified identity exchange", () => {
     vi.unstubAllGlobals();
   });
 
+  it("uses Supabase Auth user validation when the project still uses legacy signing", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "supabase-user-1",
+      email: "person@example.com",
+      email_confirmed_at: "2026-08-20T10:00:00.000Z",
+      user_metadata: { display_name: "Example Person" },
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const identity = await verifyExternalJwtWithProvider({ AUTH_PROVIDER: "supabase", SUPABASE_URL: "https://tenant.supabase.co", SUPABASE_ANON_KEY: "public-anon-key" } as never, "header.payload.signature");
+    expect(identity).toMatchObject({ provider: "supabase", claims: { sub: "supabase-user-1", email: "person@example.com", name: "Example Person", email_verified: true } });
+    expect(fetchMock).toHaveBeenCalledWith("https://tenant.supabase.co/auth/v1/user", expect.objectContaining({ headers: expect.objectContaining({ apikey: "public-anon-key", Authorization: "Bearer header.payload.signature" }) }));
+    vi.unstubAllGlobals();
+  });
+
   it("resolves Auth0 profile and verified-email claims through UserInfo", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ sub: "auth0|user-1", email: "person@example.com", email_verified: true, name: "Example Person" }), { status: 200, headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
