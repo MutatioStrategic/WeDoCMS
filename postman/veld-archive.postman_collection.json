@@ -1,0 +1,327 @@
+{
+  "info": {
+    "name": "Veld Archive API - Priority Smoke",
+    "description": "Safe, repo-local API smoke coverage for the Veld Archive Worker. Run against a local Worker by default. The stateful requests create and remove only their own lightbox and saved search.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:8787"
+    }
+  ],
+  "item": [
+    {
+      "name": "01 - Public contracts",
+      "item": [
+        {
+          "name": "Health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "health"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('returns HTTP 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.test('reports a healthy Veld Archive API', function () { pm.expect(body.ok).to.eql(true); pm.expect(body.service).to.eql('veld-archive-api'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Anonymous session",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/auth/session",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "auth", "session"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('returns HTTP 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.test('is anonymous before login', function () { pm.expect(body.authenticated).to.eql(false); pm.expect(body.user).to.eql(null); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Published asset search",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/assets?kind=image&status=published&sort=newest",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "assets"],
+              "query": [
+                {"key": "kind", "value": "image"},
+                {"key": "status", "value": "published"},
+                {"key": "sort", "value": "newest"}
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('returns HTTP 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.test('returns a result array and published search metadata', function () { pm.expect(body.results).to.be.an('array'); pm.expect(body.query).to.be.a('string'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Discovery",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/discovery",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "discovery"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('returns HTTP 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.test('returns privacy-safe discovery fields', function () { pm.expect(body.trending).to.be.an('array'); pm.expect(body.savedSearches).to.be.an('array'); pm.expect(body.recommendations).to.be.an('array'); pm.expect(body.personalized).to.eql(false); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Invalid asset query is rejected",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/assets?kind=not-a-kind",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "assets"],
+              "query": [{"key": "kind", "value": "not-a-kind"}]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('rejects invalid enum input with HTTP 400', function () { pm.response.to.have.status(400); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "02 - Auth and access control",
+      "item": [
+        {
+          "name": "Unauthenticated notifications denied",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {"raw": "{{baseUrl}}/api/notifications", "host": ["{{baseUrl}}"], "path": ["api", "notifications"]}
+          },
+          "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": ["pm.test('returns HTTP 401', function () { pm.response.to.have.status(401); });"]}}]
+        },
+        {
+          "name": "Unauthenticated lightboxes denied",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {"raw": "{{baseUrl}}/api/lightboxes", "host": ["{{baseUrl}}"], "path": ["api", "lightboxes"]}
+          },
+          "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": ["pm.test('returns HTTP 401', function () { pm.response.to.have.status(401); });"]}}]
+        },
+        {
+          "name": "Unauthenticated upload denied",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {"mode": "raw", "raw": "{\n  \"filename\": \"postman-smoke.jpg\",\n  \"contentType\": \"image/jpeg\",\n  \"sizeBytes\": 10\n}"},
+            "url": {"raw": "{{baseUrl}}/api/uploads", "host": ["{{baseUrl}}"], "path": ["api", "uploads"]}
+          },
+          "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": ["pm.test('returns HTTP 401', function () { pm.response.to.have.status(401); });"]}}]
+        },
+        {
+          "name": "Development contributor login",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {"mode": "raw", "raw": "{\n  \"role\": \"contributor\"\n}"},
+            "url": {"raw": "{{baseUrl}}/api/auth/dev-login", "host": ["{{baseUrl}}"], "path": ["api", "auth", "dev-login"]}
+          },
+          "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": ["pm.test('returns HTTP 200', function () { pm.response.to.have.status(200); });", "const body = pm.response.json();", "pm.test('returns authenticated user and CSRF token', function () { pm.expect(body.user.id).to.eql('demo-contributor'); pm.expect(body.user.role).to.eql('contributor'); pm.expect(body.csrfToken).to.be.a('string').and.not.empty; });", "pm.environment.set('csrfToken', body.csrfToken);"]}}]
+        },
+        {
+          "name": "Authenticated identity cannot be spoofed by headers",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "x-user-id", "value": "demo-admin"}, {"key": "x-user-role", "value": "admin"}],
+            "url": {"raw": "{{baseUrl}}/api/me", "host": ["{{baseUrl}}"], "path": ["api", "me"]}
+          },
+          "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": ["pm.test('returns HTTP 200', function () { pm.response.to.have.status(200); });", "const body = pm.response.json();", "pm.test('session remains the contributor identity', function () { pm.expect(body.authenticated).to.eql(true); pm.expect(body.user.id).to.eql('demo-contributor'); pm.expect(body.user.role).to.eql('contributor'); });"]}}]
+        },
+        {
+          "name": "Authenticated mutation without CSRF denied",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {"mode": "raw", "raw": "{\n  \"name\": \"should-not-create\"\n}"},
+            "url": {"raw": "{{baseUrl}}/api/lightboxes", "host": ["{{baseUrl}}"], "path": ["api", "lightboxes"]}
+          },
+          "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": ["pm.test('returns HTTP 403', function () { pm.response.to.have.status(403); });"]}}]
+        },
+        {
+          "name": "Authenticated lightbox listing",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {"raw": "{{baseUrl}}/api/lightboxes", "host": ["{{baseUrl}}"], "path": ["api", "lightboxes"]}
+          },
+          "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": ["pm.test('returns HTTP 200', function () { pm.response.to.have.status(200); });", "pm.test('returns tenant-scoped results', function () { pm.expect(pm.response.json().results).to.be.an('array'); });"]}}]
+        }
+      ]
+    },
+    {
+      "name": "03 - Stateful priority flows",
+      "item": [
+        {
+          "name": "Create smoke lightbox",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}, {"key": "X-CSRF-Token", "value": "{{csrfToken}}"}],
+            "body": {"mode": "raw", "raw": "{\n  \"name\": \"Postman Smoke {{$timestamp}}\",\n  \"description\": \"Temporary API smoke resource\",\n  \"visibility\": \"private\"\n}"},
+            "url": {"raw": "{{baseUrl}}/api/lightboxes", "host": ["{{baseUrl}}"], "path": ["api", "lightboxes"]}
+          },
+          "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": ["pm.test('creates a lightbox with HTTP 201', function () { pm.response.to.have.status(201); });", "const body = pm.response.json();", "pm.test('returns a lightbox id', function () { pm.expect(body.id).to.be.a('string').and.not.empty; });", "pm.environment.set('lightboxId', body.id);"]}}]
+        },
+        {
+          "name": "Save published asset to lightbox",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}, {"key": "X-CSRF-Token", "value": "{{csrfToken}}"}],
+            "body": {"mode": "raw", "raw": "{\n  \"assetId\": \"{{assetId}}\"\n}"},
+            "url": {"raw": "{{baseUrl}}/api/lightboxes/{{lightboxId}}/assets", "host": ["{{baseUrl}}"], "path": ["api", "lightboxes", "{{lightboxId}}", "assets"]}
+          },
+          "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": ["pm.test('saves the asset idempotently', function () { pm.response.to.have.status(200); });"]}}]
+        },
+        {
+          "name": "Create lightbox share link",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "X-CSRF-Token", "value": "{{csrfToken}}"}],
+            "url": {"raw": "{{baseUrl}}/api/lightboxes/{{lightboxId}}/share-link", "host": ["{{baseUrl}}"], "path": ["api", "lightboxes", "{{lightboxId}}", "share-link"]}
+          },
+          "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": ["pm.test('creates a share link with HTTP 201', function () { pm.response.to.have.status(201); });", "const body = pm.response.json();", "pm.test('returns a share URL', function () { pm.expect(body.shareUrl).to.be.a('string').and.not.empty; });", "pm.environment.set('sharePath', body.shareUrl.replace(/^\\/+/, ''));"]}}]
+        },
+        {
+          "name": "View shared lightbox",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {"raw": "{{baseUrl}}/{{sharePath}}", "host": ["{{baseUrl}}"], "path": ["{{sharePath}}"]}
+          },
+          "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": ["pm.test('returns HTTP 200', function () { pm.response.to.have.status(200); });", "pm.test('returns shared results', function () { pm.expect(pm.response.json().results).to.be.an('array'); });"]}}]
+        },
+        {
+          "name": "List lightbox contains saved asset",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {"raw": "{{baseUrl}}/api/lightboxes", "host": ["{{baseUrl}}"], "path": ["api", "lightboxes"]}
+          },
+          "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": ["pm.test('returns HTTP 200', function () { pm.response.to.have.status(200); });", "const body = pm.response.json();", "const lightbox = body.results.find((item) => item.id === pm.environment.get('lightboxId'));", "pm.test('contains the saved asset', function () { pm.expect(lightbox).to.be.an('object'); pm.expect(lightbox.assetIds).to.include(pm.environment.get('assetId')); });"]}}]
+        },
+        {
+          "name": "Create saved search",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}, {"key": "X-CSRF-Token", "value": "{{csrfToken}}"}],
+            "body": {"mode": "raw", "raw": "{\n  \"name\": \"Postman Search {{$timestamp}}\",\n  \"query\": \"Cape Town\",\n  \"mediaKind\": \"image\",\n  \"alertFrequency\": \"weekly\"\n}"},
+            "url": {"raw": "{{baseUrl}}/api/saved-searches", "host": ["{{baseUrl}}"], "path": ["api", "saved-searches"]}
+          },
+          "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": ["pm.test('creates a saved search with HTTP 201', function () { pm.response.to.have.status(201); });", "const body = pm.response.json();", "pm.test('returns a saved search id', function () { pm.expect(body.id).to.be.a('string').and.not.empty; });", "pm.environment.set('savedSearchId', body.id);"]}}]
+        },
+        {
+          "name": "Personalized discovery includes saved search",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {"raw": "{{baseUrl}}/api/discovery", "host": ["{{baseUrl}}"], "path": ["api", "discovery"]}
+          },
+          "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": ["pm.test('returns HTTP 200', function () { pm.response.to.have.status(200); });", "const body = pm.response.json();", "pm.test('returns personalized discovery for the session', function () { pm.expect(body.personalized).to.eql(true); pm.expect(body.savedSearches.map((item) => item.id)).to.include(pm.environment.get('savedSearchId')); });"]}}]
+        },
+        {
+          "name": "Delete saved search",
+          "request": {
+            "method": "DELETE",
+            "header": [{"key": "X-CSRF-Token", "value": "{{csrfToken}}"}],
+            "url": {"raw": "{{baseUrl}}/api/saved-searches/{{savedSearchId}}", "host": ["{{baseUrl}}"], "path": ["api", "saved-searches", "{{savedSearchId}}"]}
+          },
+          "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": ["pm.test('deletes the saved search with HTTP 200', function () { pm.response.to.have.status(200); });"]}}]
+        },
+        {
+          "name": "Delete smoke lightbox",
+          "request": {
+            "method": "DELETE",
+            "header": [{"key": "X-CSRF-Token", "value": "{{csrfToken}}"}],
+            "url": {"raw": "{{baseUrl}}/api/lightboxes/{{lightboxId}}", "host": ["{{baseUrl}}"], "path": ["api", "lightboxes", "{{lightboxId}}"]}
+          },
+          "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": ["pm.test('deletes the smoke lightbox with HTTP 200', function () { pm.response.to.have.status(200); });"]}}]
+        },
+        {
+          "name": "Logout revokes session",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "X-CSRF-Token", "value": "{{csrfToken}}"}],
+            "url": {"raw": "{{baseUrl}}/api/auth/logout", "host": ["{{baseUrl}}"], "path": ["api", "auth", "logout"]}
+          },
+          "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": ["pm.test('returns HTTP 200', function () { pm.response.to.have.status(200); });", "pm.test('reports anonymous after logout', function () { pm.expect(pm.response.json().authenticated).to.eql(false); });"]}}]
+        },
+        {
+          "name": "Session is no longer authenticated",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {"raw": "{{baseUrl}}/api/me", "host": ["{{baseUrl}}"], "path": ["api", "me"]}
+          },
+          "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": ["pm.test('returns HTTP 200', function () { pm.response.to.have.status(200); });", "pm.test('session is revoked', function () { pm.expect(pm.response.json().authenticated).to.eql(false); });"]}}]
+        }
+      ]
+    }
+  ]
+}

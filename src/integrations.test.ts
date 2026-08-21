@@ -8,6 +8,17 @@ import { CloudflareEmailAdapter } from "./integrations/email";
 const jsonResponse = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
 describe("provider abstraction layer", () => {
+  it("supports legacy Didit secret and endpoint aliases", () => {
+    const container = new IntegrationContainer({
+      DIDIT_API_SECRET: "legacy-api-secret",
+      DIDIT_URL: "https://verification.example.test/session",
+      DIDIT_KYC_WORKFLOW_ID: "kyc-workflow",
+      DIDIT_KYB_WORKFLOW_ID: "kyb-workflow",
+    });
+
+    expect(container.didit).toBeDefined();
+  });
+
   it("composes configured providers behind provider registries", () => {
     const container = new IntegrationContainer({
       PAYMENT_PROVIDER: "checkout",

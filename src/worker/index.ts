@@ -115,10 +115,15 @@ type SecretBindings = {
   KYC_PROVIDER?: string;
   KYC_WEBHOOK_SECRET?: string;
   DIDIT_API_KEY?: string;
+  /** Backward-compatible alias used by the existing deployment environment. */
+  DIDIT_API_SECRET?: string;
   DIDIT_WEBHOOK_SECRET?: string;
+  /** Backward-compatible alias used by the existing deployment environment. */
+  DIDIT_SIGNING_SECRET?: string;
   DIDIT_KYC_WORKFLOW_ID?: string;
   DIDIT_KYB_WORKFLOW_ID?: string;
   DIDIT_API_URL?: string;
+  DIDIT_URL?: string;
   CIPC_LOOKUP_URL?: string;
   CIPC_API_TOKEN?: string;
   APP_PUBLIC_URL?: string;
@@ -3211,11 +3216,12 @@ async function verifyKycWebhook(secret: string, signature: string, body: string)
 }
 
 app.post("/api/webhooks/didit", async (c) => {
-  if (!c.env.DIDIT_WEBHOOK_SECRET) return c.json({ error: "Didit webhook secret is not configured" }, 503);
+  const diditWebhookSecret = c.env.DIDIT_WEBHOOK_SECRET ?? c.env.DIDIT_SIGNING_SECRET;
+  if (!diditWebhookSecret) return c.json({ error: "Didit webhook secret is not configured" }, 503);
   const rawBody = await c.req.text();
   let payload: Record<string, unknown>;
   try { payload = JSON.parse(rawBody) as Record<string, unknown>; } catch { return c.json({ error: "Invalid Didit webhook JSON" }, 400); }
-  const verified = await verifyDiditWebhook({ secret: c.env.DIDIT_WEBHOOK_SECRET, rawBody, payload, signatureV2: c.req.header("x-signature-v2"), signature: c.req.header("x-signature"), timestamp: c.req.header("x-timestamp") });
+  const verified = await verifyDiditWebhook({ secret: diditWebhookSecret, rawBody, payload, signatureV2: c.req.header("x-signature-v2"), signature: c.req.header("x-signature"), timestamp: c.req.header("x-timestamp") });
   if (!verified) return c.json({ error: "Invalid or stale Didit webhook signature" }, 401);
   const sessionId = typeof payload.session_id === "string" ? payload.session_id : "";
   const status = typeof payload.status === "string" ? payload.status : "";
@@ -3673,7 +3679,7 @@ async function launchReadiness(env: Bindings): Promise<Record<string, unknown>> 
     { id: "email_sender", ready: Boolean(env.EMAIL && env.EMAIL_FROM?.trim()), action: "Verify the transactional email sender and binding." },
     { id: "turnstile", ready: Boolean(env.TURNSTILE_SECRET?.trim() && env.TURNSTILE_HOSTNAMES?.trim()), action: "Provision Turnstile and configure its secret and hostname allowlist." },
     { id: "firma", ready: Boolean(env.FIRMA_VERIFY_URL?.trim() && env.FIRMA_API_TOKEN?.trim()), action: "Configure the Firma verification endpoint and API token." },
-    { id: "didit", ready: Boolean(env.DIDIT_API_KEY?.trim() && env.DIDIT_WEBHOOK_SECRET?.trim() && env.DIDIT_KYC_WORKFLOW_ID?.trim() && env.DIDIT_KYB_WORKFLOW_ID?.trim()), action: "Configure Didit API, webhook, KYC, and KYB credentials." },
+    { id: "didit", ready: Boolean((env.DIDIT_API_KEY?.trim() || env.DIDIT_API_SECRET?.trim()) && (env.DIDIT_WEBHOOK_SECRET?.trim() || env.DIDIT_SIGNING_SECRET?.trim()) && env.DIDIT_KYC_WORKFLOW_ID?.trim() && env.DIDIT_KYB_WORKFLOW_ID?.trim()), action: "Configure Didit API, webhook, KYC, and KYB credentials." },
     { id: "cipc", ready: Boolean(env.CIPC_LOOKUP_URL?.trim() && env.CIPC_API_TOKEN?.trim()), action: "Configure the CIPC verification adapter." },
     { id: "payments", ready: paymentProviderConfigured(env) && subscription.configured, action: "Configure Paystack checkout, signed webhooks, and the recurring plan." },
     { id: "marketplace_terms", ready: String(env.MARKETPLACE_TERMS_APPROVED) === "true", action: "Obtain legal approval for the versioned seller, buyer, and split terms, then attest MARKETPLACE_TERMS_APPROVED=true." },
