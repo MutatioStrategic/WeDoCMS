@@ -52,7 +52,11 @@ type SessionRow = {
 const jwtClaimsSchema = z.object({
   sub: z.string().min(1).max(200),
   email: z.string().email().max(320).optional(),
+  phone: z.string().regex(/^\+[1-9]\d{7,14}$/).optional(),
   name: z.string().trim().min(1).max(180).optional(),
+  user_metadata: z.object({
+    display_name: z.string().trim().min(1).max(180).optional(),
+  }).passthrough().optional(),
   org_id: z.string().min(1).max(120).optional(),
   org_name: z.string().trim().min(1).max(180).optional(),
   role: z.string().trim().min(1).max(80).optional(),
@@ -66,7 +70,17 @@ const jwtClaimsSchema = z.object({
 
 const applicationRoles = ["buyer", "contributor", "editor", "admin"] as const;
 export type ApplicationRole = (typeof applicationRoles)[number];
-type JwtClaims = z.infer<typeof jwtClaimsSchema>;
+export type JwtClaims = z.infer<typeof jwtClaimsSchema>;
+
+export async function identityEmailForClaims(claims: JwtClaims): Promise<string> {
+  if (claims.email) return claims.email;
+  if (claims.phone) return `phone-${await sha256Hex(claims.phone)}@identity.invalid`;
+  return `${claims.sub}@identity.invalid`;
+}
+
+export function identityDisplayNameForClaims(claims: JwtClaims): string {
+  return claims.name ?? claims.user_metadata?.display_name ?? claims.email ?? claims.phone ?? claims.sub;
+}
 
 export function roleForNewAccount(identityRole: ApplicationRole, accountIntent?: "seller"): ApplicationRole {
   return accountIntent === "seller" && identityRole === "buyer" ? "contributor" : identityRole;

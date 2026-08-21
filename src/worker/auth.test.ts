@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { applicationRoleFromClaims, enrichExternalIdentity, roleForNewAccount, sessionTokenFromRequest, verifyExternalJwt, verifyExternalJwtWithProvider } from "./auth";
+import { applicationRoleFromClaims, enrichExternalIdentity, identityDisplayNameForClaims, identityEmailForClaims, roleForNewAccount, sessionTokenFromRequest, verifyExternalJwt, verifyExternalJwtWithProvider } from "./auth";
 
 function encode(value: unknown): string {
   const bytes = new TextEncoder().encode(JSON.stringify(value));
@@ -22,6 +22,14 @@ describe("verified identity exchange", () => {
     expect(roleForNewAccount("buyer")).toBe("buyer");
     expect(roleForNewAccount("editor", "seller")).toBe("editor");
     expect(roleForNewAccount("admin", "seller")).toBe("admin");
+  });
+
+  it("derives a stable internal contact for verified phone-only identities", async () => {
+    const claims = { sub: "phone-user", phone: "+27821234567", user_metadata: { display_name: "Phone Seller" } } as never;
+    const email = await identityEmailForClaims(claims);
+    expect(email).toMatch(/^phone-[a-f0-9]{64}@identity\.invalid$/);
+    expect(email).not.toContain("27821234567");
+    expect(identityDisplayNameForClaims(claims)).toBe("Phone Seller");
   });
 
   it("accepts native app sessions through the dedicated authorization scheme", () => {

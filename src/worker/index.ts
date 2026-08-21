@@ -60,6 +60,8 @@ import {
   applicationRoleFromClaims,
   csrfValid,
   getRequestUser,
+  identityDisplayNameForClaims,
+  identityEmailForClaims,
   roleForNewAccount,
   responseWithSession,
   responseWithoutSession,
@@ -406,11 +408,13 @@ app.post("/api/auth/exchange", async (c) => {
     if (!organization && String(c.env.AUTH_ALLOW_ORG_PROVISIONING) !== "true") return c.json({ error: "Organization is not provisioned" }, 403);
     const userId = crypto.randomUUID();
     const role = roleForNewAccount(applicationRoleFromClaims(claims, c.env), requested.accountIntent);
+    const identityEmail = await identityEmailForClaims(claims);
+    const displayName = identityDisplayNameForClaims(claims);
     await c.env.DB.prepare("INSERT INTO users (id, auth_subject, email, display_name, role, email_verified_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)")
-      .bind(userId, claims.sub, claims.email ?? `${claims.sub}@identity.invalid`, claims.name ?? claims.email ?? claims.sub, role).run();
+      .bind(userId, claims.sub, identityEmail, displayName, role).run();
     if (!organization) await c.env.DB.prepare("INSERT INTO organizations (id, name, slug, created_by) VALUES (?, ?, ?, ?)").bind(organizationId, claims.org_name ?? "New organization", organizationId.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 60), userId).run();
     await c.env.DB.prepare("INSERT INTO organization_memberships (id, organization_id, user_id, role) VALUES (?, ?, ?, ?)").bind(crypto.randomUUID(), organizationId, userId, role).run();
-    user = { id: userId, email: claims.email ?? `${claims.sub}@identity.invalid` };
+    user = { id: userId, email: identityEmail };
   }
   const membership = await c.env.DB.prepare("SELECT organization_id FROM organization_memberships WHERE organization_id = ? AND user_id = ? AND status = 'active'").bind(organizationId, user.id).first<{ organization_id: string }>();
   if (!membership) return c.json({ error: "User is not a member of the requested organization" }, 403);

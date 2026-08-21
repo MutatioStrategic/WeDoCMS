@@ -12,7 +12,7 @@ npm run mobile:metro
 
 Set `EXPO_PUBLIC_API_BASE_URL` when pointing the app at a local or alternate Worker deployment.
 
-Contributor submissions use Supabase email/password authentication and exchange the verified identity token for a short-lived Veld API session. Copy `.env.example` to `.env`, set `EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY` and `EXPO_PUBLIC_TURNSTILE_SITE_KEY`, and keep the production API URL for release builds. The publishable key is intended for client applications; never use a Supabase service-role key in the app.
+Contributor submissions use Supabase email/password authentication or phone OTP authentication and exchange the verified identity token for a short-lived Veld API session. Copy `.env.example` to `.env`, set `EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY` and `EXPO_PUBLIC_TURNSTILE_SITE_KEY`, and keep the production API URL for release builds. The publishable key is intended for client applications; never use a Supabase service-role key in the app. Phone OTP requires a configured Supabase SMS provider and E.164 phone numbers.
 
 Add `veldarchive://auth/confirmed` to the Supabase authentication redirect allow list. Seller registration keeps the seller intent only until the first successful Veld session exchange; the Worker assigns the contributor role only while provisioning a new unprivileged account. Existing memberships and privileged roles are never upgraded by a client request.
 

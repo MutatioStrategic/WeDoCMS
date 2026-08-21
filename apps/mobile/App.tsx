@@ -381,14 +381,29 @@ function TurnstileChallenge({ onToken }: { onToken: (token: string) => void }) {
 
 function SellerAccess({ auth }: { auth: MobileAuth }) {
   const [mode, setMode] = useState<"signin" | "signup">("signup");
+  const [method, setMethod] = useState<"email" | "phone">("email");
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [phone, setPhone] = useState("");
+  const [phoneCode, setPhoneCode] = useState("");
+  const [phoneCodeSent, setPhoneCodeSent] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
   const submit = async () => {
     setMessage(null);
     try {
+      if (method === "phone") {
+        if (!phoneCodeSent) {
+          await auth.sendPhoneCode(phone, mode === "signup", "seller");
+          setPhoneCodeSent(true);
+          setMessage("A 6-digit code was sent by SMS. Enter it here to continue.");
+        } else {
+          await auth.verifyPhoneCode(phone, phoneCode, displayName, "seller");
+          setPhoneCode("");
+        }
+        return;
+      }
       if (mode === "signup") {
         const result = await auth.signUp(email, password, displayName, "seller");
         setPassword("");
@@ -405,20 +420,29 @@ function SellerAccess({ auth }: { auth: MobileAuth }) {
     }
   };
 
-  const disabled = auth.loading || !email.trim() || password.length < 8 || mode === "signup" && !displayName.trim();
+  const disabled = auth.loading || method === "phone"
+    ? auth.loading || !phone.trim() || phoneCodeSent && !/^\d{6}$/.test(phoneCode.trim()) || !phoneCodeSent && mode === "signup" && !displayName.trim()
+    : auth.loading || !email.trim() || password.length < 8 || mode === "signup" && !displayName.trim();
   return <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
     <Text style={styles.eyebrow}>SELL ON VELD</Text>
     <Text style={styles.screenTitle}>{mode === "signup" ? "Create your seller account" : "Welcome back"}</Text>
-    <Text style={styles.screenIntro}>{mode === "signup" ? "Start as an individual or registered company. Identity, rights, payout, and editorial approval follow after email verification." : "Sign in to continue onboarding, upload work, or check review status."}</Text>
+    <Text style={styles.screenIntro}>{method === "phone" ? "Use a one-time SMS code. SMS delivery must be enabled for this Supabase project." : mode === "signup" ? "Start as an individual or registered company. Identity, rights, payout, and editorial approval follow after email verification." : "Sign in to continue onboarding, upload work, or check review status."}</Text>
     {!auth.configured ? <View style={styles.notice}><WifiOff color={COLORS.amber} size={18} /><Text style={styles.noticeText}>Supabase authentication is not configured for this build. Add the Expo public Supabase URL and publishable key.</Text></View> : <>
-      {mode === "signup" ? <Field label="Display name" value={displayName} onChangeText={setDisplayName} placeholder="How your name should appear" autoCapitalize="words" /> : null}
-      <Field label="Email" value={email} onChangeText={setEmail} placeholder="you@example.com" autoCapitalize="none" keyboardType="email-address" />
-      <Field label="Password" value={password} onChangeText={setPassword} placeholder="At least 8 characters" secureTextEntry autoCapitalize="none" />
+      <Text style={styles.fieldLabel}>Verification method</Text><View style={styles.segmentRow}><Pressable style={[styles.compactSegment, method === "email" && styles.segmentActive]} onPress={() => { setMethod("email"); setPhoneCodeSent(false); setMessage(null); }}><Text style={[styles.segmentText, method === "email" && styles.segmentTextActive]}>Email</Text></Pressable><Pressable style={[styles.compactSegment, method === "phone" && styles.segmentActive]} onPress={() => { setMethod("phone"); setPhoneCodeSent(false); setMessage(null); }}><Text style={[styles.segmentText, method === "phone" && styles.segmentTextActive]}>SMS</Text></Pressable></View>
+      {method === "phone" ? <>
+        {mode === "signup" ? <Field label="Display name" value={displayName} onChangeText={setDisplayName} placeholder="How your name should appear" autoCapitalize="words" /> : null}
+        <Field label="Phone number" value={phone} onChangeText={setPhone} placeholder="+27821234567" autoCapitalize="none" keyboardType="phone-pad" editable={!phoneCodeSent} />
+        {phoneCodeSent ? <Field label="SMS code" value={phoneCode} onChangeText={setPhoneCode} placeholder="6-digit code" keyboardType="number-pad" autoCapitalize="none" maxLength={6} /> : null}
+      </> : <>
+        {mode === "signup" ? <Field label="Display name" value={displayName} onChangeText={setDisplayName} placeholder="How your name should appear" autoCapitalize="words" /> : null}
+        <Field label="Email" value={email} onChangeText={setEmail} placeholder="you@example.com" autoCapitalize="none" keyboardType="email-address" />
+        <Field label="Password" value={password} onChangeText={setPassword} placeholder="At least 8 characters" secureTextEntry autoCapitalize="none" />
+      </>}
       {(message || auth.error) ? <View style={styles.notice}><ShieldCheck color={COLORS.amber} size={18} /><Text style={styles.noticeText}>{message ?? auth.error}</Text></View> : null}
       <Pressable style={[styles.primaryButton, disabled && styles.disabledButton]} disabled={disabled} onPress={() => void submit()}>
-        {auth.loading ? <ActivityIndicator color={COLORS.surface} /> : <><LogIn color={COLORS.surface} size={17} /><Text style={styles.primaryButtonText}>{mode === "signup" ? "Create seller account" : "Sign in"}</Text></>}
+        {auth.loading ? <ActivityIndicator color={COLORS.surface} /> : <><LogIn color={COLORS.surface} size={17} /><Text style={styles.primaryButtonText}>{method === "phone" ? phoneCodeSent ? "Verify SMS code" : "Send SMS code" : mode === "signup" ? "Create seller account" : "Sign in"}</Text></>}
       </Pressable>
-      <Pressable style={styles.secondaryButton} onPress={() => { setMode((current) => current === "signup" ? "signin" : "signup"); setMessage(null); setPassword(""); }}><Text style={styles.secondaryButtonText}>{mode === "signup" ? "I already have an account" : "Create a seller account"}</Text></Pressable>
+      <Pressable style={styles.secondaryButton} onPress={() => { setMode((current) => current === "signup" ? "signin" : "signup"); setMessage(null); setPassword(""); setPhoneCodeSent(false); }}><Text style={styles.secondaryButtonText}>{mode === "signup" ? "I already have an account" : "Create a seller account"}</Text></Pressable>
     </>}
   </ScrollView>;
 }
@@ -870,7 +894,7 @@ function AssetDetail({ asset, onClose, auth }: { asset: Asset | null; onClose: (
   return <Modal animationType="slide" transparent visible onRequestClose={onClose}><View style={styles.modalBackdrop}><View style={styles.modalSheet}><View style={styles.modalHeader}><Text style={styles.modalTitle}>Asset detail</Text><Pressable accessibilityLabel="Close asset details" onPress={onClose} style={styles.closeButton}><X color={COLORS.ink} size={20} /></Pressable></View><ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}><Image source={{ uri: imageFor(asset) }} style={styles.detailImage} /><Text style={styles.eyebrow}>{asset.kind === "video" ? "VIDEO" : "IMAGE"}</Text><Text style={styles.detailTitle}>{asset.title}</Text><Text style={styles.detailMeta}><MapPin color={COLORS.muted} size={14} /> {locationFor(asset)}</Text>{asset.caption || asset.description ? <Text style={styles.detailDescription}>{asset.caption || asset.description}</Text> : null}<View style={styles.detailFacts}><Fact label="Rights" value={asset.rightsStatus ?? "Pending"} /><Fact label="Verification" value={asset.humanVerified ? "Human verified" : "Editorial review"} /><Fact label="Confidence" value={`${confidenceFor(asset)}%`} /></View>{[...(asset.subjectTags ?? []), ...(asset.culturalTags ?? [])].length ? <View style={styles.tagWrap}>{[...(asset.subjectTags ?? []), ...(asset.culturalTags ?? [])].map((tag) => <Text key={tag} style={styles.tag}>{tag}</Text>)}</View> : null}{message ? <View style={styles.notice}><CheckCircle2 color={message.includes("Saved") ? COLORS.green : COLORS.amber} size={18} /><Text style={styles.noticeText}>{message}</Text></View> : null}<Pressable style={styles.secondaryButton} onPress={() => session ? setSaveOpen((value) => !value) : Alert.alert("Sign in required", "Sign in to save assets to a private lightbox.")}><Heart color={COLORS.ink} size={16} /><Text style={styles.secondaryButtonText}>{saveOpen ? "Close lightboxes" : "Save to lightbox"}</Text></Pressable>{saveOpen && session ? <View style={styles.lightboxPanel}><Text style={styles.cardKind}>YOUR LIGHTBOXES</Text>{lightboxes.map((lightbox) => <Pressable key={lightbox.id} style={styles.lightboxRow} disabled={lightbox.assetIds.includes(asset.id)} onPress={() => void save(lightbox.id)}><View style={{ flex: 1 }}><Text style={styles.cardTitle}>{lightbox.name}</Text><Text style={styles.cardMeta}>{lightbox.assetCount} assets · {lightbox.visibility}</Text></View><Text style={styles.sectionAction}>{lightbox.assetIds.includes(asset.id) ? "Saved" : "Add"}</Text></Pressable>)}<Field label="New lightbox" value={newName} onChangeText={setNewName} placeholder="Brief, mood, or client" /><Pressable style={styles.secondaryButton} disabled={!newName.trim()} onPress={() => void createAndSave()}><Text style={styles.secondaryButtonText}>Create and save</Text></Pressable></View> : null}{asset.sourceUrl ? <Pressable style={styles.secondaryButton} onPress={() => void Linking.openURL(asset.sourceUrl ?? "")}><ArrowUpRight color={COLORS.ink} size={16} /><Text style={styles.secondaryButtonText}>Open source</Text></Pressable> : null}</ScrollView></View></View></Modal>;
 }
 
-function Field({ label, value, onChangeText, placeholder, multiline = false, ...inputProps }: { label: string; value: string; onChangeText: (value: string) => void; placeholder: string; multiline?: boolean; secureTextEntry?: boolean; autoCapitalize?: "none" | "sentences" | "words" | "characters"; keyboardType?: "default" | "email-address" | "url" | "phone-pad" | "number-pad" }) { return <View style={styles.field}><Text style={styles.fieldLabel}>{label}</Text><TextInput accessibilityLabel={label} value={value} onChangeText={onChangeText} placeholder={placeholder} placeholderTextColor={COLORS.muted} multiline={multiline} {...inputProps} style={[styles.textField, multiline && styles.multilineField]} /></View>; }
+function Field({ label, value, onChangeText, placeholder, multiline = false, ...inputProps }: { label: string; value: string; onChangeText: (value: string) => void; placeholder: string; multiline?: boolean; secureTextEntry?: boolean; editable?: boolean; maxLength?: number; autoCapitalize?: "none" | "sentences" | "words" | "characters"; keyboardType?: "default" | "email-address" | "url" | "phone-pad" | "number-pad" }) { return <View style={styles.field}><Text style={styles.fieldLabel}>{label}</Text><TextInput accessibilityLabel={label} value={value} onChangeText={onChangeText} placeholder={placeholder} placeholderTextColor={COLORS.muted} multiline={multiline} {...inputProps} style={[styles.textField, multiline && styles.multilineField]} /></View>; }
 function Fact({ label, value }: { label: string; value: string }) { return <View style={styles.fact}><Text style={styles.factLabel}>{label}</Text><Text style={styles.factValue} numberOfLines={1}>{value}</Text></View>; }
 function StatusRow({ label, value }: { label: string; value: string }) { return <View style={styles.statusRow}><View style={styles.statusDot} /><Text style={styles.statusLabel}>{label}</Text><Text style={styles.statusValue} numberOfLines={1}>{value}</Text></View>; }
 function SectionHeader({ title, action, onPress }: { title: string; action: string; onPress: () => void }) { return <View style={styles.sectionHeader}><Text style={styles.sectionTitle}>{title}</Text><Pressable onPress={onPress}><Text style={styles.sectionAction}>{action}</Text></Pressable></View>; }

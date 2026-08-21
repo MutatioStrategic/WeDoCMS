@@ -80,8 +80,13 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [supabaseAuthOpen, setSupabaseAuthOpen] = useState(false);
   const [supabaseAuthMode, setSupabaseAuthMode] = useState<"signin" | "signup">("signin");
+  const [supabaseAuthMethod, setSupabaseAuthMethod] = useState<"email" | "phone">("email");
   const [supabaseEmail, setSupabaseEmail] = useState("");
   const [supabasePassword, setSupabasePassword] = useState("");
+  const [supabasePhone, setSupabasePhone] = useState("");
+  const [supabasePhoneCode, setSupabasePhoneCode] = useState("");
+  const [supabasePhoneCodeSent, setSupabasePhoneCodeSent] = useState(false);
+  const [supabaseDisplayName, setSupabaseDisplayName] = useState("");
   const [supabaseAuthBusy, setSupabaseAuthBusy] = useState(false);
   const [supabaseAuthMessage, setSupabaseAuthMessage] = useState<{ tone: "success" | "error"; text: string } | null>(null);
   const authExchangeAttempted = React.useRef(false);
@@ -164,6 +169,29 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
     setSupabaseAuthBusy(true);
     setSupabaseAuthMessage(null);
     try {
+      if (supabaseAuthMethod === "phone") {
+        const phone = supabasePhone.trim();
+        if (!/^\+[1-9]\d{7,14}$/.test(phone)) throw new Error("Enter a phone number in international format, for example +27821234567.");
+        if (!supabasePhoneCodeSent) {
+          const result = await supabase.auth.signInWithOtp({ phone, options: { shouldCreateUser: supabaseAuthMode === "signup" } });
+          if (result.error) throw result.error;
+          setSupabasePhoneCodeSent(true);
+          setSupabaseAuthMessage({ tone: "success", text: "A 6-digit code was sent by SMS. Enter it here to continue." });
+          return;
+        }
+        if (!/^\d{6}$/.test(supabasePhoneCode.trim())) throw new Error("Enter the 6-digit SMS code.");
+        const result = await supabase.auth.verifyOtp({ phone, token: supabasePhoneCode.trim(), type: "sms" });
+        if (result.error) throw result.error;
+        if (!result.data.session) throw new Error("The SMS code was accepted, but no session was created.");
+        if (supabaseDisplayName.trim()) {
+          const updated = await supabase.auth.updateUser({ data: { display_name: supabaseDisplayName.trim() } });
+          if (updated.error) throw updated.error;
+        }
+        const current = (await supabase.auth.getSession()).data.session ?? result.data.session;
+        await exchangeSupabaseSession(current);
+        setSupabasePhoneCode("");
+        return;
+      }
       const result = supabaseAuthMode === "signup"
         ? await supabase.auth.signUp({ email: supabaseEmail.trim(), password: supabasePassword, options: { emailRedirectTo: window.location.origin, data: { display_name: supabaseEmail.trim().split("@")[0] } } })
         : await supabase.auth.signInWithPassword({ email: supabaseEmail.trim(), password: supabasePassword });
@@ -365,7 +393,7 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
         {sessionUser && <><button className="ghost-button" onClick={() => navigate("account")}>Account</button><button className="ghost-button" onClick={() => { void api("/api/auth/logout", { method: "POST" }).then(() => { setSessionUser(null); setCsrfToken(""); setNotice("Signed out."); if (auth0) auth0.logout({ logoutParams: { returnTo: window.location.origin } }); if (supabase) void supabase.auth.signOut(); }); }}>Sign out</button></>}
       </div>
     </header>
-    {supabase && supabaseAuthOpen && !sessionUser && <section className="auth-panel" aria-label="Supabase authentication"><div><span className="section-kicker">SUPABASE AUTH</span><h2>{supabaseAuthMode === "signup" ? "Create your archive account." : "Welcome back."}</h2><p>Email/password authentication is handled by Supabase; Veld receives only the verified access token.</p></div><form onSubmit={(event) => void submitSupabaseAuth(event)}>{supabaseAuthMessage && <p className={`auth-feedback ${supabaseAuthMessage.tone}`} role={supabaseAuthMessage.tone === "error" ? "alert" : "status"} aria-live="polite">{supabaseAuthMessage.text}</p>}<label>Email<input type="email" autoComplete="email" required value={supabaseEmail} onChange={(event) => setSupabaseEmail(event.target.value)} /></label><label>Password<input type="password" autoComplete={supabaseAuthMode === "signup" ? "new-password" : "current-password"} minLength={8} required value={supabasePassword} onChange={(event) => setSupabasePassword(event.target.value)} /></label><div className="modal-actions"><button type="submit" className="dark-button" disabled={supabaseAuthBusy}>{supabaseAuthBusy ? "Working…" : supabaseAuthMode === "signup" ? "Create account" : "Sign in"}</button><button type="button" className="ghost-button" onClick={() => { setSupabaseAuthMode((mode) => mode === "signup" ? "signin" : "signup"); setSupabasePassword(""); setSupabaseAuthMessage(null); }}>{supabaseAuthMode === "signup" ? "Use existing account" : "Create an account"}</button><button type="button" className="ghost-button" onClick={() => setSupabaseAuthOpen(false)}>Close</button></div></form></section>}
+    {supabase && supabaseAuthOpen && !sessionUser && <section className="auth-panel" aria-label="Supabase authentication"><div><span className="section-kicker">SUPABASE AUTH</span><h2>{supabaseAuthMode === "signup" ? "Create your archive account." : "Welcome back."}</h2><p>{supabaseAuthMethod === "phone" ? "Use a one-time SMS code. SMS delivery must be enabled for this Supabase project." : "Email/password authentication is handled by Supabase; Veld receives only the verified access token."}</p></div><form onSubmit={(event) => void submitSupabaseAuth(event)}>{supabaseAuthMessage && <p className={`auth-feedback ${supabaseAuthMessage.tone}`} role={supabaseAuthMessage.tone === "error" ? "alert" : "status"} aria-live="polite">{supabaseAuthMessage.text}</p>}<div className="auth-method-switch" role="group" aria-label="Verification method"><button type="button" className={supabaseAuthMethod === "email" ? "active" : ""} onClick={() => { setSupabaseAuthMethod("email"); setSupabasePhoneCodeSent(false); setSupabaseAuthMessage(null); }}>Email</button><button type="button" className={supabaseAuthMethod === "phone" ? "active" : ""} onClick={() => { setSupabaseAuthMethod("phone"); setSupabasePhoneCodeSent(false); setSupabaseAuthMessage(null); }}>SMS</button></div>{supabaseAuthMethod === "phone" ? <>{supabaseAuthMode === "signup" && <label>Display name<input type="text" autoComplete="name" required value={supabaseDisplayName} onChange={(event) => setSupabaseDisplayName(event.target.value)} /></label>}<label>Phone number<input type="tel" autoComplete="tel" inputMode="tel" pattern="\+[1-9][0-9]{7,14}" required disabled={supabasePhoneCodeSent} value={supabasePhone} onChange={(event) => setSupabasePhone(event.target.value)} /></label>{supabasePhoneCodeSent && <label>SMS code<input type="text" autoComplete="one-time-code" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} required value={supabasePhoneCode} onChange={(event) => setSupabasePhoneCode(event.target.value)} /></label>}</> : <><label>Email<input type="email" autoComplete="email" required value={supabaseEmail} onChange={(event) => setSupabaseEmail(event.target.value)} /></label><label>Password<input type="password" autoComplete={supabaseAuthMode === "signup" ? "new-password" : "current-password"} minLength={8} required value={supabasePassword} onChange={(event) => setSupabasePassword(event.target.value)} /></label></>}<div className="modal-actions"><button type="submit" className="dark-button" disabled={supabaseAuthBusy}>{supabaseAuthBusy ? "Working…" : supabaseAuthMethod === "phone" ? supabasePhoneCodeSent ? "Verify SMS code" : "Send SMS code" : supabaseAuthMode === "signup" ? "Create account" : "Sign in"}</button><button type="button" className="ghost-button" onClick={() => { setSupabaseAuthMode((mode) => mode === "signup" ? "signin" : "signup"); setSupabasePassword(""); setSupabasePhoneCodeSent(false); setSupabaseAuthMessage(null); }}>{supabaseAuthMode === "signup" ? "Use existing account" : "Create an account"}</button><button type="button" className="ghost-button" onClick={() => setSupabaseAuthOpen(false)}>Close</button></div></form></section>}
     {sessionUser && <details className="notification-center"><summary>Alerts {notifications.some((item) => !item.read_at) && <span>{notifications.filter((item) => !item.read_at).length}</span>}</summary><div><strong>In-app alerts</strong>{notifications.length ? notifications.slice(0, 8).map((item) => <article className={item.read_at ? "read" : ""} key={item.id}><h3>{item.title}</h3><p>{item.body}</p><small>{new Date(item.created_at).toLocaleDateString("en-ZA")}</small>{!item.read_at && <button type="button" onClick={() => void markNotificationRead(item.id)}>Mark read</button>}</article>) : <p>No alerts yet. Saved-search matches will appear here.</p>}</div></details>}
     {!analyticsConsent && <button className="privacy-consent" onClick={() => setAnalyticsConsent(true)}>Allow anonymous demand insights</button>}
 

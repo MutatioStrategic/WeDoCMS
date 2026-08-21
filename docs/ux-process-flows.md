@@ -94,7 +94,7 @@ configured, and payment success is never inferred from the browser redirect.
 
 ## Contributor to publication
 
-The native Expo route begins with seller account creation and email confirmation. The confirmation returns through `veldarchive://auth/confirmed`; the verified identity is exchanged for a short-lived Veld API session and a new seller account is provisioned as a contributor. Existing memberships are never upgraded from a client-provided seller intent.
+The native Expo route begins with seller account creation by email confirmation or phone OTP. Email confirmation returns through `veldarchive://auth/confirmed`; the verified email or phone identity is exchanged for a short-lived Veld API session and a new seller account is provisioned as a contributor. Existing memberships are never upgraded from a client-provided seller intent. Phone-only accounts use the verified phone as the identity and must collect a real contact email before workflows that require email delivery.
 
 ```mermaid
 sequenceDiagram

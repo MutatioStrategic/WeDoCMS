@@ -91,6 +91,12 @@ export function mobileSessionHeaders(session: MobileApiSession): Record<string, 
 
 type AccountIntent = "seller";
 
+function normalizedPhone(phone: string): string {
+  const value = phone.trim();
+  if (!/^\+[1-9]\d{7,14}$/.test(value)) throw new Error("Enter a phone number in international format, for example +27821234567.");
+  return value;
+}
+
 async function persistAccountIntent(intent: AccountIntent | null): Promise<void> {
   if (Platform.OS === "web") {
     if (intent) globalThis.localStorage?.setItem(ACCOUNT_INTENT_STORAGE_KEY, intent);
@@ -282,6 +288,51 @@ export function useMobileAuth(apiBaseUrl: string) {
     }
   }, [adoptIdentitySession]);
 
+  const sendPhoneCode = useCallback(async (phone: string, shouldCreateUser: boolean, accountIntent: AccountIntent = "seller") => {
+    if (!supabase) throw new Error("Supabase authentication is not configured for this build.");
+    const value = normalizedPhone(phone);
+    setLoading(true);
+    setError(null);
+    await persistAccountIntent(accountIntent);
+    try {
+      const result = await supabase.auth.signInWithOtp({ phone: value, options: { shouldCreateUser } });
+      if (result.error) throw result.error;
+      return { phone: value };
+    } catch (phoneError) {
+      await persistAccountIntent(null);
+      const message = phoneError instanceof Error ? phoneError.message : "The SMS code could not be sent.";
+      setError(message);
+      throw new Error(message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const verifyPhoneCode = useCallback(async (phone: string, token: string, displayName = "", accountIntent: AccountIntent = "seller") => {
+    if (!supabase) throw new Error("Supabase authentication is not configured for this build.");
+    const value = normalizedPhone(phone);
+    if (!/^\d{6}$/.test(token.trim())) throw new Error("Enter the 6-digit SMS code.");
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await supabase.auth.verifyOtp({ phone: value, token: token.trim(), type: "sms" });
+      if (result.error) throw result.error;
+      if (!result.data.session) throw new Error("The SMS code was accepted, but no session was created.");
+      if (displayName.trim()) {
+        const updated = await supabase.auth.updateUser({ data: { display_name: displayName.trim() } });
+        if (updated.error) throw updated.error;
+      }
+      const current = (await supabase.auth.getSession()).data.session ?? result.data.session;
+      return await adoptIdentitySession(current, accountIntent);
+    } catch (phoneError) {
+      const message = phoneError instanceof Error ? phoneError.message : "SMS verification failed.";
+      setError(message);
+      throw new Error(message);
+    } finally {
+      setLoading(false);
+    }
+  }, [adoptIdentitySession]);
+
   const signOut = useCallback(async () => {
     const current = session;
     setLoading(true);
@@ -301,5 +352,5 @@ export function useMobileAuth(apiBaseUrl: string) {
     }
   }, [apiBaseUrl, session]);
 
-  return { configured: mobileAuthConfigured, error, loading, session, signIn, signOut, signUp };
+  return { configured: mobileAuthConfigured, error, loading, session, sendPhoneCode, signIn, signOut, signUp, verifyPhoneCode };
 }
