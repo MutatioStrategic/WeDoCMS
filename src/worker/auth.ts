@@ -68,6 +68,10 @@ const applicationRoles = ["buyer", "contributor", "editor", "admin"] as const;
 export type ApplicationRole = (typeof applicationRoles)[number];
 type JwtClaims = z.infer<typeof jwtClaimsSchema>;
 
+export function roleForNewAccount(identityRole: ApplicationRole, accountIntent?: "seller"): ApplicationRole {
+  return accountIntent === "seller" && identityRole === "buyer" ? "contributor" : identityRole;
+}
+
 export type ExternalIdentity = {
   provider: "auth0" | "supabase";
   claims: JwtClaims;

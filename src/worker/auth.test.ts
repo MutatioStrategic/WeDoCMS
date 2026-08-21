@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { applicationRoleFromClaims, enrichExternalIdentity, sessionTokenFromRequest, verifyExternalJwt, verifyExternalJwtWithProvider } from "./auth";
+import { applicationRoleFromClaims, enrichExternalIdentity, roleForNewAccount, sessionTokenFromRequest, verifyExternalJwt, verifyExternalJwtWithProvider } from "./auth";
 
 function encode(value: unknown): string {
   const bytes = new TextEncoder().encode(JSON.stringify(value));
@@ -17,6 +17,13 @@ async function sign(secret: string, value: string): Promise<string> {
 }
 
 describe("verified identity exchange", () => {
+  it("allows a new buyer identity to enroll as a seller without escalating privileged roles", () => {
+    expect(roleForNewAccount("buyer", "seller")).toBe("contributor");
+    expect(roleForNewAccount("buyer")).toBe("buyer");
+    expect(roleForNewAccount("editor", "seller")).toBe("editor");
+    expect(roleForNewAccount("admin", "seller")).toBe("admin");
+  });
+
   it("accepts native app sessions through the dedicated authorization scheme", () => {
     expect(sessionTokenFromRequest(new Request("https://api.example.test/me", { headers: { Authorization: "VeldSession session-id.token-secret" } }))).toBe("session-id.token-secret");
     expect(sessionTokenFromRequest(new Request("https://api.example.test/me", { headers: { Authorization: "Bearer external.jwt.token" } }))).toBeNull();

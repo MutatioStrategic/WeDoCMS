@@ -57,8 +57,10 @@ import {
 } from "./photo-indexing";
 import {
   createSession,
+  applicationRoleFromClaims,
   csrfValid,
   getRequestUser,
+  roleForNewAccount,
   responseWithSession,
   responseWithoutSession,
   verifyExternalJwt,
@@ -327,6 +329,7 @@ const devLoginSchema = z.object({ role: z.enum(["buyer", "contributor", "editor"
 const exchangeSchema = z.object({
   organizationId: z.string().min(1).max(120).optional(),
   sessionTransport: z.enum(["cookie", "bearer"]).optional(),
+  accountIntent: z.literal("seller").optional(),
 });
 type AppContext = Context<{ Bindings: Bindings; Variables: Variables }>;
 type DemoRole = z.infer<typeof devLoginSchema>["role"];
@@ -395,10 +398,11 @@ app.post("/api/auth/exchange", async (c) => {
     const organization = await c.env.DB.prepare("SELECT id, name FROM organizations WHERE id = ? AND status = 'active'").bind(organizationId).first<{ id: string; name: string }>();
     if (!organization && String(c.env.AUTH_ALLOW_ORG_PROVISIONING) !== "true") return c.json({ error: "Organization is not provisioned" }, 403);
     const userId = crypto.randomUUID();
+    const role = roleForNewAccount(applicationRoleFromClaims(claims, c.env), requested.accountIntent);
     await c.env.DB.prepare("INSERT INTO users (id, auth_subject, email, display_name, role, email_verified_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)")
-      .bind(userId, claims.sub, claims.email ?? `${claims.sub}@identity.invalid`, claims.name ?? claims.email ?? claims.sub, claims.role ?? "buyer").run();
+      .bind(userId, claims.sub, claims.email ?? `${claims.sub}@identity.invalid`, claims.name ?? claims.email ?? claims.sub, role).run();
     if (!organization) await c.env.DB.prepare("INSERT INTO organizations (id, name, slug, created_by) VALUES (?, ?, ?, ?)").bind(organizationId, claims.org_name ?? "New organization", organizationId.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 60), userId).run();
-    await c.env.DB.prepare("INSERT INTO organization_memberships (id, organization_id, user_id, role) VALUES (?, ?, ?, ?)").bind(crypto.randomUUID(), organizationId, userId, claims.role ?? "buyer").run();
+    await c.env.DB.prepare("INSERT INTO organization_memberships (id, organization_id, user_id, role) VALUES (?, ?, ?, ?)").bind(crypto.randomUUID(), organizationId, userId, role).run();
     user = { id: userId, email: claims.email ?? `${claims.sub}@identity.invalid` };
   }
   const membership = await c.env.DB.prepare("SELECT organization_id FROM organization_memberships WHERE organization_id = ? AND user_id = ? AND status = 'active'").bind(organizationId, user.id).first<{ organization_id: string }>();
@@ -1113,11 +1117,14 @@ app.get("/api/onboarding/status", async (c) => {
   const user = await requestUser(c);
   if (!user) return c.json({ error: "Authentication required" }, 401);
   const result = await c.env.DB.prepare(`
-    SELECT p.*, t.id AS tender_id, t.status AS tender_status, t.review_notes,
+    SELECT p.*, sp.seller_type, sp.legal_name, sp.phone_e164, sp.identity_document_type,
+      sp.bank_account_name, sp.cipc_status, sp.didit_status,
+      t.id AS tender_id, t.status AS tender_status, t.review_notes,
       sc.id AS contract_id, sc.version AS contract_version, sc.content_sha256 AS contract_hash,
       sc.signed_at, w.id AS wallet_id, w.provider AS wallet_provider, w.status AS wallet_status,
       vc.id AS verification_case_id, vc.status AS verification_status
     FROM contributor_profiles p
+    LEFT JOIN seller_onboarding_profiles sp ON sp.contributor_id = p.user_id
     LEFT JOIN onboarding_tenders t ON t.contributor_id = p.user_id AND t.organization_id = ? AND t.status IN ('pending', 'corrections_requested', 'approved')
     LEFT JOIN seller_contracts sc ON sc.id = t.contract_id
     LEFT JOIN payout_wallets w ON w.id = t.wallet_id

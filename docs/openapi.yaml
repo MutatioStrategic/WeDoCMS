@@ -780,6 +780,11 @@ components:
       type: object
       properties:
         organizationId: { type: string, minLength: 1, maxLength: 120 }
+        sessionTransport: { type: string, enum: [cookie, bearer] }
+        accountIntent:
+          type: string
+          enum: [seller]
+          description: Enroll a newly created, otherwise unprivileged identity as a contributor. Existing memberships are never upgraded by this value.
       additionalProperties: false
     CreatorProfile:
       type: object

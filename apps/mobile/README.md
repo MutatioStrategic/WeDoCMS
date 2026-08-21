@@ -12,7 +12,13 @@ npm run mobile:metro
 
 Set `EXPO_PUBLIC_API_BASE_URL` when pointing the app at a local or alternate Worker deployment.
 
-Contributor submissions use Supabase email/password authentication and exchange the verified identity token for a short-lived Veld API session. Copy `.env.example` to `.env`, set `EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, and keep the production API URL for release builds. The publishable key is intended for client applications; never use a Supabase service-role key in the app.
+Contributor submissions use Supabase email/password authentication and exchange the verified identity token for a short-lived Veld API session. Copy `.env.example` to `.env`, set `EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY` and `EXPO_PUBLIC_TURNSTILE_SITE_KEY`, and keep the production API URL for release builds. The publishable key is intended for client applications; never use a Supabase service-role key in the app.
+
+Add `veldarchive://auth/confirmed` to the Supabase authentication redirect allow list. Seller registration keeps the seller intent only until the first successful Veld session exchange; the Worker assigns the contributor role only while provisioning a new unprivileged account. Existing memberships and privileged roles are never upgraded by a client request.
+
+## Native feature coverage
+
+The app provides native exploration and advanced search, seller registration and onboarding, authenticated uploads and metadata management, public creators, community discussions and rights-case intake, saved searches, lightboxes and sharing, contributor/buyer insights, campaign manifests, account lifecycle and subscriptions, marketplace controls, WordPress pairing, and editor/admin governance corrections. The browser workspace remains the delivery surface for canvas-based image derivatives, campaign ZIP bundles, detailed stakeholder diagram editing, and Zoho administration. Mobile explains when those server contracts or privileges are unavailable instead of presenting an action that cannot complete. See `docs/mobile-feature-parity.md` for the maintained route-level comparison.
 
 ## Android Studio
 

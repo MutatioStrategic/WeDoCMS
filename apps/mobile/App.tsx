@@ -41,9 +41,11 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { WebView } from "react-native-webview";
 import { mobileSessionHeaders, type MobileApiSession, useMobileAuth } from "./auth";
+import { AdvancedSearchScreen, CampaignDeliveryScreen, CommunityActionsScreen, GovernanceEditorScreen, MarketplaceParityScreen, OperationsScreen } from "./advanced-workspaces";
 
-declare const process: { env: { EXPO_PUBLIC_API_BASE_URL?: string } };
+declare const process: { env: { EXPO_PUBLIC_API_BASE_URL?: string; EXPO_PUBLIC_TURNSTILE_SITE_KEY?: string } };
 
 type IconProps = { color?: string; size?: number; strokeWidth?: number };
 type Icon = React.ComponentType<IconProps>;
@@ -86,6 +88,18 @@ type DiscoveryResponse = {
   personalized: boolean;
 };
 
+type CommunityOverview = {
+  forums: Array<{ id: string; name: string; description: string; topicCount: number; postCount: number }>;
+  threads: Array<{ id: string; title: string; excerpt: string; author: string; replies: number; lastActivity: string; featured: boolean }>;
+  showcases: Array<{ id: string; title: string; description: string; curator: string; theme: string }>;
+  collections: Array<{ id: string; title: string; description: string; location: string; assetCount: number; contributorCount: number; featuredLabel: string }>;
+};
+
+type CreatorProfile = { id: string; slug: string; name: string; headline: string; bio: string; location: string; specialties: string[]; websiteUrl: string | null; assetCount: number; publishedImageCount: number; reviewCount: number; collectionCount: number };
+type AccountLifecycle = { emailVerified: boolean; mfaEnrolled: boolean; emailNotifications: boolean; productNotifications: boolean; exportStatus: string; deletionStatus: string; accountPortalUrl?: string | null };
+type AppNotification = { id: string; title: string; body: string; read_at?: string | null; created_at: string };
+type UserLightbox = { id: string; name: string; visibility: string; assetIds: string[]; assetCount: number };
+
 type HealthResponse = { ok?: boolean; status?: string; service?: string; version?: string; environment?: string };
 type MobileAuth = ReturnType<typeof useMobileAuth>;
 
@@ -108,10 +122,10 @@ const tabs: Array<{ key: TabKey; label: string; icon: Icon }> = [
   { key: "explore", label: "Explore", icon: Home },
   { key: "search", label: "Search", icon: Search },
   { key: "create", label: "Create", icon: FilePlus2 },
-  { key: "status", label: "Status", icon: Activity },
+  { key: "more", label: "More", icon: Activity },
 ];
 
-type TabKey = "explore" | "search" | "create" | "status";
+type TabKey = "explore" | "search" | "create" | "more";
 
 function queryString(values: Record<string, string | undefined>) {
   return Object.entries(values)
@@ -136,12 +150,31 @@ async function apiPost<T>(path: string, payload: unknown, session?: MobileApiSes
   return { status: response.status, body };
 }
 
+async function apiRequest<T>(path: string, session: MobileApiSession, init: { method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; body?: unknown } = {}): Promise<{ status: number; body: T | null }> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: init.method ?? "GET",
+    headers: {
+      Accept: "application/json",
+      ...(init.body !== undefined ? { "Content-Type": "application/json" } : {}),
+      ...mobileSessionHeaders(session),
+    },
+    ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
+  });
+  const body = await response.json().catch(() => null) as T | null;
+  return { status: response.status, body };
+}
+
 function locationFor(asset: Asset) {
   return [asset.locality, asset.city, asset.province].filter(Boolean).join(", ") || "Location pending";
 }
 
 function imageFor(asset: Asset) {
-  return asset.previewUrl || `${API_BASE_URL}/api/assets/${encodeURIComponent(asset.id)}/image/card`;
+  const previewUrl = asset.previewUrl?.trim();
+  if (previewUrl) {
+    if (/^https?:\/\//i.test(previewUrl)) return previewUrl;
+    return `${API_BASE_URL}/${previewUrl.replace(/^\/+/, "")}`;
+  }
+  return `${API_BASE_URL}/api/assets/${encodeURIComponent(asset.id)}/preview`;
 }
 
 function confidenceFor(asset: Asset) {
@@ -251,7 +284,7 @@ function ExploreScreen({ onOpenAsset, onSearch }: { onOpenAsset: (asset: Asset) 
   );
 }
 
-function SearchScreen({ initialQuery, onOpenAsset }: { initialQuery: string; onOpenAsset: (asset: Asset) => void }) {
+function SearchScreen({ initialQuery, onOpenAsset, auth }: { initialQuery: string; onOpenAsset: (asset: Asset) => void; auth: MobileAuth }) {
   const [query, setQuery] = useState(initialQuery);
   const [kind, setKind] = useState("all");
   const [sort, setSort] = useState("relevance");
@@ -259,6 +292,8 @@ function SearchScreen({ initialQuery, onOpenAsset }: { initialQuery: string; onO
   const [loading, setLoading] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [searchMode, setSearchMode] = useState<string | null>(null);
 
   const search = useCallback(async (nextQuery = query) => {
     setLoading(true);
@@ -266,6 +301,7 @@ function SearchScreen({ initialQuery, onOpenAsset }: { initialQuery: string; onO
     try {
       const response = await apiGet<SearchResponse>(`/api/assets?${queryString({ q: nextQuery.trim(), kind, status: "published", sort })}`);
       setResults(response.results);
+      setSearchMode(response.mode);
       setHasSearched(true);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Search failed");
@@ -275,6 +311,12 @@ function SearchScreen({ initialQuery, onOpenAsset }: { initialQuery: string; onO
   }, [kind, query, sort]);
 
   useEffect(() => { if (initialQuery) void search(initialQuery); }, [initialQuery, search]);
+
+  const saveSearch = async () => {
+    if (!auth.session || !query.trim()) return;
+    const response = await apiRequest<{ error?: string }>("/api/saved-searches", auth.session, { method: "POST", body: { name: query.trim(), query: query.trim(), mediaKind: kind, alertFrequency: "weekly" } });
+    setNotice(response.status === 201 ? "Search saved with weekly in-app alerts." : messageFrom(response.body, "The search could not be saved."));
+  };
 
   return (
     <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
@@ -302,16 +344,250 @@ function SearchScreen({ initialQuery, onOpenAsset }: { initialQuery: string; onO
       <Pressable style={styles.primaryButton} onPress={() => { void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); void search(); }}>
         <Search color={COLORS.surface} size={17} /><Text style={styles.primaryButtonText}>Search archive</Text>
       </Pressable>
+      {auth.session && query.trim() ? <Pressable style={styles.secondaryButton} onPress={() => void saveSearch()}><Heart color={COLORS.ink} size={16} /><Text style={styles.secondaryButtonText}>Save search · weekly alerts</Text></Pressable> : null}
+      {notice ? <View style={styles.notice}><CheckCircle2 color={notice.includes("saved") ? COLORS.green : COLORS.amber} size={18} /><Text style={styles.noticeText}>{notice}</Text></View> : null}
       {loading ? <LoadingState label="Searching" /> : error ? <ErrorState message={error} onRetry={() => search()} /> : hasSearched ? (
-        results.length ? <View style={styles.searchResults}>{results.map((asset) => <SearchResult key={asset.id} asset={asset} onPress={() => onOpenAsset(asset)} />)}</View> : <EmptyState label="No published assets matched" />
+        results.length ? <View style={styles.searchResults}>{results.map((asset) => <SearchResult key={asset.id} asset={asset} onPress={() => onOpenAsset(asset)} />)}</View> : <><EmptyState label="No published assets matched this query" />{searchMode === "keyword" ? <View style={styles.inlineNote}><Search color={COLORS.blue} size={17} /><Text style={styles.inlineNoteText}>This API response used keyword search. Semantic AI search is not currently available on the connected Worker.</Text></View> : null}</>
       ) : <View style={styles.searchPrompt}><Compass color={COLORS.green} size={32} /><Text style={styles.searchPromptTitle}>Start with a place, feeling, or subject.</Text></View>}
     </ScrollView>
   );
 }
 
-function CreateScreen({ auth }: { auth: MobileAuth }) {
+type OnboardingStep = "profile" | "identity" | "payout";
+type OnboardingWorkflow = Record<string, unknown> & {
+  legal_name?: string | null;
+  didit_status?: string | null;
+  contract_id?: string | null;
+  wallet_id?: string | null;
+  wallet_status?: string | null;
+  tender_status?: string | null;
+  verification_status?: string | null;
+};
+
+function messageFrom(body: { error?: unknown } | null, fallback: string) {
+  return typeof body?.error === "string" ? body.error : fallback;
+}
+
+function CheckField({ checked, label, onPress }: { checked: boolean; label: string; onPress: () => void }) {
+  return <Pressable style={styles.checkRow} accessibilityRole="checkbox" accessibilityState={{ checked }} onPress={onPress}><View style={[styles.checkBox, checked && styles.checkBoxActive]}>{checked ? <CheckCircle2 color={COLORS.surface} size={15} /> : null}</View><Text style={styles.checkLabel}>{label}</Text></Pressable>;
+}
+
+function TurnstileChallenge({ onToken }: { onToken: (token: string) => void }) {
+  const siteKey = process.env.EXPO_PUBLIC_TURNSTILE_SITE_KEY?.trim();
+  if (!siteKey || siteKey.startsWith("replace-")) return <View style={styles.inlineNote}><ShieldCheck color={COLORS.blue} size={17} /><Text style={styles.inlineNoteText}>Bot protection is not configured in this build. Local development may use the Worker development bypass; production submissions remain blocked until the public site key is set.</Text></View>;
+  const html = `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script><style>html,body{margin:0;background:#f6f5f1;height:92px;display:grid;place-items:center}</style></head><body><div class="cf-turnstile" data-sitekey=${JSON.stringify(siteKey)} data-action="contributor-contract" data-callback="done" data-expired-callback="expired"></div><script>function done(token){window.ReactNativeWebView.postMessage(JSON.stringify({token:token}))}function expired(){window.ReactNativeWebView.postMessage(JSON.stringify({token:""}))}</script></body></html>`;
+  return <View style={styles.turnstileFrame}><WebView originWhitelist={["https://*"]} source={{ html, baseUrl: `${API_BASE_URL}/` }} javaScriptEnabled onMessage={(event) => { try { const value = JSON.parse(event.nativeEvent.data) as { token?: string }; onToken(value.token ?? ""); } catch { onToken(""); } }} /></View>;
+}
+
+function SellerAccess({ auth }: { auth: MobileAuth }) {
+  const [mode, setMode] = useState<"signin" | "signup">("signup");
+  const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [message, setMessage] = useState<string | null>(null);
+
+  const submit = async () => {
+    setMessage(null);
+    try {
+      if (mode === "signup") {
+        const result = await auth.signUp(email, password, displayName, "seller");
+        setPassword("");
+        if (result.confirmationRequired) {
+          setMode("signin");
+          setMessage("Account created. Open the confirmation email on this device, then return here to continue seller setup.");
+        }
+      } else {
+        await auth.signIn(email, password, "seller");
+        setPassword("");
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : mode === "signup" ? "Account creation failed." : "Sign-in failed.");
+    }
+  };
+
+  const disabled = auth.loading || !email.trim() || password.length < 8 || mode === "signup" && !displayName.trim();
+  return <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+    <Text style={styles.eyebrow}>SELL ON VELD</Text>
+    <Text style={styles.screenTitle}>{mode === "signup" ? "Create your seller account" : "Welcome back"}</Text>
+    <Text style={styles.screenIntro}>{mode === "signup" ? "Start as an individual or registered company. Identity, rights, payout, and editorial approval follow after email verification." : "Sign in to continue onboarding, upload work, or check review status."}</Text>
+    {!auth.configured ? <View style={styles.notice}><WifiOff color={COLORS.amber} size={18} /><Text style={styles.noticeText}>Supabase authentication is not configured for this build. Add the Expo public Supabase URL and publishable key.</Text></View> : <>
+      {mode === "signup" ? <Field label="Display name" value={displayName} onChangeText={setDisplayName} placeholder="How your name should appear" autoCapitalize="words" /> : null}
+      <Field label="Email" value={email} onChangeText={setEmail} placeholder="you@example.com" autoCapitalize="none" keyboardType="email-address" />
+      <Field label="Password" value={password} onChangeText={setPassword} placeholder="At least 8 characters" secureTextEntry autoCapitalize="none" />
+      {(message || auth.error) ? <View style={styles.notice}><ShieldCheck color={COLORS.amber} size={18} /><Text style={styles.noticeText}>{message ?? auth.error}</Text></View> : null}
+      <Pressable style={[styles.primaryButton, disabled && styles.disabledButton]} disabled={disabled} onPress={() => void submit()}>
+        {auth.loading ? <ActivityIndicator color={COLORS.surface} /> : <><LogIn color={COLORS.surface} size={17} /><Text style={styles.primaryButtonText}>{mode === "signup" ? "Create seller account" : "Sign in"}</Text></>}
+      </Pressable>
+      <Pressable style={styles.secondaryButton} onPress={() => { setMode((current) => current === "signup" ? "signin" : "signup"); setMessage(null); setPassword(""); }}><Text style={styles.secondaryButtonText}>{mode === "signup" ? "I already have an account" : "Create a seller account"}</Text></Pressable>
+    </>}
+  </ScrollView>;
+}
+
+function SellerOnboarding({ session }: { session: MobileApiSession }) {
+  const [step, setStep] = useState<OnboardingStep>("profile");
+  const [workflow, setWorkflow] = useState<OnboardingWorkflow | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [bio, setBio] = useState("");
+  const [organisationName, setOrganisationName] = useState("");
+  const [contributorType, setContributorType] = useState("individual");
+  const [location, setLocation] = useState("");
+  const [languages, setLanguages] = useState("English");
+  const [specialties, setSpecialties] = useState("");
+  const [portfolioUrl, setPortfolioUrl] = useState("");
+  const [profileTerms, setProfileTerms] = useState(false);
+  const [sellerType, setSellerType] = useState<"individual" | "company">("individual");
+  const [legalName, setLegalName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [identityDocumentType, setIdentityDocumentType] = useState<"sa_id" | "passport">("sa_id");
+  const [bankAccountName, setBankAccountName] = useState("");
+  const [registeredName, setRegisteredName] = useState("");
+  const [cipcRegistrationNumber, setCipcRegistrationNumber] = useState("");
+  const [representativeName, setRepresentativeName] = useState("");
+  const [ageConfirmed, setAgeConfirmed] = useState(false);
+  const [representativeAuthority, setRepresentativeAuthority] = useState(false);
+  const [beneficialOwnerRequired, setBeneficialOwnerRequired] = useState(false);
+  const [copyrightDeclaration, setCopyrightDeclaration] = useState(false);
+  const [taxResponsibilityDeclaration, setTaxResponsibilityDeclaration] = useState(false);
+  const [contributorAgreement, setContributorAgreement] = useState(false);
+  const [signerName, setSignerName] = useState("");
+  const [signatureReference, setSignatureReference] = useState("");
+  const [providerAccountId, setProviderAccountId] = useState("");
+  const [accountHolderName, setAccountHolderName] = useState("");
+  const [accountLast4, setAccountLast4] = useState("");
+  const [branchLast4, setBranchLast4] = useState("");
+  const [contractAccepted, setContractAccepted] = useState(false);
+  const [turnstileToken, setTurnstileToken] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const response = await apiRequest<{ workflow?: OnboardingWorkflow | null }>("/api/onboarding/status", session);
+    if (response.status === 200) setWorkflow(response.body?.workflow ?? null);
+    else setMessage(messageFrom(response.body as { error?: unknown } | null, "Seller status is temporarily unavailable."));
+    setLoading(false);
+  }, [session]);
+  useEffect(() => { void load(); }, [load]);
+
+  const saveProfile = async () => {
+    if (!profileTerms) { setMessage("Accept the contributor terms to submit your profile."); return; }
+    setSaving(true); setMessage(null);
+    const response = await apiRequest<{ status?: string; error?: string }>("/api/onboarding", session, { method: "PUT", body: {
+      bio: bio.trim(), organisationName: organisationName.trim() || undefined, contributorType, location: location.trim() || undefined,
+      languages: languages.split(",").map((value) => value.trim()).filter(Boolean), specialties: specialties.split(",").map((value) => value.trim()).filter(Boolean),
+      equipment: "", portfolioUrl: portfolioUrl.trim(), acceptTerms: true,
+    } });
+    setSaving(false);
+    if (response.status !== 200) { setMessage(messageFrom(response.body, "Your contributor profile could not be saved.")); return; }
+    setMessage("Contributor profile saved. Next, verify the person or company receiving payouts."); setStep("identity"); await load();
+  };
+
+  const saveIdentity = async () => {
+    if (!/^\+[1-9]\d{7,14}$/.test(phone.trim())) { setMessage("Use an international phone number such as +27821234567."); return; }
+    if (!ageConfirmed || !copyrightDeclaration || !taxResponsibilityDeclaration || !contributorAgreement) { setMessage("Complete the age, rights, tax, and contributor declarations."); return; }
+    if (sellerType === "company" && (!registeredName.trim() || !cipcRegistrationNumber.trim() || !representativeName.trim() || !representativeAuthority)) { setMessage("Complete the registered company and representative details."); return; }
+    setSaving(true); setMessage(null);
+    const seller = await apiRequest<{ error?: string }>("/api/onboarding/seller", session, { method: "PUT", body: {
+      sellerType, legalName: legalName.trim(), phone: phone.trim(), ageConfirmed: true, identityDocumentType, bankAccountName: bankAccountName.trim(),
+      copyrightDeclaration: true, taxResponsibilityDeclaration: true, contributorAgreement: true,
+      ...(sellerType === "company" ? { registeredName: registeredName.trim(), cipcRegistrationNumber: cipcRegistrationNumber.trim(), representativeName: representativeName.trim(), representativeAuthority, beneficialOwnerRequired } : {}),
+    } });
+    if (seller.status !== 200) { setSaving(false); setMessage(messageFrom(seller.body, "Seller details could not be saved.")); return; }
+    if (sellerType === "company") {
+      const cipc = await apiRequest<{ error?: string }>("/api/onboarding/cipc/lookup", session, { method: "POST", body: { registrationNumber: cipcRegistrationNumber.trim() } });
+      if (cipc.status !== 200) { setSaving(false); setMessage(messageFrom(cipc.body, "Seller details were saved, but company verification is unavailable. Retry this step when CIPC is available.")); await load(); return; }
+    }
+    const didit = await apiRequest<{ url?: string; error?: string }>("/api/onboarding/didit/session", session, { method: "POST", body: {} });
+    setSaving(false);
+    if (didit.status === 201 && didit.body?.url) {
+      setMessage("Seller details saved. Complete the secure hosted identity check, then return to finish payout setup.");
+      await Linking.openURL(didit.body.url);
+      setStep("payout");
+    } else if (didit.status === 409) {
+      setMessage("Identity verification is already in progress. Continue it from the provider message, then finish payout setup here."); setStep("payout");
+    } else setMessage(messageFrom(didit.body, "Seller details were saved, but identity verification could not start. Retry when the provider is available."));
+    await load();
+  };
+
+  const submitTender = async () => {
+    if (!contractAccepted) { setMessage("Accept the current contributor terms before signing."); return; }
+    if (signatureReference.trim().length < 8) { setMessage("Enter the Firma signature reference returned by the signing flow."); return; }
+    if (!/^ACCT_[A-Za-z0-9]+$/.test(providerAccountId.trim())) { setMessage("Enter a valid Paystack subaccount code beginning with ACCT_."); return; }
+    if ((accountLast4 && !/^\d{4}$/.test(accountLast4)) || (branchLast4 && !/^\d{4}$/.test(branchLast4))) { setMessage("Account and branch references must contain exactly four digits when provided."); return; }
+    setSaving(true); setMessage(null);
+    const contract = await apiRequest<{ error?: string }>("/api/onboarding/contract", session, { method: "POST", body: { signerName: signerName.trim(), signatureMethod: "firma", signatureReference: signatureReference.trim(), ...(turnstileToken ? { turnstileToken } : {}) } });
+    if (contract.status !== 201) { setSaving(false); setMessage(messageFrom(contract.body, "The signed contributor contract could not be verified.")); return; }
+    const wallet = await apiRequest<{ error?: string }>("/api/onboarding/wallet", session, { method: "POST", body: { provider: "paystack", providerAccountId: providerAccountId.trim(), accountHolderName: accountHolderName.trim(), ...(accountLast4 ? { accountLast4 } : {}), ...(branchLast4 ? { branchLast4 } : {}), currency: "ZAR" } });
+    setSaving(false);
+    if (wallet.status !== 201) { setMessage(messageFrom(wallet.body, "The contract was signed, but payout setup needs another attempt.")); await load(); return; }
+    setMessage("Seller tender submitted. Identity, payout, rights, and contract evidence are now pending review."); await load();
+  };
+
+  if (loading) return <LoadingState label="Loading seller progress" />;
+  const progress = [Boolean(workflow), Boolean(workflow?.legal_name), Boolean(workflow?.contract_id && workflow?.wallet_id)].filter(Boolean).length;
+  return <View>
+    <View style={styles.progressCard}><Text style={styles.cardKind}>SELLER ONBOARDING · {progress}/3</Text><Text style={styles.cardTitle}>{workflow?.tender_status ? `Tender ${String(workflow.tender_status).replaceAll("_", " ")}` : "Complete your seller record"}</Text><Text style={styles.cardMeta}>Identity {String(workflow?.didit_status ?? workflow?.verification_status ?? "not started")} · payout {String(workflow?.wallet_status ?? "not started")}</Text></View>
+    <View style={styles.stepRow}>{(["profile", "identity", "payout"] as OnboardingStep[]).map((value, index) => <Pressable key={value} style={[styles.stepButton, step === value && styles.stepButtonActive]} onPress={() => setStep(value)}><Text style={[styles.stepNumber, step === value && styles.stepTextActive]}>{index + 1}</Text><Text style={[styles.stepText, step === value && styles.stepTextActive]}>{value === "identity" ? "Verify" : value === "payout" ? "Tender" : "Profile"}</Text></Pressable>)}</View>
+    {message ? <View style={styles.notice}><ShieldCheck color={message.includes("saved") || message.includes("submitted") ? COLORS.green : COLORS.amber} size={18} /><Text style={styles.noticeText}>{message}</Text></View> : null}
+    {step === "profile" ? <View style={styles.formCard}><Text style={styles.sectionTitle}>Contributor profile</Text><Text style={styles.screenIntro}>Tell editors what you make and where you work. Only approved public profile fields become discoverable.</Text>
+      <Field label="Bio (optional)" value={bio} onChangeText={setBio} placeholder="Your practice and point of view" multiline />
+      <Field label="Organisation (optional)" value={organisationName} onChangeText={setOrganisationName} placeholder="Studio, archive, or agency" />
+      <Text style={styles.fieldLabel}>Contributor type</Text><View style={styles.segmentRow}>{["individual", "agency", "archive", "institution"].map((value) => <Pressable key={value} style={[styles.compactSegment, contributorType === value && styles.segmentActive]} onPress={() => setContributorType(value)}><Text style={[styles.segmentText, contributorType === value && styles.segmentTextActive]}>{value}</Text></Pressable>)}</View>
+      <Field label="Location (optional)" value={location} onChangeText={setLocation} placeholder="City or province" />
+      <Field label="Languages" value={languages} onChangeText={setLanguages} placeholder="Comma separated" />
+      <Field label="Specialties" value={specialties} onChangeText={setSpecialties} placeholder="Editorial, portrait, landscape" />
+      <Field label="Portfolio URL (optional)" value={portfolioUrl} onChangeText={setPortfolioUrl} placeholder="https://" autoCapitalize="none" keyboardType="url" />
+      <CheckField checked={profileTerms} onPress={() => setProfileTerms((value) => !value)} label="I accept the contributor terms and consent to editorial review." />
+      <Pressable style={[styles.primaryButton, saving && styles.disabledButton]} disabled={saving} onPress={() => void saveProfile()}>{saving ? <ActivityIndicator color={COLORS.surface} /> : <Text style={styles.primaryButtonText}>Save profile and continue</Text>}</Pressable>
+    </View> : null}
+    {step === "identity" ? <View style={styles.formCard}><Text style={styles.sectionTitle}>Seller identity</Text><Text style={styles.screenIntro}>Didit handles ID/passport and liveness checks. Veld stores the decision and provider reference, not raw documents.</Text>
+      <Text style={styles.fieldLabel}>Seller type</Text><View style={styles.segmentRow}>{(["individual", "company"] as const).map((value) => <Pressable key={value} style={[styles.segment, sellerType === value && styles.segmentActive]} onPress={() => setSellerType(value)}><Text style={[styles.segmentText, sellerType === value && styles.segmentTextActive]}>{value === "individual" ? "Individual" : "Company"}</Text></Pressable>)}</View>
+      <Field label="Legal name" value={legalName} onChangeText={setLegalName} placeholder="As shown on ID or registration" autoCapitalize="words" />
+      <Field label="Phone" value={phone} onChangeText={setPhone} placeholder="+27821234567" keyboardType="phone-pad" autoCapitalize="none" />
+      <Text style={styles.fieldLabel}>Identity document</Text><View style={styles.segmentRow}>{(["sa_id", "passport"] as const).map((value) => <Pressable key={value} style={[styles.segment, identityDocumentType === value && styles.segmentActive]} onPress={() => setIdentityDocumentType(value)}><Text style={[styles.segmentText, identityDocumentType === value && styles.segmentTextActive]}>{value === "sa_id" ? "South African ID" : "Passport"}</Text></Pressable>)}</View>
+      {sellerType === "company" ? <><Field label="Registered company name" value={registeredName} onChangeText={setRegisteredName} placeholder="CIPC registered name" /><Field label="CIPC registration number" value={cipcRegistrationNumber} onChangeText={setCipcRegistrationNumber} placeholder="Registration number" autoCapitalize="characters" /><Field label="Authorised representative" value={representativeName} onChangeText={setRepresentativeName} placeholder="Director or authorised person" /><CheckField checked={representativeAuthority} onPress={() => setRepresentativeAuthority((value) => !value)} label="I am authorised to act for this company." /><CheckField checked={beneficialOwnerRequired} onPress={() => setBeneficialOwnerRequired((value) => !value)} label="Beneficial-owner information is required for this seller." /></> : null}
+      <Field label="Bank account name" value={bankAccountName} onChangeText={setBankAccountName} placeholder="Name only — never enter the account number" />
+      <CheckField checked={ageConfirmed} onPress={() => setAgeConfirmed((value) => !value)} label="I confirm I am at least 18." />
+      <CheckField checked={copyrightDeclaration} onPress={() => setCopyrightDeclaration((value) => !value)} label="I own or control the copyright and required releases." />
+      <CheckField checked={taxResponsibilityDeclaration} onPress={() => setTaxResponsibilityDeclaration((value) => !value)} label="I accept responsibility for my tax affairs." />
+      <CheckField checked={contributorAgreement} onPress={() => setContributorAgreement((value) => !value)} label="I accept the contributor agreement and licensing terms." />
+      <Pressable style={[styles.primaryButton, saving && styles.disabledButton]} disabled={saving} onPress={() => void saveIdentity()}>{saving ? <ActivityIndicator color={COLORS.surface} /> : <><ShieldCheck color={COLORS.surface} size={17} /><Text style={styles.primaryButtonText}>Save and start verification</Text></>}</Pressable>
+    </View> : null}
+    {step === "payout" ? <View style={styles.formCard}><Text style={styles.sectionTitle}>Contract and payout</Text><Text style={styles.screenIntro}>The Paystack subaccount, Firma reference, verification case, and signed contract form one reviewable seller tender. Raw banking credentials are never collected here.</Text>
+      <Field label="Signer name" value={signerName} onChangeText={setSignerName} placeholder="Full legal name" />
+      <Field label="Firma signature reference" value={signatureReference} onChangeText={setSignatureReference} placeholder="Reference returned by Firma" autoCapitalize="none" />
+      <Field label="Paystack subaccount code" value={providerAccountId} onChangeText={setProviderAccountId} placeholder="ACCT_..." autoCapitalize="characters" />
+      <Field label="Account holder" value={accountHolderName} onChangeText={setAccountHolderName} placeholder="Must match the seller record" />
+      <View style={styles.twoColumn}><View style={styles.column}><Field label="Account last 4 (optional)" value={accountLast4} onChangeText={setAccountLast4} placeholder="1234" keyboardType="number-pad" /></View><View style={styles.column}><Field label="Branch last 4 (optional)" value={branchLast4} onChangeText={setBranchLast4} placeholder="5678" keyboardType="number-pad" /></View></View>
+      <TurnstileChallenge onToken={setTurnstileToken} />
+      <CheckField checked={contractAccepted} onPress={() => setContractAccepted((value) => !value)} label="I agree to the current Contributor Terms and authorise this digital signature record." />
+      <Pressable style={[styles.primaryButton, saving && styles.disabledButton]} disabled={saving} onPress={() => void submitTender()}>{saving ? <ActivityIndicator color={COLORS.surface} /> : <Text style={styles.primaryButtonText}>Submit seller tender</Text>}</Pressable>
+    </View> : null}
+  </View>;
+}
+
+function SellerLibrary({ session }: { session: MobileApiSession }) {
+  const [assets, setAssets] = useState<Asset[]>([]);
+  const [selected, setSelected] = useState<Asset | null>(null);
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [caption, setCaption] = useState("");
+  const [city, setCity] = useState("");
+  const [tags, setTags] = useState("");
+  const [rights, setRights] = useState("pending");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const choose = (asset: Asset) => { setSelected(asset); setTitle(asset.title); setDescription(asset.description ?? ""); setCaption(asset.caption ?? ""); setCity(asset.city ?? ""); setTags((asset.subjectTags ?? []).join(", ")); setRights(asset.rightsStatus ?? "pending"); };
+  const load = useCallback(async () => { setLoading(true); const response = await apiRequest<{ results?: Asset[]; error?: string }>("/api/my/assets", session); const next = response.body?.results ?? []; if (response.status === 200) { setAssets(next); setSelected((current) => { const match = next.find((asset) => asset.id === current?.id) ?? next[0] ?? null; if (match) { setTitle(match.title); setDescription(match.description ?? ""); setCaption(match.caption ?? ""); setCity(match.city ?? ""); setTags((match.subjectTags ?? []).join(", ")); setRights(match.rightsStatus ?? "pending"); } return match; }); setMessage(null); } else setMessage(messageFrom(response.body ?? null, "Your seller assets could not be loaded.")); setLoading(false); }, [session]);
+  useEffect(() => { void load(); }, [load]);
+  const save = async () => { if (!selected || !title.trim() || !description.trim()) { setMessage("Title and description are required."); return; } setSaving(true); const response = await apiRequest<{ error?: string }>(`/api/assets/${encodeURIComponent(selected.id)}`, session, { method: "PATCH", body: { kind: selected.kind, title: title.trim(), description: description.trim(), caption: caption.trim(), city: city.trim() || null, subjectTags: tags.split(",").map((value) => value.trim()).filter(Boolean), culturalTags: selected.culturalTags ?? [], rightsStatus: rights, modelReleaseStatus: selected.modelReleaseStatus ?? "unknown", propertyReleaseStatus: selected.propertyReleaseStatus ?? "unknown" } }); setSaving(false); setMessage(response.status === 200 ? "Metadata saved. Editorial review still controls publication." : messageFrom(response.body, "Metadata could not be saved.")); if (response.status === 200) await load(); };
+  if (loading) return <LoadingState label="Loading your photo library" />;
+  return <View><View style={styles.progressCard}><Text style={styles.cardKind}>YOUR PHOTO LIBRARY</Text><Text style={styles.cardTitle}>{assets.length} owned record{assets.length === 1 ? "" : "s"}</Text><Text style={styles.cardMeta}>{assets.filter((asset) => asset.status === "published").length} published · {assets.filter((asset) => asset.status === "needs_review").length} held for review</Text></View>{message ? <View style={styles.notice}><ShieldCheck color={message.includes("saved") ? COLORS.green : COLORS.amber} size={18} /><Text style={styles.noticeText}>{message}</Text></View> : null}{!assets.length ? <EmptyState label="No uploaded records yet. Use Upload to submit your first photo." /> : <><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.libraryRow}>{assets.map((asset) => <Pressable key={asset.id} style={[styles.libraryItem, selected?.id === asset.id && styles.libraryItemActive]} onPress={() => choose(asset)}><Image source={{ uri: imageFor(asset) }} style={styles.libraryThumb} /><Text style={styles.cardTitle} numberOfLines={1}>{asset.title}</Text><Text style={styles.cardMeta}>{asset.status.replaceAll("_", " ")}</Text></Pressable>)}</ScrollView>{selected ? <View style={styles.formCard}><Text style={styles.cardKind}>SELLER-OWNED RECORD · {selected.status.replaceAll("_", " ")}</Text><Text style={styles.sectionTitle}>Update metadata</Text><Text style={styles.screenIntro}>Changes stay auditable and return to editorial review when required.</Text><Field label="Title" value={title} onChangeText={setTitle} placeholder="Asset title" /><Field label="Description" value={description} onChangeText={setDescription} placeholder="What is visible and what you can verify" multiline /><Field label="Caption (optional)" value={caption} onChangeText={setCaption} placeholder="Concise buyer-facing context" multiline /><Field label="City (optional)" value={city} onChangeText={setCity} placeholder="Evidence-backed location" /><Field label="Subject tags" value={tags} onChangeText={setTags} placeholder="Comma separated" /><Text style={styles.fieldLabel}>Rights status</Text><View style={styles.segmentRow}>{["pending", "editorial_only", "verified", "restricted"].map((value) => <Pressable key={value} style={[styles.compactSegment, rights === value && styles.segmentActive]} onPress={() => setRights(value)}><Text style={[styles.segmentText, rights === value && styles.segmentTextActive]}>{value.replaceAll("_", " ")}</Text></Pressable>)}</View><Pressable style={[styles.primaryButton, saving && styles.disabledButton]} disabled={saving} onPress={() => void save()}>{saving ? <ActivityIndicator color={COLORS.surface} /> : <Text style={styles.primaryButtonText}>Save metadata</Text>}</Pressable></View> : null}</>}</View>;
+}
+
+function CreateScreen({ auth }: { auth: MobileAuth }) {
+  const [section, setSection] = useState<"onboarding" | "upload" | "library">("onboarding");
   const [title, setTitle] = useState("");
   const [caption, setCaption] = useState("");
   const [city, setCity] = useState("");
@@ -321,16 +597,6 @@ function CreateScreen({ auth }: { auth: MobileAuth }) {
   const [selectedMedia, setSelectedMedia] = useState<ImagePicker.ImagePickerAsset | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-
-  const signIn = async () => {
-    setMessage(null);
-    try {
-      await auth.signIn(email, password);
-      setPassword("");
-    } catch (signInError) {
-      setMessage(signInError instanceof Error ? signInError.message : "Sign-in failed.");
-    }
-  };
 
   const pickMedia = async () => {
     if (kind === "video") {
@@ -403,21 +669,7 @@ function CreateScreen({ auth }: { auth: MobileAuth }) {
 
   if (auth.loading && !auth.session) return <ScrollView contentContainerStyle={styles.scrollContent}><Text style={styles.eyebrow}>CONTRIBUTE</Text><Text style={styles.screenTitle}>Add to the archive</Text><LoadingState label="Restoring contributor access" /></ScrollView>;
 
-  if (!auth.session) return (
-    <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
-      <Text style={styles.eyebrow}>CONTRIBUTE</Text>
-      <Text style={styles.screenTitle}>Contributor sign in</Text>
-      <Text style={styles.screenIntro}>Use the same approved contributor account as the Veld Archive workspace.</Text>
-      {!auth.configured ? <View style={styles.notice}><WifiOff color={COLORS.amber} size={18} /><Text style={styles.noticeText}>Supabase authentication is not configured for this build. Add the Expo public Supabase URL and publishable key.</Text></View> : <>
-        <Field label="Email" value={email} onChangeText={setEmail} placeholder="you@example.com" autoCapitalize="none" keyboardType="email-address" />
-        <Field label="Password" value={password} onChangeText={setPassword} placeholder="Your password" secureTextEntry />
-        {(message || auth.error) ? <View style={styles.notice}><WifiOff color={COLORS.amber} size={18} /><Text style={styles.noticeText}>{message ?? auth.error}</Text></View> : null}
-        <Pressable style={[styles.primaryButton, (auth.loading || !email.trim() || !password) && styles.disabledButton]} disabled={auth.loading || !email.trim() || !password} onPress={() => void signIn()}>
-          {auth.loading ? <ActivityIndicator color={COLORS.surface} /> : <><LogIn color={COLORS.surface} size={17} /><Text style={styles.primaryButtonText}>Sign in to contribute</Text></>}
-        </Pressable>
-      </>}
-    </ScrollView>
-  );
+  if (!auth.session) return <SellerAccess auth={auth} />;
 
   if (!["contributor", "editor", "admin"].includes(auth.session.user.role)) return (
     <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
@@ -430,9 +682,11 @@ function CreateScreen({ auth }: { auth: MobileAuth }) {
   return (
     <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
       <Text style={styles.eyebrow}>CONTRIBUTE</Text>
-      <Text style={styles.screenTitle}>Add to the archive</Text>
-      <Text style={styles.screenIntro}>Prepare metadata for editorial review.</Text>
+      <Text style={styles.screenTitle}>{section === "onboarding" ? "Seller workspace" : "Add to the archive"}</Text>
+      <Text style={styles.screenIntro}>{section === "onboarding" ? "Complete the evidence needed to sell, then track approval here." : "Prepare metadata and media for editorial review."}</Text>
       <View style={styles.accountCard}><View style={{ flex: 1 }}><Text style={styles.cardTitle}>{auth.session.user.displayName}</Text><Text style={styles.cardMeta}>{auth.session.user.organizationName} · {auth.session.user.role}</Text></View><Pressable accessibilityLabel="Sign out" onPress={() => void auth.signOut()}><LogOut color={COLORS.muted} size={19} /></Pressable></View>
+      <View style={styles.workspaceToggle}><Pressable style={[styles.workspaceToggleButton, section === "onboarding" && styles.workspaceToggleActive]} onPress={() => setSection("onboarding")}><Text style={[styles.workspaceToggleText, section === "onboarding" && styles.stepTextActive]}>Onboarding</Text></Pressable><Pressable style={[styles.workspaceToggleButton, section === "upload" && styles.workspaceToggleActive]} onPress={() => setSection("upload")}><Text style={[styles.workspaceToggleText, section === "upload" && styles.stepTextActive]}>Upload</Text></Pressable><Pressable style={[styles.workspaceToggleButton, section === "library" && styles.workspaceToggleActive]} onPress={() => setSection("library")}><Text style={[styles.workspaceToggleText, section === "library" && styles.stepTextActive]}>Library</Text></Pressable></View>
+      {section === "onboarding" ? <SellerOnboarding session={auth.session} /> : section === "library" ? <SellerLibrary session={auth.session} /> : <>
       <Pressable style={styles.uploadDropzone} onPress={() => void pickMedia()}><UploadCloud color={COLORS.green} size={28} /><Text style={styles.dropzoneTitle}>{selectedMedia?.fileName ?? "Choose an image"}</Text><Text style={styles.dropzoneMeta}>{selectedMedia ? `${Math.round((selectedMedia.fileSize ?? 0) / 1024)} KB selected` : "Open photo library"}</Text></Pressable>
       <Field label="Title" value={title} onChangeText={setTitle} placeholder="Give this moment a name" />
       <Field label="Caption" value={caption} onChangeText={setCaption} placeholder="Add useful context" multiline />
@@ -444,11 +698,139 @@ function CreateScreen({ auth }: { auth: MobileAuth }) {
       <View style={styles.segmentRow}>{["verified", "pending"].map((value) => <Pressable key={value} style={[styles.segment, rights === value && styles.segmentActive]} onPress={() => setRights(value)}><ShieldCheck color={rights === value ? COLORS.surface : COLORS.muted} size={15} /><Text style={[styles.segmentText, rights === value && styles.segmentTextActive]}>{value === "verified" ? "Verified" : "Pending"}</Text></Pressable>)}</View>
       {message ? <View style={styles.notice}><CheckCircle2 color={message.includes("could") || message.includes("required") || message.includes("Sign") ? COLORS.amber : COLORS.green} size={18} /><Text style={styles.noticeText}>{message}</Text></View> : null}
       <Pressable style={[styles.primaryButton, saving && styles.disabledButton]} disabled={saving} onPress={() => void submit()}>{saving ? <ActivityIndicator color={COLORS.surface} /> : <><FilePlus2 color={COLORS.surface} size={17} /><Text style={styles.primaryButtonText}>Submit for review</Text></>}</Pressable>
+      </>}
     </ScrollView>
   );
 }
 
-function StatusScreen() {
+function CommunityScreen({ onBack }: { onBack: () => void }) {
+  const [data, setData] = useState<CommunityOverview | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(async () => { setError(null); try { setData(await apiGet<CommunityOverview>("/api/community/overview")); } catch { setError("Community spaces are temporarily unavailable."); } }, []);
+  useEffect(() => { void load(); }, [load]);
+  return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+    <Pressable onPress={onBack}><Text style={styles.sectionAction}>← More</Text></Pressable><Text style={styles.eyebrow}>COMMUNITY & COLLECTIONS</Text><Text style={styles.screenTitle}>Make the archive with us</Text><Text style={styles.screenIntro}>Contributor forums, editorial showcases, and region-led collections keep the people and places behind the work visible.</Text>
+    {!data && !error ? <LoadingState label="Loading community spaces" /> : error ? <ErrorState message={error} onRetry={load} /> : <>
+      <SectionHeader title="Contributor forums" action="Moderated" onPress={() => undefined} />
+      <View style={styles.stack}>{data?.forums.map((forum) => <View key={forum.id} style={styles.listCard}><Text style={styles.cardTitle}>{forum.name}</Text><Text style={styles.cardMeta}>{forum.description}</Text><Text style={styles.cardKind}>{forum.topicCount} TOPICS · {forum.postCount} POSTS</Text></View>)}</View>
+      <SectionHeader title="Discussions" action="Read" onPress={() => undefined} />
+      <View style={styles.stack}>{data?.threads.map((thread) => <View key={thread.id} style={styles.listCard}><Text style={styles.cardKind}>{thread.featured ? "FEATURED" : "DISCUSSION"}</Text><Text style={styles.cardTitle}>{thread.title}</Text><Text style={styles.cardMeta}>{thread.excerpt}</Text><Text style={styles.cardMeta}>{thread.author} · {thread.replies} replies · {thread.lastActivity}</Text></View>)}</View>
+      <SectionHeader title="Editorial showcases" action="Curated" onPress={() => undefined} />
+      <View style={styles.stack}>{data?.showcases.map((showcase) => <View key={showcase.id} style={styles.featureCard}><Text style={styles.cardKind}>{showcase.theme.toUpperCase()}</Text><Text style={styles.cardTitle}>{showcase.title}</Text><Text style={styles.cardMeta}>{showcase.description}</Text><Text style={styles.cardMeta}>Curated by {showcase.curator}</Text></View>)}</View>
+      <SectionHeader title="Featured collections" action="South Africa" onPress={() => undefined} />
+      <View style={styles.stack}>{data?.collections.map((collection) => <View key={collection.id} style={styles.listCard}><Text style={styles.cardKind}>{collection.featuredLabel}</Text><Text style={styles.cardTitle}>{collection.title}</Text><Text style={styles.cardMeta}>{collection.description}</Text><Text style={styles.cardMeta}>{collection.location} · {collection.assetCount} assets · {collection.contributorCount} contributors</Text></View>)}</View>
+    </>}
+  </ScrollView>;
+}
+
+function CreatorsScreen({ onBack, onOpenAsset }: { onBack: () => void; onOpenAsset: (asset: Asset) => void }) {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<CreatorProfile[]>([]);
+  const [selected, setSelected] = useState<{ profile: CreatorProfile; assets: Asset[]; collections: Array<{ id: string; title: string; description: string; assetCount: number }> } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const load = useCallback(async () => { setLoading(true); try { const response = await apiGet<{ results: CreatorProfile[] }>(`/api/creators?${queryString({ q: query.trim() || undefined })}`); setResults(response.results); } catch { setResults([]); } finally { setLoading(false); } }, [query]);
+  useEffect(() => { const timer = setTimeout(() => { void load(); }, 250); return () => clearTimeout(timer); }, [load]);
+  const openCreator = async (slug: string) => { try { setSelected(await apiGet(`/api/creators/${encodeURIComponent(slug)}`)); } catch { Alert.alert("Creator unavailable", "This public portfolio could not be loaded."); } };
+  if (selected) return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}><Pressable onPress={() => setSelected(null)}><Text style={styles.sectionAction}>← All creators</Text></Pressable><Text style={styles.eyebrow}>{selected.profile.location || "SOUTH AFRICA"}</Text><Text style={styles.screenTitle}>{selected.profile.name}</Text><Text style={styles.screenIntro}>{selected.profile.headline}</Text><Text style={styles.bodyText}>{selected.profile.bio}</Text><View style={styles.tagWrap}>{selected.profile.specialties.map((tag) => <Text key={tag} style={styles.tag}>{tag}</Text>)}</View><View style={styles.statGrid}><Fact label="Published" value={String(selected.profile.assetCount)} /><Fact label="Photos" value={String(selected.profile.publishedImageCount)} /><Fact label="Collections" value={String(selected.profile.collectionCount)} /></View><SectionHeader title="Portfolio collections" action={`${selected.collections.length}`} onPress={() => undefined} /><View style={styles.stack}>{selected.collections.map((collection) => <View style={styles.listCard} key={collection.id}><Text style={styles.cardTitle}>{collection.title}</Text><Text style={styles.cardMeta}>{collection.description}</Text><Text style={styles.cardKind}>{collection.assetCount} ASSETS</Text></View>)}</View><SectionHeader title="Published work" action={`${selected.assets.length}`} onPress={() => undefined} /><View style={styles.assetGrid}>{selected.assets.map((asset) => <AssetCard key={asset.id} asset={asset} onPress={() => onOpenAsset(asset)} />)}</View></ScrollView>;
+  return <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}><Pressable onPress={onBack}><Text style={styles.sectionAction}>← More</Text></Pressable><Text style={styles.eyebrow}>CREATOR MARKETPLACE</Text><Text style={styles.screenTitle}>People behind the work</Text><Text style={styles.screenIntro}>Search approved public portfolios by person, place, and specialty.</Text><Field label="Search creators" value={query} onChangeText={setQuery} placeholder="Name, place, or specialty" />{loading ? <LoadingState label="Finding creators" /> : results.length ? <View style={styles.stack}>{results.map((creator) => <Pressable key={creator.id} style={styles.navigationCard} onPress={() => void openCreator(creator.slug)}><View style={styles.creatorAvatar}><Text style={styles.creatorAvatarText}>{creator.name.slice(0, 1)}</Text></View><View style={styles.navigationCopy}><Text style={styles.cardKind}>{creator.location || "SOUTH AFRICA"}</Text><Text style={styles.cardTitle}>{creator.name}</Text><Text style={styles.cardMeta}>{creator.headline}</Text><Text style={styles.cardMeta}>{creator.assetCount} assets · {creator.collectionCount} collections</Text></View><ChevronRight color={COLORS.muted} size={18} /></Pressable>)}</View> : <EmptyState label="No public creators matched" />}</ScrollView>;
+}
+
+function AnalyticsScreen({ session, onBack }: { session: MobileApiSession; onBack: () => void }) {
+  const role = session.user.role === "buyer" ? "buyer" : "contributor";
+  const [data, setData] = useState<Record<string, any> | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(async () => { const response = await apiRequest<Record<string, any>>(`/api/analytics/${role}`, session); if (response.status === 200) { setData(response.body); setError(null); } else { setData(null); setError(response.status === 402 ? "A buyer subscription is required for ROI analytics." : "Analytics are unavailable. No cached figures are shown."); } }, [role, session]);
+  useEffect(() => { void load(); }, [load]);
+  const summary = data?.summary ?? {};
+  const metrics = role === "buyer" ? [["Spend", `R${Math.round(Number(summary.spendCents ?? 0) / 100).toLocaleString("en-ZA")}`], ["Licensed assets", summary.licensedAssets], ["ROI", `${summary.roi ?? 0}%`], ["Conversions", summary.conversions]] : [["Searches", summary.searches], ["Views", summary.views], ["Saved", summary.saves], ["Demand change", `${summary.demandChange ?? 0}%`]];
+  return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}><Pressable onPress={onBack}><Text style={styles.sectionAction}>← More</Text></Pressable><Text style={styles.eyebrow}>{role === "buyer" ? "BUYER ROI" : "CONTRIBUTOR INSIGHTS"}</Text><Text style={styles.screenTitle}>{role === "buyer" ? "Licence performance" : "What buyers need"}</Text><Text style={styles.screenIntro}>Privacy-conscious aggregate signals from the same reporting API as desktop.</Text>{error ? <ErrorState message={error} onRetry={load} /> : !data ? <LoadingState label="Loading insights" /> : <><View style={styles.metricGrid}>{metrics.map(([label, value]) => <View key={String(label)} style={styles.metricCard}><Text style={styles.cardKind}>{label}</Text><Text style={styles.metricValue}>{String(value ?? 0)}</Text></View>)}</View>{role === "contributor" ? <View style={styles.stack}>{(data.opportunities ?? []).map((item: { title: string; detail: string }) => <View key={item.title} style={styles.featureCard}><Text style={styles.cardKind}>OPPORTUNITY</Text><Text style={styles.cardTitle}>{item.title}</Text><Text style={styles.cardMeta}>{item.detail}</Text></View>)}</View> : <View style={styles.stack}>{(data.campaigns ?? []).map((campaign: { id: string; name: string; assetTitle: string; roi: number }) => <View key={campaign.id} style={styles.listCard}><Text style={styles.cardTitle}>{campaign.name}</Text><Text style={styles.cardMeta}>{campaign.assetTitle}</Text><Text style={styles.cardKind}>ROI {campaign.roi}%</Text></View>)}</View>}</>}</ScrollView>;
+}
+
+function AccountScreen({ auth, onBack, onSell }: { auth: MobileAuth; onBack: () => void; onSell: () => void }) {
+  const [account, setAccount] = useState<AccountLifecycle | null>(null);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [licences, setLicences] = useState<Array<Record<string, unknown>>>([]);
+  const [subscription, setSubscription] = useState<Record<string, any> | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const session = auth.session;
+  const load = useCallback(async () => {
+    if (!session) return;
+    const [accountResponse, notificationResponse, licenceResponse, subscriptionResponse] = await Promise.all([
+      apiRequest<AccountLifecycle>("/api/account/lifecycle", session),
+      apiRequest<{ results: AppNotification[] }>("/api/notifications", session),
+      apiRequest<{ results: Array<Record<string, unknown>> }>("/api/licences/history", session),
+      ["buyer", "admin"].includes(session.user.role) ? apiRequest<Record<string, any>>("/api/subscription", session) : Promise.resolve({ status: 403, body: null }),
+    ]);
+    setAccount(accountResponse.status === 200 ? accountResponse.body : null);
+    setNotifications(notificationResponse.body?.results ?? []);
+    setLicences(licenceResponse.body?.results ?? []);
+    setSubscription(subscriptionResponse.status === 200 ? subscriptionResponse.body : null);
+  }, [session]);
+  useEffect(() => { void load(); }, [load]);
+  if (!session) return <ScrollView contentContainerStyle={styles.scrollContent}><Pressable onPress={onBack}><Text style={styles.sectionAction}>← More</Text></Pressable><Text style={styles.eyebrow}>ACCOUNT</Text><Text style={styles.screenTitle}>Sign in to continue</Text><Text style={styles.screenIntro}>Seller signup, email confirmation, and sign-in are available in the Create workspace.</Text><Pressable style={styles.primaryButton} onPress={onSell}><Text style={styles.primaryButtonText}>Open seller access</Text></Pressable></ScrollView>;
+  const updatePreferences = async (next: Pick<AccountLifecycle, "emailNotifications" | "productNotifications">) => { const response = await apiRequest<{ error?: string }>("/api/account/preferences", session, { method: "PUT", body: next }); setMessage(response.status === 200 ? "Notification preferences saved." : messageFrom(response.body, "Preferences could not be saved.")); await load(); };
+  const requestExport = async () => { const response = await apiRequest<{ error?: string }>("/api/account/exports", session, { method: "POST", body: {} }); setMessage(response.status < 300 ? "Account export requested." : messageFrom(response.body, "Export could not be requested.")); await load(); };
+  const scheduleDeletion = () => Alert.alert("Schedule account deletion?", "The account enters a 30-day recovery window before deletion.", [{ text: "Cancel", style: "cancel" }, { text: "Schedule deletion", style: "destructive", onPress: () => { void apiRequest("/api/account/deletion", session, { method: "POST", body: {} }).then(async () => { setMessage("Account deletion scheduled."); await load(); }); } }]);
+  const markRead = async (id: string) => { await apiRequest(`/api/notifications/${encodeURIComponent(id)}/read`, session, { method: "POST", body: {} }); await load(); };
+  const startSubscription = async () => { const response = await apiRequest<{ checkoutUrl?: string; error?: string }>("/api/subscription/session", session, { method: "POST", body: { successUrl: `${API_BASE_URL}/account?subscription=success`, cancelUrl: `${API_BASE_URL}/account?subscription=cancelled` } }); if (response.status === 201 && response.body?.checkoutUrl) await Linking.openURL(response.body.checkoutUrl); else setMessage(messageFrom(response.body, "Paystack checkout could not be started.")); };
+  const manageSubscription = async () => { const response = await apiRequest<{ manageUrl?: string; error?: string }>("/api/subscription/manage-link", session, { method: "POST", body: {} }); if (response.status === 200 && response.body?.manageUrl) await Linking.openURL(response.body.manageUrl); else setMessage(messageFrom(response.body, "Subscription management is unavailable.")); };
+  return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}><Pressable onPress={onBack}><Text style={styles.sectionAction}>← More</Text></Pressable><Text style={styles.eyebrow}>ACCOUNT & ORGANISATION</Text><Text style={styles.screenTitle}>Control your account</Text><View style={styles.accountCard}><View style={{ flex: 1 }}><Text style={styles.cardTitle}>{session.user.displayName}</Text><Text style={styles.cardMeta}>{session.user.email} · {session.user.organizationName} · {session.user.role}</Text></View><Pressable accessibilityLabel="Sign out" onPress={() => void auth.signOut()}><LogOut color={COLORS.muted} size={19} /></Pressable></View>{message ? <View style={styles.notice}><CheckCircle2 color={COLORS.green} size={18} /><Text style={styles.noticeText}>{message}</Text></View> : null}{!account ? <LoadingState label="Loading account controls" /> : <>
+    <View style={styles.formCard}><Text style={styles.cardKind}>IDENTITY SECURITY</Text><Text style={styles.cardTitle}>Email, password and MFA</Text><Text style={styles.cardMeta}>{account.emailVerified ? "Email verified." : "Email verification required."} {account.mfaEnrolled ? "MFA enrolled." : "MFA not enrolled."}</Text>{account.accountPortalUrl ? <Pressable style={styles.secondaryButton} onPress={() => void Linking.openURL(account.accountPortalUrl ?? "")}><Text style={styles.secondaryButtonText}>Manage identity security</Text></Pressable> : null}</View>
+    <View style={styles.formCard}><Text style={styles.cardKind}>NOTIFICATIONS</Text><Text style={styles.cardTitle}>Keep only useful alerts</Text><CheckField checked={account.emailNotifications} onPress={() => void updatePreferences({ emailNotifications: !account.emailNotifications, productNotifications: account.productNotifications })} label="Essential email notifications" /><CheckField checked={account.productNotifications} onPress={() => void updatePreferences({ emailNotifications: account.emailNotifications, productNotifications: !account.productNotifications })} label="Product and marketplace updates" /></View>
+    <View style={styles.formCard}><Text style={styles.cardKind}>YOUR DATA</Text><Text style={styles.cardTitle}>Export or delete</Text><Text style={styles.cardMeta}>Export: {account.exportStatus} · deletion: {account.deletionStatus}</Text><Pressable style={styles.secondaryButton} onPress={() => void requestExport()}><Text style={styles.secondaryButtonText}>Request account export</Text></Pressable><Pressable style={styles.dangerButton} onPress={scheduleDeletion}><Text style={styles.dangerButtonText}>Schedule deletion</Text></Pressable></View>
+  </>}
+  {subscription ? <View style={styles.formCard}><Text style={styles.cardKind}>BUYER SUBSCRIPTION</Text><Text style={styles.cardTitle}>Archive access · {String(subscription.subscription?.status ?? "not started").replaceAll("_", " ")}</Text><Text style={styles.cardMeta}>{subscription.plan ? `R${Math.round(Number(subscription.plan.amountCents ?? 0) / 100).toLocaleString("en-ZA")} / ${String(subscription.plan.interval)}. Paystack webhook events are the source of truth.` : "The Paystack plan is not configured."}</Text>{subscription.configured && !subscription.subscription ? <Pressable style={styles.primaryButton} onPress={() => void startSubscription()}><Text style={styles.primaryButtonText}>Continue with Paystack</Text></Pressable> : null}{subscription.subscription?.provider_subscription_code ? <Pressable style={styles.secondaryButton} onPress={() => void manageSubscription()}><Text style={styles.secondaryButtonText}>Manage billing</Text></Pressable> : null}</View> : null}
+  <SectionHeader title="Alerts" action={`${notifications.filter((item) => !item.read_at).length} unread`} onPress={() => undefined} /><View style={styles.stack}>{notifications.length ? notifications.slice(0, 10).map((item) => <View key={item.id} style={styles.listCard}><Text style={styles.cardTitle}>{item.title}</Text><Text style={styles.cardMeta}>{item.body}</Text><Text style={styles.cardMeta}>{new Date(item.created_at).toLocaleDateString("en-ZA")}</Text>{!item.read_at ? <Pressable onPress={() => void markRead(item.id)}><Text style={styles.sectionAction}>Mark read</Text></Pressable> : null}</View>) : <Text style={styles.stateText}>No alerts yet.</Text>}</View>
+  <SectionHeader title="Licence history" action={`${licences.length}`} onPress={() => undefined} /><View style={styles.stack}>{licences.length ? licences.slice(0, 20).map((licence) => <View key={String(licence.id)} style={styles.listCard}><Text style={styles.cardTitle}>{String(licence.asset_title)}</Text><Text style={styles.cardMeta}>{String(licence.product_code ?? licence.licence_type)} · {String(licence.territory)} · {String(licence.duration_days)} days</Text></View>) : <Text style={styles.stateText}>No licences recorded for this workspace.</Text>}</View>
+  </ScrollView>;
+}
+
+function CampaignsScreen({ session, onBack, onOpenAsset }: { session: MobileApiSession; onBack: () => void; onOpenAsset: (asset: Asset) => void }) {
+  const [campaigns, setCampaigns] = useState<Array<Record<string, any>>>([]);
+  const [selected, setSelected] = useState<Record<string, any> | null>(null);
+  const [name, setName] = useState("");
+  const [briefText, setBriefText] = useState("");
+  const [message, setMessage] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const load = useCallback(async () => { const response = await apiRequest<{ results?: Array<Record<string, any>> }>("/api/campaigns", session); setCampaigns(response.body?.results ?? []); }, [session]);
+  useEffect(() => { void load(); }, [load]);
+  const open = async (id: string) => { const response = await apiRequest<Record<string, any>>(`/api/campaigns/${encodeURIComponent(id)}`, session); if (response.status === 200) setSelected(response.body); else setMessage("That campaign could not be loaded."); };
+  const create = async () => { if (name.trim().length < 3 || briefText.trim().length < 10) { setMessage("Add a campaign name and a useful brief."); return; } setSaving(true); const response = await apiRequest<{ id?: string; error?: string }>("/api/campaigns", session, { method: "POST", body: { name: name.trim(), briefText: briefText.trim(), brief: {}, brandKit: { colours: [], logoNotes: "", tone: "", industry: "", forbiddenStyles: [], preferredVisuals: "" } } }); setSaving(false); if (response.status !== 201 || !response.body?.id) { setMessage(messageFrom(response.body, "Campaign could not be created.")); return; } setName(""); setBriefText(""); await load(); await open(response.body.id); setMessage("Campaign board created with rights-aware recommendations."); };
+  const stage = async (assetId: string, value: "shortlisted" | "approved" | "needs_review" | "rejected") => { if (!selected?.campaign?.id) return; const response = await apiRequest<{ error?: string }>(`/api/campaigns/${encodeURIComponent(selected.campaign.id)}/assets`, session, { method: "POST", body: { assetId, stage: value, note: value === "approved" ? "Approved from the mobile workspace after rights review." : "" } }); setMessage(response.status === 200 ? `Asset marked ${value.replaceAll("_", " ")}.` : messageFrom(response.body, "Campaign decision was not saved.")); if (response.status === 200) await open(selected.campaign.id); };
+  if (selected) { const rows = selected.recommendations ?? selected.assets ?? []; return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}><Pressable onPress={() => setSelected(null)}><Text style={styles.sectionAction}>← Campaigns</Text></Pressable><Text style={styles.eyebrow}>CAMPAIGN INTELLIGENCE</Text><Text style={styles.screenTitle}>{String(selected.campaign?.name ?? "Campaign")}</Text><Text style={styles.screenIntro}>{String(selected.campaign?.briefText ?? selected.campaign?.brief ?? "Rights-aware campaign board")}</Text>{message ? <View style={styles.notice}><ShieldCheck color={COLORS.green} size={18} /><Text style={styles.noticeText}>{message}</Text></View> : null}<View style={styles.stack}>{rows.map((row: Record<string, any>) => { const asset = (row.asset ?? row) as Asset; return <View key={asset.id} style={styles.listCard}><Pressable onPress={() => onOpenAsset(asset)}><Text style={styles.cardKind}>{String(row.stage ?? row.campaignStage ?? "recommended").replaceAll("_", " ")}</Text><Text style={styles.cardTitle}>{asset.title}</Text><Text style={styles.cardMeta}>{String(row.reason ?? row.explanation ?? "Matched to the campaign brief")}</Text></Pressable><View style={styles.actionRow}>{(["shortlisted", "approved", "needs_review", "rejected"] as const).map((value) => <Pressable key={value} style={styles.smallAction} onPress={() => void stage(asset.id, value)}><Text style={styles.smallActionText}>{value.replaceAll("_", " ")}</Text></Pressable>)}</View></View>; })}</View></ScrollView>; }
+  return <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}><Pressable onPress={onBack}><Text style={styles.sectionAction}>← More</Text></Pressable><Text style={styles.eyebrow}>CAMPAIGN INTELLIGENCE</Text><Text style={styles.screenTitle}>Brief the story</Text><Text style={styles.screenIntro}>Create a campaign board, inspect explainable recommendations, and record approval stages.</Text><View style={styles.formCard}><Field label="Campaign name" value={name} onChangeText={setName} placeholder="Campaign or client" /><Field label="Brief" value={briefText} onChangeText={setBriefText} placeholder="Audience, place, channels, story, and rights needed" multiline /><Pressable style={[styles.primaryButton, saving && styles.disabledButton]} disabled={saving} onPress={() => void create()}>{saving ? <ActivityIndicator color={COLORS.surface} /> : <Text style={styles.primaryButtonText}>Create campaign board</Text>}</Pressable></View>{message ? <View style={styles.notice}><ShieldCheck color={COLORS.amber} size={18} /><Text style={styles.noticeText}>{message}</Text></View> : null}<SectionHeader title="Campaigns" action={`${campaigns.length}`} onPress={() => void load()} /><View style={styles.stack}>{campaigns.map((campaign) => <Pressable style={styles.navigationCard} key={String(campaign.id)} onPress={() => void open(String(campaign.id))}><View style={styles.navigationCopy}><Text style={styles.cardTitle}>{String(campaign.name)}</Text><Text style={styles.cardMeta}>{String(campaign.status ?? "draft")} · {Number(campaign.assetCounts?.approved ?? 0)} approved</Text></View><ChevronRight color={COLORS.muted} size={18} /></Pressable>)}</View></ScrollView>;
+}
+
+function GovernanceScreen({ session, onBack, onOpenAsset }: { session: MobileApiSession; onBack: () => void; onOpenAsset: (asset: Asset) => void }) {
+  const [items, setItems] = useState<Asset[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [message, setMessage] = useState<string | null>(null);
+  const load = useCallback(async () => { setLoading(true); const response = await apiRequest<{ results?: Asset[]; error?: string }>("/api/governance/assets?stage=all", session); setItems(response.body?.results ?? []); if (response.status !== 200) setMessage(messageFrom(response.body, "The governance queue is unavailable.")); setLoading(false); }, [session]);
+  useEffect(() => { void load(); }, [load]);
+  const act = async (asset: Asset, action: "approve" | "reject") => { const response = await apiRequest<{ error?: string }>(`/api/governance/assets/${encodeURIComponent(asset.id)}/action`, session, { method: "POST", body: { action } }); setMessage(response.status === 200 ? `${asset.title} marked ${action}.` : messageFrom(response.body, "The review action was blocked.")); if (response.status === 200) await load(); };
+  return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}><Pressable onPress={onBack}><Text style={styles.sectionAction}>← More</Text></Pressable><Text style={styles.eyebrow}>EDITORIAL GOVERNANCE</Text><Text style={styles.screenTitle}>Review what is real</Text><Text style={styles.screenIntro}>Evidence, place, rights, consent, confidence, and workflow stage remain visible before publication. AI enrichment runs once after upload; later changes require an explicit human correction in the desktop review workspace.</Text>{message ? <View style={styles.notice}><ShieldCheck color={message.includes("marked") ? COLORS.green : COLORS.amber} size={18} /><Text style={styles.noticeText}>{message}</Text></View> : null}{loading ? <LoadingState label="Loading review queue" /> : items.length ? <View style={styles.stack}>{items.map((asset) => <View key={asset.id} style={styles.listCard}><Pressable onPress={() => onOpenAsset(asset)}><Text style={styles.cardKind}>{asset.status.replaceAll("_", " ")} · RIGHTS {asset.rightsStatus ?? "pending"}</Text><Text style={styles.cardTitle}>{asset.title}</Text><Text style={styles.cardMeta}>{locationFor(asset)} · confidence {confidenceFor(asset)}%</Text></Pressable><View style={styles.actionRow}><Pressable style={styles.smallAction} onPress={() => onOpenAsset(asset)}><Text style={styles.smallActionText}>Evidence</Text></Pressable><Pressable style={styles.smallAction} onPress={() => void act(asset, "approve")}><Text style={styles.smallActionText}>Approve</Text></Pressable><Pressable style={styles.smallAction} onPress={() => void act(asset, "reject")}><Text style={styles.smallActionText}>Reject</Text></Pressable></View></View>)}</View> : <EmptyState label="No records are waiting for review" />}</ScrollView>;
+}
+
+type MoreView = "menu" | "account" | "community" | "creators" | "insights" | "campaigns" | "governance" | "rights" | "status" | "advanced-search" | "marketplace" | "operations";
+function MoreScreen({ auth, onOpenAsset, onSell }: { auth: MobileAuth; onOpenAsset: (asset: Asset) => void; onSell: () => void }) {
+  const [view, setView] = useState<MoreView>("menu");
+  if (view === "account") return <AccountScreen auth={auth} onBack={() => setView("menu")} onSell={onSell} />;
+  if (view === "community") return <CommunityActionsScreen session={auth.session} onBack={() => setView("menu")} />;
+  if (view === "creators") return <CreatorsScreen onBack={() => setView("menu")} onOpenAsset={onOpenAsset} />;
+  if (view === "insights" && auth.session) return <AnalyticsScreen session={auth.session} onBack={() => setView("menu")} />;
+  if (view === "campaigns" && auth.session) return <CampaignDeliveryScreen session={auth.session} onBack={() => setView("menu")} />;
+  if (view === "governance" && auth.session && ["editor", "admin"].includes(auth.session.user.role)) return <GovernanceEditorScreen session={auth.session} onBack={() => setView("menu")} />;
+  if (view === "advanced-search") return <AdvancedSearchScreen onBack={() => setView("menu")} onOpenAsset={(asset) => onOpenAsset(asset as Asset)} />;
+  if (view === "marketplace" && auth.session) return <MarketplaceParityScreen session={auth.session} onBack={() => setView("menu")} />;
+  if (view === "operations") return <OperationsScreen session={auth.session} onBack={() => setView("menu")} />;
+  if (view === "rights") return <ScrollView contentContainerStyle={styles.scrollContent}><Pressable onPress={() => setView("menu")}><Text style={styles.sectionAction}>← More</Text></Pressable><Text style={styles.eyebrow}>RIGHTS GUIDE</Text><Text style={styles.screenTitle}>Context before consequence</Text><Text style={styles.screenIntro}>Every consequential request should be checked against copyright ownership, permitted use, territory, duration, model releases, property releases, cultural context, and human editorial verification.</Text><View style={styles.stack}>{[["Copyright", "Confirm who owns or controls the work and which licence governs it."], ["People", "Commercial use may require a verified model release; editorial use still needs truthful context."], ["Property", "Recognisable private property, artwork, and trademarks can require additional permission."], ["Provenance", "Keep source, creator attribution, review state, and evidence visible before licensing."], ["Resolution", "Use the Community workspace on desktop to lodge a structured takedown or mediation case."]].map(([title, detail]) => <View style={styles.listCard} key={title}><Text style={styles.cardTitle}>{title}</Text><Text style={styles.cardMeta}>{detail}</Text></View>)}</View></ScrollView>;
+  if (view === "status") return <StatusScreen onBack={() => setView("menu")} />;
+  const canGovern = auth.session && ["editor", "admin"].includes(auth.session.user.role);
+  const items: Array<{ key: MoreView; title: string; detail: string; gated?: boolean }> = [{ key: "account", title: "Account", detail: "Security, billing, alerts, exports, deletion, and licences." }, { key: "advanced-search", title: "Advanced search", detail: "Province, category, media type, and human-review filters." }, { key: "community", title: "Community & rights", detail: "Forums, discussions, rights cases, and mediation intake." }, { key: "creators", title: "Creator marketplace", detail: "Search public portfolios and published work." }, { key: "marketplace", title: "Marketplace controls", detail: "Lightboxes, sharing, licence products, buyer automation, and API keys.", gated: true }, { key: "insights", title: "Insights", detail: "Contributor demand or buyer ROI from authenticated reporting.", gated: true }, { key: "campaigns", title: "Campaign delivery", detail: "Campaign recommendations and auditable manifest delivery.", gated: true }, ...(canGovern ? [{ key: "governance" as MoreView, title: "Editorial governance", detail: "Correct metadata, review evidence, and approve or reject records." }] : []), { key: "operations", title: "Connected tools", detail: "WordPress pairing, stakeholder reference, and integration boundaries." }, { key: "rights", title: "Rights guide", detail: "Copyright, releases, provenance, and resolution context." }, { key: "status", title: "App status", detail: "API environment and service availability." }];
+  return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}><Text style={styles.eyebrow}>VELD WORKSPACES</Text><Text style={styles.screenTitle}>More</Text><Text style={styles.screenIntro}>The highest-value desktop journeys are now available as native, API-backed mobile surfaces.</Text><View style={styles.stack}>{items.map((item) => <Pressable key={item.key} style={[styles.navigationCard, item.gated && !auth.session && styles.disabledButton]} disabled={item.gated && !auth.session} onPress={() => setView(item.key)}><View style={styles.navigationIcon}><Layers3 color={COLORS.green} size={20} /></View><View style={styles.navigationCopy}><Text style={styles.cardTitle}>{item.title}</Text><Text style={styles.cardMeta}>{item.gated && !auth.session ? "Sign in as a seller or buyer to open this workspace." : item.detail}</Text></View><ChevronRight color={COLORS.muted} size={18} /></Pressable>)}</View></ScrollView>;
+}
+
+function StatusScreen({ onBack }: { onBack?: () => void }) {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -458,6 +840,7 @@ function StatusScreen() {
   }, []);
   useEffect(() => { void load(); }, [load]);
   return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+    {onBack ? <Pressable onPress={onBack}><Text style={styles.sectionAction}>← More</Text></Pressable> : null}
     <View style={styles.topRow}><View><Text style={styles.eyebrow}>SYSTEM</Text><Text style={styles.screenTitle}>App status</Text></View><Pressable style={styles.avatarButton} onPress={() => void load()}><RefreshCw color={COLORS.ink} size={20} /></Pressable></View>
     <View style={styles.statusHero}><View style={styles.statusIcon}><Activity color={COLORS.green} size={25} /></View><View style={{ flex: 1 }}><Text style={styles.cardTitle}>Veld Archive mobile</Text><Text style={styles.cardMeta}>Native Expo client - Metro runtime</Text></View><CheckCircle2 color={COLORS.green} size={22} /></View>
     {loading ? <LoadingState label="Checking services" /> : error ? <ErrorState message="The public API could not be reached" onRetry={load} /> : <View style={styles.statusList}><StatusRow label="API health" value={health?.status ?? (health?.ok ? "healthy" : "available")} /><StatusRow label="Environment" value={health?.environment ?? "unknown"} /><StatusRow label="Endpoint" value={API_BASE_URL.replace(/^https?:\/\//, "")} /><StatusRow label="Operations" value="Admin workspace only" /></View>}
@@ -473,12 +856,21 @@ function SearchResult({ asset, onPress }: { asset: Asset; onPress: () => void })
   return <Pressable style={styles.searchResult} onPress={onPress}><Image source={{ uri: imageFor(asset) }} style={styles.resultImage} /><View style={styles.resultCopy}><View style={styles.cardLabelRow}><Text style={styles.cardKind}>{asset.kind === "video" ? "VIDEO" : "IMAGE"}</Text>{asset.humanVerified ? <CheckCircle2 color={COLORS.green} size={15} /> : null}</View><Text style={styles.cardTitle} numberOfLines={2}>{asset.title}</Text><Text style={styles.cardMeta} numberOfLines={1}>{locationFor(asset)}</Text></View><ChevronRight color={COLORS.muted} size={18} /></Pressable>;
 }
 
-function AssetDetail({ asset, onClose }: { asset: Asset | null; onClose: () => void }) {
+function AssetDetail({ asset, onClose, auth }: { asset: Asset | null; onClose: () => void; auth: MobileAuth }) {
+  const [lightboxes, setLightboxes] = useState<UserLightbox[]>([]);
+  const [saveOpen, setSaveOpen] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [message, setMessage] = useState<string | null>(null);
+  const session = auth.session;
+  const loadLightboxes = useCallback(async () => { if (!session) return; const response = await apiRequest<{ results?: UserLightbox[] }>("/api/lightboxes", session); setLightboxes(response.body?.results ?? []); }, [session]);
+  useEffect(() => { if (asset && session) void loadLightboxes(); }, [asset, loadLightboxes, session]);
+  const save = async (lightboxId: string) => { if (!asset || !session) return; const response = await apiRequest<{ error?: string }>(`/api/lightboxes/${encodeURIComponent(lightboxId)}/assets`, session, { method: "POST", body: { assetId: asset.id } }); setMessage(response.status === 201 ? "Saved to your lightbox." : messageFrom(response.body, "The asset could not be saved.")); await loadLightboxes(); };
+  const createAndSave = async () => { if (!asset || !session || !newName.trim()) return; const created = await apiRequest<{ id?: string; error?: string }>("/api/lightboxes", session, { method: "POST", body: { name: newName.trim(), visibility: "private" } }); if (created.status !== 201 || !created.body?.id) { setMessage(messageFrom(created.body, "The lightbox could not be created.")); return; } setNewName(""); await save(created.body.id); };
   if (!asset) return null;
-  return <Modal animationType="slide" transparent visible onRequestClose={onClose}><View style={styles.modalBackdrop}><View style={styles.modalSheet}><View style={styles.modalHeader}><Text style={styles.modalTitle}>Asset detail</Text><Pressable onPress={onClose} style={styles.closeButton}><X color={COLORS.ink} size={20} /></Pressable></View><ScrollView showsVerticalScrollIndicator={false}><Image source={{ uri: imageFor(asset) }} style={styles.detailImage} /><Text style={styles.eyebrow}>{asset.kind === "video" ? "VIDEO" : "IMAGE"}</Text><Text style={styles.detailTitle}>{asset.title}</Text><Text style={styles.detailMeta}><MapPin color={COLORS.muted} size={14} /> {locationFor(asset)}</Text>{asset.caption || asset.description ? <Text style={styles.detailDescription}>{asset.caption || asset.description}</Text> : null}<View style={styles.detailFacts}><Fact label="Rights" value={asset.rightsStatus ?? "Pending"} /><Fact label="Verification" value={asset.humanVerified ? "Human verified" : "Editorial review"} /><Fact label="Confidence" value={`${confidenceFor(asset)}%`} /></View>{[...(asset.subjectTags ?? []), ...(asset.culturalTags ?? [])].length ? <View style={styles.tagWrap}>{[...(asset.subjectTags ?? []), ...(asset.culturalTags ?? [])].map((tag) => <Text key={tag} style={styles.tag}>{tag}</Text>)}</View> : null}{asset.sourceUrl ? <Pressable style={styles.secondaryButton} onPress={() => void Linking.openURL(asset.sourceUrl ?? "")}><ArrowUpRight color={COLORS.ink} size={16} /><Text style={styles.secondaryButtonText}>Open source</Text></Pressable> : null}</ScrollView></View></View></Modal>;
+  return <Modal animationType="slide" transparent visible onRequestClose={onClose}><View style={styles.modalBackdrop}><View style={styles.modalSheet}><View style={styles.modalHeader}><Text style={styles.modalTitle}>Asset detail</Text><Pressable accessibilityLabel="Close asset details" onPress={onClose} style={styles.closeButton}><X color={COLORS.ink} size={20} /></Pressable></View><ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}><Image source={{ uri: imageFor(asset) }} style={styles.detailImage} /><Text style={styles.eyebrow}>{asset.kind === "video" ? "VIDEO" : "IMAGE"}</Text><Text style={styles.detailTitle}>{asset.title}</Text><Text style={styles.detailMeta}><MapPin color={COLORS.muted} size={14} /> {locationFor(asset)}</Text>{asset.caption || asset.description ? <Text style={styles.detailDescription}>{asset.caption || asset.description}</Text> : null}<View style={styles.detailFacts}><Fact label="Rights" value={asset.rightsStatus ?? "Pending"} /><Fact label="Verification" value={asset.humanVerified ? "Human verified" : "Editorial review"} /><Fact label="Confidence" value={`${confidenceFor(asset)}%`} /></View>{[...(asset.subjectTags ?? []), ...(asset.culturalTags ?? [])].length ? <View style={styles.tagWrap}>{[...(asset.subjectTags ?? []), ...(asset.culturalTags ?? [])].map((tag) => <Text key={tag} style={styles.tag}>{tag}</Text>)}</View> : null}{message ? <View style={styles.notice}><CheckCircle2 color={message.includes("Saved") ? COLORS.green : COLORS.amber} size={18} /><Text style={styles.noticeText}>{message}</Text></View> : null}<Pressable style={styles.secondaryButton} onPress={() => session ? setSaveOpen((value) => !value) : Alert.alert("Sign in required", "Sign in to save assets to a private lightbox.")}><Heart color={COLORS.ink} size={16} /><Text style={styles.secondaryButtonText}>{saveOpen ? "Close lightboxes" : "Save to lightbox"}</Text></Pressable>{saveOpen && session ? <View style={styles.lightboxPanel}><Text style={styles.cardKind}>YOUR LIGHTBOXES</Text>{lightboxes.map((lightbox) => <Pressable key={lightbox.id} style={styles.lightboxRow} disabled={lightbox.assetIds.includes(asset.id)} onPress={() => void save(lightbox.id)}><View style={{ flex: 1 }}><Text style={styles.cardTitle}>{lightbox.name}</Text><Text style={styles.cardMeta}>{lightbox.assetCount} assets · {lightbox.visibility}</Text></View><Text style={styles.sectionAction}>{lightbox.assetIds.includes(asset.id) ? "Saved" : "Add"}</Text></Pressable>)}<Field label="New lightbox" value={newName} onChangeText={setNewName} placeholder="Brief, mood, or client" /><Pressable style={styles.secondaryButton} disabled={!newName.trim()} onPress={() => void createAndSave()}><Text style={styles.secondaryButtonText}>Create and save</Text></Pressable></View> : null}{asset.sourceUrl ? <Pressable style={styles.secondaryButton} onPress={() => void Linking.openURL(asset.sourceUrl ?? "")}><ArrowUpRight color={COLORS.ink} size={16} /><Text style={styles.secondaryButtonText}>Open source</Text></Pressable> : null}</ScrollView></View></View></Modal>;
 }
 
-function Field({ label, value, onChangeText, placeholder, multiline = false, ...inputProps }: { label: string; value: string; onChangeText: (value: string) => void; placeholder: string; multiline?: boolean; secureTextEntry?: boolean; autoCapitalize?: "none" | "sentences" | "words" | "characters"; keyboardType?: "default" | "email-address" }) { return <View style={styles.field}><Text style={styles.fieldLabel}>{label}</Text><TextInput value={value} onChangeText={onChangeText} placeholder={placeholder} placeholderTextColor={COLORS.muted} multiline={multiline} {...inputProps} style={[styles.textField, multiline && styles.multilineField]} /></View>; }
+function Field({ label, value, onChangeText, placeholder, multiline = false, ...inputProps }: { label: string; value: string; onChangeText: (value: string) => void; placeholder: string; multiline?: boolean; secureTextEntry?: boolean; autoCapitalize?: "none" | "sentences" | "words" | "characters"; keyboardType?: "default" | "email-address" | "url" | "phone-pad" | "number-pad" }) { return <View style={styles.field}><Text style={styles.fieldLabel}>{label}</Text><TextInput accessibilityLabel={label} value={value} onChangeText={onChangeText} placeholder={placeholder} placeholderTextColor={COLORS.muted} multiline={multiline} {...inputProps} style={[styles.textField, multiline && styles.multilineField]} /></View>; }
 function Fact({ label, value }: { label: string; value: string }) { return <View style={styles.fact}><Text style={styles.factLabel}>{label}</Text><Text style={styles.factValue} numberOfLines={1}>{value}</Text></View>; }
 function StatusRow({ label, value }: { label: string; value: string }) { return <View style={styles.statusRow}><View style={styles.statusDot} /><Text style={styles.statusLabel}>{label}</Text><Text style={styles.statusValue} numberOfLines={1}>{value}</Text></View>; }
 function SectionHeader({ title, action, onPress }: { title: string; action: string; onPress: () => void }) { return <View style={styles.sectionHeader}><Text style={styles.sectionTitle}>{title}</Text><Pressable onPress={onPress}><Text style={styles.sectionAction}>{action}</Text></Pressable></View>; }
@@ -493,7 +885,7 @@ export default function App() {
   const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
   const changeTab = (nextTab: TabKey) => { void Haptics.selectionAsync(); setTab(nextTab); };
   const openSearch = (query: string) => { setSearchQuery(query); changeTab("search"); };
-  return <SafeAreaView style={styles.app}><StatusBar style="dark" /><View style={styles.content}>{tab === "explore" ? <ExploreScreen onOpenAsset={setSelectedAsset} onSearch={openSearch} /> : tab === "search" ? <SearchScreen initialQuery={searchQuery} onOpenAsset={setSelectedAsset} /> : tab === "create" ? <CreateScreen auth={auth} /> : <StatusScreen />}</View><View style={styles.tabBar}>{tabs.map(({ key, label, icon: TabIcon }) => { const active = tab === key; return <Pressable key={key} style={styles.tabItem} onPress={() => changeTab(key)} accessibilityRole="tab" accessibilityState={{ selected: active }}><TabIcon color={active ? COLORS.green : COLORS.muted} size={21} strokeWidth={active ? 2.4 : 1.8} /><Text style={[styles.tabLabel, active && styles.tabLabelActive]}>{label}</Text></Pressable>; })}</View><AssetDetail asset={selectedAsset} onClose={() => setSelectedAsset(null)} /></SafeAreaView>;
+  return <SafeAreaView style={styles.app}><StatusBar style="dark" /><View style={styles.content}>{tab === "explore" ? <ExploreScreen onOpenAsset={setSelectedAsset} onSearch={openSearch} /> : tab === "search" ? <SearchScreen initialQuery={searchQuery} onOpenAsset={setSelectedAsset} auth={auth} /> : tab === "create" ? <CreateScreen auth={auth} /> : <MoreScreen auth={auth} onOpenAsset={setSelectedAsset} onSell={() => changeTab("create")} />}</View><View style={styles.tabBar}>{tabs.map(({ key, label, icon: TabIcon }) => { const active = tab === key; return <Pressable key={key} style={styles.tabItem} onPress={() => changeTab(key)} accessibilityRole="tab" accessibilityState={{ selected: active }}><TabIcon color={active ? COLORS.green : COLORS.muted} size={21} strokeWidth={active ? 2.4 : 1.8} /><Text style={[styles.tabLabel, active && styles.tabLabelActive]}>{label}</Text></Pressable>; })}</View><AssetDetail asset={selectedAsset} onClose={() => setSelectedAsset(null)} auth={auth} /></SafeAreaView>;
 }
 
 const styles = StyleSheet.create({
@@ -538,6 +930,7 @@ const styles = StyleSheet.create({
   searchInput: { flex: 1, color: COLORS.ink, fontSize: 15, minHeight: 52 },
   segmentRow: { flexDirection: "row", gap: 8, marginTop: 14, marginBottom: 12 },
   segment: { flex: 1, height: 40, borderRadius: 11, borderWidth: 1, borderColor: COLORS.line, backgroundColor: COLORS.surface, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6 },
+  compactSegment: { minHeight: 40, flexGrow: 1, borderRadius: 11, borderWidth: 1, borderColor: COLORS.line, backgroundColor: COLORS.surface, alignItems: "center", justifyContent: "center", paddingHorizontal: 8 },
   segmentActive: { backgroundColor: COLORS.ink, borderColor: COLORS.ink },
   segmentText: { color: COLORS.muted, fontSize: 12, fontWeight: "700" },
   segmentTextActive: { color: COLORS.surface },
@@ -565,6 +958,51 @@ const styles = StyleSheet.create({
   notice: { backgroundColor: COLORS.amberSoft, borderRadius: 12, padding: 12, flexDirection: "row", gap: 8, alignItems: "flex-start", marginBottom: 15 },
   noticeText: { color: COLORS.ink, flex: 1, fontSize: 12, lineHeight: 18 },
   accountCard: { minHeight: 64, backgroundColor: COLORS.surface, borderRadius: 14, borderWidth: 1, borderColor: COLORS.line, padding: 13, flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 17 },
+  workspaceToggle: { flexDirection: "row", backgroundColor: COLORS.line, borderRadius: 13, padding: 3, marginBottom: 18 },
+  workspaceToggleButton: { flex: 1, minHeight: 40, alignItems: "center", justifyContent: "center", borderRadius: 10 },
+  workspaceToggleActive: { backgroundColor: COLORS.ink },
+  workspaceToggleText: { color: COLORS.muted, fontSize: 12, fontWeight: "800" },
+  progressCard: { backgroundColor: COLORS.greenSoft, borderRadius: 15, padding: 15, marginBottom: 12 },
+  stepRow: { flexDirection: "row", gap: 7, marginBottom: 15 },
+  stepButton: { flex: 1, minHeight: 54, borderWidth: 1, borderColor: COLORS.line, borderRadius: 12, backgroundColor: COLORS.surface, alignItems: "center", justifyContent: "center", gap: 3 },
+  stepButtonActive: { backgroundColor: COLORS.ink, borderColor: COLORS.ink },
+  stepNumber: { color: COLORS.green, fontSize: 10, fontWeight: "900" },
+  stepText: { color: COLORS.muted, fontSize: 11, fontWeight: "800" },
+  stepTextActive: { color: COLORS.surface },
+  formCard: { backgroundColor: COLORS.surface, borderWidth: 1, borderColor: COLORS.line, borderRadius: 16, padding: 15, marginBottom: 20 },
+  checkRow: { minHeight: 48, flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 10 },
+  checkBox: { width: 24, height: 24, borderRadius: 7, borderWidth: 1, borderColor: COLORS.line, backgroundColor: COLORS.surface, alignItems: "center", justifyContent: "center" },
+  checkBoxActive: { backgroundColor: COLORS.green, borderColor: COLORS.green },
+  checkLabel: { flex: 1, color: COLORS.ink, fontSize: 12, lineHeight: 18 },
+  inlineNote: { backgroundColor: COLORS.blueSoft, borderRadius: 12, padding: 12, flexDirection: "row", alignItems: "flex-start", gap: 8, marginBottom: 12 },
+  inlineNoteText: { flex: 1, color: COLORS.blue, fontSize: 11, lineHeight: 17 },
+  turnstileFrame: { height: 100, overflow: "hidden", borderWidth: 1, borderColor: COLORS.line, borderRadius: 12, marginBottom: 12 },
+  twoColumn: { flexDirection: "row", gap: 10 },
+  column: { flex: 1 },
+  stack: { gap: 10, marginBottom: 20 },
+  listCard: { backgroundColor: COLORS.surface, borderWidth: 1, borderColor: COLORS.line, borderRadius: 14, padding: 14 },
+  featureCard: { backgroundColor: COLORS.greenSoft, borderRadius: 14, padding: 14 },
+  navigationCard: { minHeight: 82, backgroundColor: COLORS.surface, borderWidth: 1, borderColor: COLORS.line, borderRadius: 15, padding: 12, flexDirection: "row", alignItems: "center", gap: 11 },
+  navigationIcon: { width: 42, height: 42, borderRadius: 13, backgroundColor: COLORS.greenSoft, alignItems: "center", justifyContent: "center" },
+  navigationCopy: { flex: 1 },
+  creatorAvatar: { width: 46, height: 46, borderRadius: 23, backgroundColor: COLORS.ink, alignItems: "center", justifyContent: "center" },
+  creatorAvatarText: { color: COLORS.surface, fontSize: 18, fontWeight: "900" },
+  bodyText: { color: COLORS.ink, fontSize: 14, lineHeight: 21, marginBottom: 15 },
+  statGrid: { flexDirection: "row", gap: 8, marginBottom: 16 },
+  metricGrid: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", marginBottom: 20 },
+  metricCard: { width: "48.5%", backgroundColor: COLORS.surface, borderWidth: 1, borderColor: COLORS.line, borderRadius: 14, padding: 14, marginBottom: 10 },
+  metricValue: { color: COLORS.ink, fontSize: 23, fontWeight: "900", marginTop: 8 },
+  dangerButton: { minHeight: 46, borderWidth: 1, borderColor: "#B6614C", borderRadius: 12, alignItems: "center", justifyContent: "center", marginBottom: 10 },
+  dangerButtonText: { color: "#8A3D2B", fontSize: 13, fontWeight: "800" },
+  libraryRow: { gap: 10, paddingBottom: 16 },
+  libraryItem: { width: 150, backgroundColor: COLORS.surface, borderWidth: 1, borderColor: COLORS.line, borderRadius: 14, padding: 9 },
+  libraryItemActive: { borderColor: COLORS.green, borderWidth: 2 },
+  libraryThumb: { width: "100%", height: 90, borderRadius: 10, backgroundColor: COLORS.blueSoft },
+  lightboxPanel: { backgroundColor: COLORS.greenSoft, borderRadius: 14, padding: 13, marginBottom: 12 },
+  lightboxRow: { minHeight: 58, flexDirection: "row", alignItems: "center", borderBottomWidth: 1, borderBottomColor: COLORS.line },
+  actionRow: { flexDirection: "row", flexWrap: "wrap", gap: 7, marginTop: 12 },
+  smallAction: { minHeight: 38, borderWidth: 1, borderColor: COLORS.line, borderRadius: 10, paddingHorizontal: 10, alignItems: "center", justifyContent: "center", backgroundColor: COLORS.paper },
+  smallActionText: { color: COLORS.ink, fontSize: 10, fontWeight: "800", textTransform: "capitalize" },
   statusHero: { backgroundColor: COLORS.greenSoft, borderRadius: 16, padding: 15, flexDirection: "row", alignItems: "center", gap: 11, marginTop: 19, marginBottom: 15 },
   statusIcon: { width: 46, height: 46, borderRadius: 14, backgroundColor: COLORS.surface, alignItems: "center", justifyContent: "center" },
   statusList: { backgroundColor: COLORS.surface, borderRadius: 15, borderWidth: 1, borderColor: COLORS.line, paddingHorizontal: 15, marginBottom: 15 },

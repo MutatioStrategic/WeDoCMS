@@ -94,6 +94,8 @@ configured, and payment success is never inferred from the browser redirect.
 
 ## Contributor to publication
 
+The native Expo route begins with seller account creation and email confirmation. The confirmation returns through `veldarchive://auth/confirmed`; the verified identity is exchanged for a short-lived Veld API session and a new seller account is provisioned as a contributor. Existing memberships are never upgraded from a client-provided seller intent.
+
 ```mermaid
 sequenceDiagram
   participant C as Contributor
@@ -117,6 +119,8 @@ sequenceDiagram
   API-->>UI: Published; index current or pending
   C->>UI: Check contributor insights
 ```
+
+On mobile, the seller tender is split into three recoverable steps: contributor profile, individual/company identity verification, then signed contract and payout setup. Company verification uses CIPC before the hosted Didit session. Contract submission uses a transient Turnstile token and Firma reference; payout stores only the provider account reference and optional last-four values. When any provider is unavailable, the completed data remains stored, the failed step explains what happened, and the user can retry without creating a duplicate identity or contract implicitly.
 
 ## Top-admin approval ledger
 

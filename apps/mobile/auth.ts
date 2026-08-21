@@ -2,7 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { createClient, processLock, type Session } from "@supabase/supabase-js";
 import * as SecureStore from "expo-secure-store";
 import { useCallback, useEffect, useState } from "react";
-import { AppState, Platform } from "react-native";
+import { AppState, Linking, Platform } from "react-native";
 import "react-native-url-polyfill/auto";
 
 declare const process: {
@@ -33,6 +33,7 @@ type StoredSession = Pick<MobileApiSession, "sessionToken" | "csrfToken" | "expi
 type ExchangeResponse = Partial<MobileApiSession> & { authenticated?: boolean; error?: string };
 
 const SESSION_STORAGE_KEY = "veld.mobile.api-session.v1";
+const ACCOUNT_INTENT_STORAGE_KEY = "veld.mobile.account-intent.v1";
 const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL?.trim() ?? "";
 const supabasePublishableKey = (process.env.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY)?.trim() ?? "";
 
@@ -88,7 +89,26 @@ export function mobileSessionHeaders(session: MobileApiSession): Record<string, 
   };
 }
 
-async function exchangeSupabaseSession(apiBaseUrl: string, identitySession: Session): Promise<MobileApiSession> {
+type AccountIntent = "seller";
+
+async function persistAccountIntent(intent: AccountIntent | null): Promise<void> {
+  if (Platform.OS === "web") {
+    if (intent) globalThis.localStorage?.setItem(ACCOUNT_INTENT_STORAGE_KEY, intent);
+    else globalThis.localStorage?.removeItem(ACCOUNT_INTENT_STORAGE_KEY);
+    return;
+  }
+  if (intent) await AsyncStorage.setItem(ACCOUNT_INTENT_STORAGE_KEY, intent);
+  else await AsyncStorage.removeItem(ACCOUNT_INTENT_STORAGE_KEY);
+}
+
+async function readAccountIntent(): Promise<AccountIntent | undefined> {
+  const value = Platform.OS === "web"
+    ? globalThis.localStorage?.getItem(ACCOUNT_INTENT_STORAGE_KEY)
+    : await AsyncStorage.getItem(ACCOUNT_INTENT_STORAGE_KEY);
+  return value === "seller" ? value : undefined;
+}
+
+async function exchangeSupabaseSession(apiBaseUrl: string, identitySession: Session, accountIntent?: AccountIntent): Promise<MobileApiSession> {
   const response = await fetch(`${apiBaseUrl}/api/auth/exchange`, {
     method: "POST",
     headers: {
@@ -96,7 +116,7 @@ async function exchangeSupabaseSession(apiBaseUrl: string, identitySession: Sess
       Authorization: `Bearer ${identitySession.access_token}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ sessionTransport: "bearer" }),
+    body: JSON.stringify({ sessionTransport: "bearer", ...(accountIntent ? { accountIntent } : {}) }),
   });
   const body = await response.json().catch(() => null) as ExchangeResponse | null;
   if (!response.ok || !body?.authenticated || !body.sessionToken || !body.csrfToken || !body.expiresAt || !body.user) {
@@ -104,6 +124,7 @@ async function exchangeSupabaseSession(apiBaseUrl: string, identitySession: Sess
   }
   const session = body as MobileApiSession;
   await persistSession(session);
+  await persistAccountIntent(null);
   return session;
 }
 
@@ -126,8 +147,8 @@ export function useMobileAuth(apiBaseUrl: string) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const adoptIdentitySession = useCallback(async (identitySession: Session) => {
-    const next = await exchangeSupabaseSession(apiBaseUrl, identitySession);
+  const adoptIdentitySession = useCallback(async (identitySession: Session, accountIntent?: AccountIntent) => {
+    const next = await exchangeSupabaseSession(apiBaseUrl, identitySession, accountIntent);
     setSession(next);
     setError(null);
     return next;
@@ -144,7 +165,7 @@ export function useMobileAuth(apiBaseUrl: string) {
         }
         const identitySession = (await supabase?.auth.getSession())?.data.session;
         if (identitySession) {
-          const next = await exchangeSupabaseSession(apiBaseUrl, identitySession);
+          const next = await exchangeSupabaseSession(apiBaseUrl, identitySession, await readAccountIntent());
           if (active) setSession(next);
         }
       } catch (restoreError) {
@@ -174,14 +195,46 @@ export function useMobileAuth(apiBaseUrl: string) {
       else supabase.auth.stopAutoRefresh();
     });
 
+    const handleAuthLink = async (url: string | null) => {
+      if (!url || !supabase || !url.startsWith("veldarchive://auth/confirmed")) return;
+      try {
+        const normalized = url.replace("#", "?");
+        const parameters = new URL(normalized).searchParams;
+        const code = parameters.get("code");
+        let identitySession: Session | null = null;
+        if (code) {
+          const result = await supabase.auth.exchangeCodeForSession(code);
+          if (result.error) throw result.error;
+          identitySession = result.data.session;
+        } else {
+          const accessToken = parameters.get("access_token");
+          const refreshToken = parameters.get("refresh_token");
+          if (accessToken && refreshToken) {
+            const result = await supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
+            if (result.error) throw result.error;
+            identitySession = result.data.session;
+          }
+        }
+        if (identitySession) {
+          const next = await exchangeSupabaseSession(apiBaseUrl, identitySession, await readAccountIntent());
+          if (active) { setSession(next); setError(null); }
+        }
+      } catch (linkError) {
+        if (active) setError(linkError instanceof Error ? linkError.message : "Email confirmation could not be completed.");
+      }
+    };
+    void Linking.getInitialURL().then(handleAuthLink);
+    const linkSubscription = Linking.addEventListener("url", ({ url }) => { void handleAuthLink(url); });
+
     return () => {
       active = false;
       authSubscription?.unsubscribe();
       appStateSubscription?.remove();
+      linkSubscription.remove();
     };
   }, [apiBaseUrl]);
 
-  const signIn = useCallback(async (email: string, password: string) => {
+  const signIn = useCallback(async (email: string, password: string, accountIntent?: AccountIntent) => {
     if (!supabase) throw new Error("Supabase authentication is not configured for this build.");
     setLoading(true);
     setError(null);
@@ -189,9 +242,39 @@ export function useMobileAuth(apiBaseUrl: string) {
       const result = await supabase.auth.signInWithPassword({ email: email.trim(), password });
       if (result.error) throw result.error;
       if (!result.data.session) throw new Error("Confirm your email before signing in.");
-      return await adoptIdentitySession(result.data.session);
+      return await adoptIdentitySession(result.data.session, accountIntent);
     } catch (signInError) {
       const message = signInError instanceof Error ? signInError.message : "Sign-in failed.";
+      setError(message);
+      throw new Error(message);
+    } finally {
+      setLoading(false);
+    }
+  }, [adoptIdentitySession]);
+
+  const signUp = useCallback(async (email: string, password: string, displayName: string, accountIntent: AccountIntent = "seller") => {
+    if (!supabase) throw new Error("Supabase authentication is not configured for this build.");
+    setLoading(true);
+    setError(null);
+    await persistAccountIntent(accountIntent);
+    try {
+      const result = await supabase.auth.signUp({
+        email: email.trim(),
+        password,
+        options: {
+          emailRedirectTo: "veldarchive://auth/confirmed",
+          data: { display_name: displayName.trim() || email.trim().split("@")[0] },
+        },
+      });
+      if (result.error) throw result.error;
+      if (result.data.session) {
+        await adoptIdentitySession(result.data.session, accountIntent);
+        return { confirmationRequired: false };
+      }
+      return { confirmationRequired: true };
+    } catch (signUpError) {
+      await persistAccountIntent(null);
+      const message = signUpError instanceof Error ? signUpError.message : "Account creation failed.";
       setError(message);
       throw new Error(message);
     } finally {
@@ -218,5 +301,5 @@ export function useMobileAuth(apiBaseUrl: string) {
     }
   }, [apiBaseUrl, session]);
 
-  return { configured: mobileAuthConfigured, error, loading, session, signIn, signOut };
+  return { configured: mobileAuthConfigured, error, loading, session, signIn, signOut, signUp };
 }
