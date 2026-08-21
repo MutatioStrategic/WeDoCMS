@@ -83,6 +83,7 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
   const [supabaseEmail, setSupabaseEmail] = useState("");
   const [supabasePassword, setSupabasePassword] = useState("");
   const [supabaseAuthBusy, setSupabaseAuthBusy] = useState(false);
+  const [supabaseAuthMessage, setSupabaseAuthMessage] = useState<{ tone: "success" | "error"; text: string } | null>(null);
   const authExchangeAttempted = React.useRef(false);
   const supabaseExchangeAttempted = React.useRef(false);
 
@@ -140,9 +141,11 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
       setCsrfToken(data.csrfToken);
       setSupabaseAuthOpen(false);
       setSupabasePassword("");
+      setSupabaseAuthMessage(null);
       setNotice(`Signed in to ${data.user.organizationName} with Supabase.`);
     } catch {
       supabaseExchangeAttempted.current = false;
+      setSupabaseAuthMessage({ tone: "error", text: "Supabase accepted the sign-in, but Veld could not connect this account to an organisation. Ask an administrator to provision it." });
       setNotice("Supabase sign-in succeeded, but this account is not connected to a provisioned organisation.");
     }
   }, []);
@@ -159,15 +162,23 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
     event.preventDefault();
     if (!supabase) return;
     setSupabaseAuthBusy(true);
+    setSupabaseAuthMessage(null);
     try {
       const result = supabaseAuthMode === "signup"
         ? await supabase.auth.signUp({ email: supabaseEmail.trim(), password: supabasePassword, options: { emailRedirectTo: window.location.origin, data: { display_name: supabaseEmail.trim().split("@")[0] } } })
         : await supabase.auth.signInWithPassword({ email: supabaseEmail.trim(), password: supabasePassword });
       if (result.error) throw result.error;
       if (result.data.session) await exchangeSupabaseSession(result.data.session);
-      else setNotice("Check your email to confirm the Supabase account, then sign in here.");
+      else {
+        setSupabaseAuthMode("signin");
+        setSupabasePassword("");
+        setSupabaseAuthMessage({ tone: "success", text: "Account created. Check your email to confirm it, then sign in below." });
+        setNotice("Account created. Check your email to confirm it, then sign in.");
+      }
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Supabase authentication failed.");
+      const message = error instanceof Error ? error.message : "Supabase authentication failed.";
+      setSupabaseAuthMessage({ tone: "error", text: message });
+      setNotice(message);
     } finally {
       setSupabaseAuthBusy(false);
     }
@@ -354,7 +365,7 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
         {sessionUser && <><button className="ghost-button" onClick={() => navigate("account")}>Account</button><button className="ghost-button" onClick={() => { void api("/api/auth/logout", { method: "POST" }).then(() => { setSessionUser(null); setCsrfToken(""); setNotice("Signed out."); if (auth0) auth0.logout({ logoutParams: { returnTo: window.location.origin } }); if (supabase) void supabase.auth.signOut(); }); }}>Sign out</button></>}
       </div>
     </header>
-    {supabase && supabaseAuthOpen && !sessionUser && <section className="auth-panel" aria-label="Supabase authentication"><div><span className="section-kicker">SUPABASE AUTH</span><h2>{supabaseAuthMode === "signup" ? "Create your archive account." : "Welcome back."}</h2><p>Email/password authentication is handled by Supabase; Veld receives only the verified access token.</p></div><form onSubmit={(event) => void submitSupabaseAuth(event)}><label>Email<input type="email" autoComplete="email" required value={supabaseEmail} onChange={(event) => setSupabaseEmail(event.target.value)} /></label><label>Password<input type="password" autoComplete={supabaseAuthMode === "signup" ? "new-password" : "current-password"} minLength={8} required value={supabasePassword} onChange={(event) => setSupabasePassword(event.target.value)} /></label><div className="modal-actions"><button type="submit" className="dark-button" disabled={supabaseAuthBusy}>{supabaseAuthBusy ? "Working…" : supabaseAuthMode === "signup" ? "Create account" : "Sign in"}</button><button type="button" className="ghost-button" onClick={() => setSupabaseAuthMode((mode) => mode === "signup" ? "signin" : "signup")}>{supabaseAuthMode === "signup" ? "Use existing account" : "Create an account"}</button><button type="button" className="ghost-button" onClick={() => setSupabaseAuthOpen(false)}>Close</button></div></form></section>}
+    {supabase && supabaseAuthOpen && !sessionUser && <section className="auth-panel" aria-label="Supabase authentication"><div><span className="section-kicker">SUPABASE AUTH</span><h2>{supabaseAuthMode === "signup" ? "Create your archive account." : "Welcome back."}</h2><p>Email/password authentication is handled by Supabase; Veld receives only the verified access token.</p></div><form onSubmit={(event) => void submitSupabaseAuth(event)}>{supabaseAuthMessage && <p className={`auth-feedback ${supabaseAuthMessage.tone}`} role={supabaseAuthMessage.tone === "error" ? "alert" : "status"} aria-live="polite">{supabaseAuthMessage.text}</p>}<label>Email<input type="email" autoComplete="email" required value={supabaseEmail} onChange={(event) => setSupabaseEmail(event.target.value)} /></label><label>Password<input type="password" autoComplete={supabaseAuthMode === "signup" ? "new-password" : "current-password"} minLength={8} required value={supabasePassword} onChange={(event) => setSupabasePassword(event.target.value)} /></label><div className="modal-actions"><button type="submit" className="dark-button" disabled={supabaseAuthBusy}>{supabaseAuthBusy ? "Working…" : supabaseAuthMode === "signup" ? "Create account" : "Sign in"}</button><button type="button" className="ghost-button" onClick={() => { setSupabaseAuthMode((mode) => mode === "signup" ? "signin" : "signup"); setSupabasePassword(""); setSupabaseAuthMessage(null); }}>{supabaseAuthMode === "signup" ? "Use existing account" : "Create an account"}</button><button type="button" className="ghost-button" onClick={() => setSupabaseAuthOpen(false)}>Close</button></div></form></section>}
     {sessionUser && <details className="notification-center"><summary>Alerts {notifications.some((item) => !item.read_at) && <span>{notifications.filter((item) => !item.read_at).length}</span>}</summary><div><strong>In-app alerts</strong>{notifications.length ? notifications.slice(0, 8).map((item) => <article className={item.read_at ? "read" : ""} key={item.id}><h3>{item.title}</h3><p>{item.body}</p><small>{new Date(item.created_at).toLocaleDateString("en-ZA")}</small>{!item.read_at && <button type="button" onClick={() => void markNotificationRead(item.id)}>Mark read</button>}</article>) : <p>No alerts yet. Saved-search matches will appear here.</p>}</div></details>}
     {!analyticsConsent && <button className="privacy-consent" onClick={() => setAnalyticsConsent(true)}>Allow anonymous demand insights</button>}
 

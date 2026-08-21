@@ -88,6 +88,24 @@ npx playwright install chromium
 npm run test:a11y
 ```
 
+### Desktop Postman/Newman sweep
+
+The checked-in `npm run test:postman` collection exercises the production API,
+Supabase signup and identity-exchange boundaries, and the main desktop web
+shell. It discovers every `/api` route from the Worker source and loads desktop
+Vite values from the root `.env.local` (`VITE_SUPABASE_URL` and
+`VITE_SUPABASE_PUBLISHABLE_KEY`), with the mobile environment as a fallback.
+Publishable keys are used only in memory and are never printed.
+
+```powershell
+$env:POSTMAN_DESKTOP_URL = "https://veld-archive.pages.dev"
+$env:POSTMAN_BASE_URL = "https://veld-archive-api.blewisorlando.workers.dev"
+npm run test:postman
+```
+
+Use `POSTMAN_SKIP_SUPABASE=true` when the Supabase signup rate limit is active;
+the desktop shell and all API routes remain covered.
+
 Apply subsequent migrations in order as well; `0004_explainability_safety.sql` adds persisted metadata provenance and review status. Validate the chain with `npx wrangler d1 migrations list veld-archive --local`.
 
 ## Cloudflare setup
@@ -97,18 +115,16 @@ Apply subsequent migrations in order as well; `0004_explainability_safety.sql` a
 3. Create `veld-archive-audit-za` and `veld-archive-kyc-za` under the approved South African residency policy. Create `veld-archive-audit-eu` and `veld-archive-kyc-eu` with the `eu` R2 jurisdiction for EU subjects. R2 jurisdiction is immutable after bucket creation; confirm the account's data-location controls before production.
 4. Generate an Ed25519 signing keypair and store the private/public JWKs as Worker secrets: `wrangler secret put AUDIT_SIGNING_PRIVATE_JWK`, `wrangler secret put AUDIT_SIGNING_PUBLIC_JWK`, and `wrangler secret put KYC_WEBHOOK_SECRET`.
 5. For seller onboarding, create one Didit KYC workflow (individual/sole proprietor) and one KYB workflow (registered company), configure phone/email, ID/passport, liveness and any risk checks required by your payment/legal classification, then store `DIDIT_API_KEY`, `DIDIT_WEBHOOK_SECRET`, `DIDIT_KYC_WORKFLOW_ID`, and `DIDIT_KYB_WORKFLOW_ID`. Register `POST /api/webhooks/didit` as the Didit webhook destination. Didit returns a hosted URL; the Worker stores only the session ID, status, and provider reference.
-5. Create a Turnstile widget for the development and production hostnames.
-6. Store the Turnstile secret with `wrangler secret put TURNSTILE_SECRET`.
-7. Replace the development `TURNSTILE_HOSTNAMES` value for production.
-8. For browser-direct R2 uploads, configure `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, and `R2_SECRET_ACCESS_KEY` as Worker secrets/vars according to your deployment policy. The API then issues a short-lived presigned PUT URL.
-9. Provision the DR buckets and R2 event queue with `./scripts/provision-dr.ps1`.
-10. Configure `STREAM_WEBHOOK_SECRET` and `CHAOS_TEST_TOKEN` as Worker secrets.
-11. Configure the KYC provider to POST only signed, metadata-only decisions to `/api/webhooks/kyc`; never send raw identity documents through the audit endpoint. The webhook uses HMAC-SHA256 in `x-kyc-signature`.
-12. Create the photo Vectorize index with the same embedding preset used by the Worker: `wrangler vectorize create veld-archive-photo-index --preset @cf/baai/bge-base-en-v1.5`. The committed config already binds it as `PHOTO_INDEX`.
-13. Create the queues before deployment: `wrangler queues create veld-archive-photo-enrichment` and `wrangler queues create veld-archive-photo-enrichment-dlq`. The committed config binds the producer and consumer.
-14. The committed production config sends image-to-text enrichment to the authenticated local Qwen model through `veld-vision.mutatiostrategic.io`; `REMOTE_VISION_TOKEN` remains a Worker secret. Workers AI is retained for `PHOTO_EMBEDDING_MODEL`, which must remain dimension-compatible with Vectorize. Missing vision, embedding, or tunnel connectivity is treated as a retryable job failure, not a buyer-search scan.
-15. Keep verification-document OCR disabled until intentionally enabled. Set `OCR_ENABLED=true` only for the intended environment. The admin-only endpoint is `POST /api/verification/documents/:documentId/ocr`; it verifies the registered SHA-256 before inference and never changes the KYC case decision.
-16. Apply `0006_photo_ai_search.sql`, then run `npm run build` before `npm run worker:deploy`.
+5. Turnstile is optional until high-risk seller, rights, or upload actions are enabled. When those actions are enabled, create separate widgets for the development and production hostnames, store the server secret with `wrangler secret put TURNSTILE_SECRET`, and replace the development `TURNSTILE_HOSTNAMES` value for production.
+6. For browser-direct R2 uploads, configure `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, and `R2_SECRET_ACCESS_KEY` as Worker secrets/vars according to your deployment policy. The API then issues a short-lived presigned PUT URL.
+7. Provision the DR buckets and R2 event queue with `./scripts/provision-dr.ps1`.
+8. Configure `STREAM_WEBHOOK_SECRET` and `CHAOS_TEST_TOKEN` as Worker secrets.
+9. Configure the KYC provider to POST only signed, metadata-only decisions to `/api/webhooks/kyc`; never send raw identity documents through the audit endpoint. The webhook uses HMAC-SHA256 in `x-kyc-signature`.
+10. Create the photo Vectorize index with the same embedding preset used by the Worker: `wrangler vectorize create veld-archive-photo-index --preset @cf/baai/bge-base-en-v1.5`. The committed config already binds it as `PHOTO_INDEX`.
+11. Create the queues before deployment: `wrangler queues create veld-archive-photo-enrichment` and `wrangler queues create veld-archive-photo-enrichment-dlq`. The committed config binds the producer and consumer.
+12. The committed production config sends image-to-text enrichment to the authenticated local Qwen model through `veld-vision.mutatiostrategic.io`; `REMOTE_VISION_TOKEN` remains a Worker secret. Workers AI is retained for `PHOTO_EMBEDDING_MODEL`, which must remain dimension-compatible with Vectorize. Missing vision, embedding, or tunnel connectivity is treated as a retryable job failure, not a buyer-search scan.
+13. Keep verification-document OCR disabled until intentionally enabled. Set `OCR_ENABLED=true` only for the intended environment. The admin-only endpoint is `POST /api/verification/documents/:documentId/ocr`; it verifies the registered SHA-256 before inference and never changes the KYC case decision.
+14. Apply `0006_photo_ai_search.sql`, then run `npm run build` before `npm run worker:deploy`.
 
 ## Audit endpoints
 

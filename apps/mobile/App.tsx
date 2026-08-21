@@ -910,7 +910,7 @@ const styles = StyleSheet.create({
   heroMark: { width: 78, alignItems: "center", justifyContent: "center", opacity: 0.8 },
   sectionHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 12 },
   sectionTitle: { color: COLORS.ink, fontSize: 18, fontWeight: "800" },
-  sectionAction: { color: COLORS.green, fontSize: 12, fontWeight: "800" },
+  sectionAction: { color: COLORS.green, fontSize: 14, fontWeight: "800", minHeight: 46, paddingHorizontal: 14, paddingVertical: 11, borderWidth: 1, borderColor: COLORS.green, borderRadius: 13, backgroundColor: COLORS.greenSoft, marginBottom: 12 },
   chipRow: { gap: 9, paddingBottom: 24 },
   trendChip: { height: 36, borderRadius: 18, backgroundColor: COLORS.surface, borderWidth: 1, borderColor: COLORS.line, paddingHorizontal: 13, flexDirection: "row", alignItems: "center", gap: 6 },
   trendText: { color: COLORS.ink, fontSize: 12, fontWeight: "700" },

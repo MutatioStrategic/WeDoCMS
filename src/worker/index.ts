@@ -117,10 +117,13 @@ type SecretBindings = {
   KYC_PROVIDER?: string;
   KYC_WEBHOOK_SECRET?: string;
   DIDIT_API_KEY?: string;
+  DIDIT_API_SECRET?: string;
   DIDIT_WEBHOOK_SECRET?: string;
+  DIDIT_SIGNING_SECRET?: string;
   DIDIT_KYC_WORKFLOW_ID?: string;
   DIDIT_KYB_WORKFLOW_ID?: string;
   DIDIT_API_URL?: string;
+  DIDIT_URL?: string;
   CIPC_LOOKUP_URL?: string;
   CIPC_API_TOKEN?: string;
   APP_PUBLIC_URL?: string;
@@ -200,6 +203,10 @@ type Bindings = Omit<Cloudflare.Env, "AI" | "PAYMENT_PROVIDER"> & AuditBindings 
 
 type Variables = { trace: TraceContext };
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+
+const diditApiKey = (env: Pick<Bindings, "DIDIT_API_KEY" | "DIDIT_API_SECRET">): string | undefined => env.DIDIT_API_KEY?.trim() || env.DIDIT_API_SECRET?.trim();
+const diditWebhookSecret = (env: Pick<Bindings, "DIDIT_WEBHOOK_SECRET" | "DIDIT_SIGNING_SECRET">): string | undefined => env.DIDIT_WEBHOOK_SECRET?.trim() || env.DIDIT_SIGNING_SECRET?.trim();
+const diditApiUrl = (env: Pick<Bindings, "DIDIT_API_URL" | "DIDIT_URL">): string | undefined => env.DIDIT_API_URL?.trim() || env.DIDIT_URL?.trim();
 
 const photoPipeline = (env: Bindings): PhotoPipelineBindings => env;
 
@@ -3208,11 +3215,12 @@ async function verifyKycWebhook(secret: string, signature: string, body: string)
 }
 
 app.post("/api/webhooks/didit", async (c) => {
-  if (!c.env.DIDIT_WEBHOOK_SECRET) return c.json({ error: "Didit webhook secret is not configured" }, 503);
+  const webhookSecret = diditWebhookSecret(c.env);
+  if (!webhookSecret) return c.json({ error: "Didit webhook secret is not configured" }, 503);
   const rawBody = await c.req.text();
   let payload: Record<string, unknown>;
   try { payload = JSON.parse(rawBody) as Record<string, unknown>; } catch { return c.json({ error: "Invalid Didit webhook JSON" }, 400); }
-  const verified = await verifyDiditWebhook({ secret: c.env.DIDIT_WEBHOOK_SECRET, rawBody, payload, signatureV2: c.req.header("x-signature-v2"), signature: c.req.header("x-signature"), timestamp: c.req.header("x-timestamp") });
+  const verified = await verifyDiditWebhook({ secret: webhookSecret, rawBody, payload, signatureV2: c.req.header("x-signature-v2"), signature: c.req.header("x-signature"), timestamp: c.req.header("x-timestamp") });
   if (!verified) return c.json({ error: "Invalid or stale Didit webhook signature" }, 401);
   const sessionId = typeof payload.session_id === "string" ? payload.session_id : "";
   const status = typeof payload.status === "string" ? payload.status : "";
@@ -3496,10 +3504,19 @@ app.get("/api/licence-products", async (c) => {
 });
 
 app.post("/api/search/visual", async (c) => {
+  const requestContentType = c.req.raw.headers.get("content-type")?.toLowerCase() ?? "";
+  if (!requestContentType.startsWith("multipart/form-data")) {
+    return new Response(JSON.stringify({ error: "Upload an image file in the image field" }), { status: 400, headers: { "Content-Type": "application/json" } });
+  }
   if (!c.env.AI || !c.env.PHOTO_INDEX) return c.json({ error: "Visual search is not configured", code: "visual_search_unavailable" }, 503);
   const contentLength = Number(c.req.header("content-length") ?? 0);
   if (contentLength > 12 * 1024 * 1024) return c.json({ error: "Visual search images must be 10 MB or smaller" }, 413);
-  const form = await c.req.raw.formData();
+  let form: FormData;
+  try {
+    form = await c.req.raw.formData();
+  } catch {
+    return c.json({ error: "Upload an image file in the image field" }, 400);
+  }
   const file = form.get("image");
   if (!(file instanceof File) || !file.type.startsWith("image/")) return c.json({ error: "Upload an image file in the image field" }, 400);
   if (file.size > 10 * 1024 * 1024) return c.json({ error: "Visual search images must be 10 MB or smaller" }, 413);
@@ -3670,7 +3687,7 @@ async function launchReadiness(env: Bindings): Promise<Record<string, unknown>> 
     { id: "email_sender", ready: Boolean(env.EMAIL && env.EMAIL_FROM?.trim()), action: "Verify the transactional email sender and binding." },
     { id: "turnstile", ready: Boolean(env.TURNSTILE_SECRET?.trim() && env.TURNSTILE_HOSTNAMES?.trim()), action: "Provision Turnstile and configure its secret and hostname allowlist." },
     { id: "firma", ready: Boolean(env.FIRMA_VERIFY_URL?.trim() && env.FIRMA_API_TOKEN?.trim()), action: "Configure the Firma verification endpoint and API token." },
-    { id: "didit", ready: Boolean(env.DIDIT_API_KEY?.trim() && env.DIDIT_WEBHOOK_SECRET?.trim() && env.DIDIT_KYC_WORKFLOW_ID?.trim() && env.DIDIT_KYB_WORKFLOW_ID?.trim()), action: "Configure Didit API, webhook, KYC, and KYB credentials." },
+    { id: "didit", ready: Boolean(diditApiKey(env) && diditWebhookSecret(env) && env.DIDIT_KYC_WORKFLOW_ID?.trim() && env.DIDIT_KYB_WORKFLOW_ID?.trim()), action: "Configure Didit API, webhook, KYC, and KYB credentials." },
     { id: "cipc", ready: Boolean(env.CIPC_LOOKUP_URL?.trim() && env.CIPC_API_TOKEN?.trim()), action: "Configure the CIPC verification adapter." },
     { id: "payments", ready: paymentProviderConfigured(env) && subscription.configured, action: "Configure Paystack checkout, signed webhooks, and the recurring plan." },
     { id: "marketplace_terms", ready: String(env.MARKETPLACE_TERMS_APPROVED) === "true", action: "Obtain legal approval for the versioned seller, buyer, and split terms, then attest MARKETPLACE_TERMS_APPROVED=true." },

@@ -866,6 +866,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .notification-center article small { color: #92978e; font: 8px 'DM Mono', monospace; }.notification-center article button { float: right; border: 0; color: #7a3524; background: transparent; font: 8px 'DM Mono', monospace; }
 .auth-panel { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 420px); gap: 24px; margin: 18px auto 0; width: min(1120px, calc(100% - 40px)); border: 1px solid #d7d4ca; padding: 22px; background: #fffdf9; box-shadow: 0 18px 45px rgba(23,32,25,.12); }
 .auth-panel h2 { margin: 6px 0; }.auth-panel p { color: #697168; font-size: 12px; line-height: 1.5; }.auth-panel form { display: grid; gap: 10px; }.auth-panel label { display: grid; gap: 5px; color: #697168; font: 9px 'DM Mono', monospace; text-transform: uppercase; }.auth-panel input { border: 1px solid #d7d4ca; padding: 10px; color: #29352c; background: #fff; font: 13px inherit; }.auth-panel .modal-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.auth-panel .auth-feedback { margin: 0; padding: 10px 12px; border-left: 3px solid #5f8157; color: #405343; background: #eef4ea; font-size: 12px; line-height: 1.45; }
+.auth-panel .auth-feedback.error { border-left-color: #9a4834; color: #7a3524; background: #fbefea; }
 @media (max-width: 760px) { .auth-panel { grid-template-columns: 1fr; width: calc(100% - 24px); } }
 .app-shell .toolbar-select, .app-shell .trending-searches > strong { color: #34443a !important; }
 .app-shell .asset-visual .media-unavailable span { color: #172019 !important; }
