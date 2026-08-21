@@ -17,7 +17,10 @@
     "not_found_handling": "single-page-application"
   },
   "send_email": [
-    { "name": "EMAIL" }
+    {
+      "name": "EMAIL",
+      "allowed_sender_addresses": ["noreply@veld.mutatiostrategic.io"]
+    }
   ],
   "ai": {
     "binding": "AI"
@@ -184,10 +187,13 @@
       "compatibility_date": "2026-08-13",
       "compatibility_flags": ["nodejs_compat"],
       "secrets": {
-        "required": ["R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "REMOTE_VISION_TOKEN", "SESSION_SECRET", "DIDIT_API_KEY", "DIDIT_SIGNING_SECRET", "PAYMENT_TOKEN", "PAYMENT_WEBHOOK_SECRET"]
+        "required": ["R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "REMOTE_VISION_TOKEN", "SESSION_SECRET", "DIDIT_API_KEY", "DIDIT_SIGNING_SECRET", "PAYMENT_TOKEN", "PAYMENT_WEBHOOK_SECRET", "EMAIL_FROM", "EMAIL_FROM_NAME"]
       },
       "send_email": [
-        { "name": "EMAIL" }
+        {
+          "name": "EMAIL",
+          "allowed_sender_addresses": ["noreply@veld.mutatiostrategic.io"]
+        }
       ],
       "observability": {
         "enabled": true,

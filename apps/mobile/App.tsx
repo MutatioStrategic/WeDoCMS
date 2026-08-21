@@ -380,19 +380,43 @@ function TurnstileChallenge({ onToken }: { onToken: (token: string) => void }) {
 }
 
 function SellerAccess({ auth }: { auth: MobileAuth }) {
-  const [mode, setMode] = useState<"signin" | "signup">("signup");
+  const [mode, setMode] = useState<"signin" | "signup" | "forgot" | "reset">(() => auth.passwordRecovery ? "reset" : "signup");
   const [method, setMethod] = useState<"email" | "phone">("email");
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [passwordConfirmation, setPasswordConfirmation] = useState("");
   const [phone, setPhone] = useState("");
   const [phoneCode, setPhoneCode] = useState("");
   const [phoneCodeSent, setPhoneCodeSent] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (auth.passwordRecovery) {
+      setMode("reset");
+      setMessage("Choose a new password for your archive account.");
+    }
+  }, [auth.passwordRecovery]);
+
   const submit = async () => {
     setMessage(null);
     try {
+      if (mode === "forgot") {
+        if (!email.trim()) throw new Error("Enter the email address for your archive account.");
+        await auth.requestPasswordReset(email);
+        setMode("signin");
+        setMessage("If an account uses that email, we sent a password reset link. Check your inbox and spam folder.");
+        return;
+      }
+      if (mode === "reset") {
+        if (password !== passwordConfirmation) throw new Error("Passwords do not match.");
+        await auth.updatePassword(password);
+        setPassword("");
+        setPasswordConfirmation("");
+        setMode("signin");
+        setMessage("Your password has been updated. Sign in with your new password.");
+        return;
+      }
       if (method === "phone") {
         if (!phoneCodeSent) {
           await auth.sendPhoneCode(phone, mode === "signup", "seller");
@@ -420,16 +444,23 @@ function SellerAccess({ auth }: { auth: MobileAuth }) {
     }
   };
 
-  const disabled = auth.loading || method === "phone"
-    ? auth.loading || !phone.trim() || phoneCodeSent && !/^\d{6}$/.test(phoneCode.trim()) || !phoneCodeSent && mode === "signup" && !displayName.trim()
-    : auth.loading || !email.trim() || password.length < 8 || mode === "signup" && !displayName.trim();
+  const disabled = auth.loading || mode === "forgot"
+    ? auth.loading || !email.trim()
+    : mode === "reset"
+      ? auth.loading || password.length < 8 || password !== passwordConfirmation
+      : method === "phone"
+        ? auth.loading || !phone.trim() || phoneCodeSent && !/^\d{6}$/.test(phoneCode.trim()) || !phoneCodeSent && mode === "signup" && !displayName.trim()
+        : auth.loading || !email.trim() || password.length < 8 || mode === "signup" && !displayName.trim();
   return <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
     <Text style={styles.eyebrow}>SELL ON VELD</Text>
-    <Text style={styles.screenTitle}>{mode === "signup" ? "Create your seller account" : "Welcome back"}</Text>
-    <Text style={styles.screenIntro}>{method === "phone" ? "Use a one-time SMS code. SMS delivery must be enabled for this Supabase project." : mode === "signup" ? "Start as an individual or registered company. Identity, rights, payout, and editorial approval follow after email verification." : "Sign in to continue onboarding, upload work, or check review status."}</Text>
+    <Text style={styles.screenTitle}>{mode === "signup" ? "Create your seller account" : mode === "forgot" ? "Reset your password" : mode === "reset" ? "Choose a new password" : "Welcome back"}</Text>
+    <Text style={styles.screenIntro}>{mode === "forgot" ? "Enter your email and we’ll send a secure reset link. For your privacy, the response is the same whether an account exists." : mode === "reset" ? "Your reset link is verified by Supabase. Set a new password, then sign in again." : method === "phone" ? "Use a one-time SMS code. SMS delivery must be enabled for this Supabase project." : mode === "signup" ? "Start as an individual or registered company. Identity, rights, payout, and editorial approval follow after email verification." : "Sign in to continue onboarding, upload work, or check review status."}</Text>
     {!auth.configured ? <View style={styles.notice}><WifiOff color={COLORS.amber} size={18} /><Text style={styles.noticeText}>Supabase authentication is not configured for this build. Add the Expo public Supabase URL and publishable key.</Text></View> : <>
-      <Text style={styles.fieldLabel}>Verification method</Text><View style={styles.segmentRow}><Pressable style={[styles.compactSegment, method === "email" && styles.segmentActive]} onPress={() => { setMethod("email"); setPhoneCodeSent(false); setMessage(null); }}><Text style={[styles.segmentText, method === "email" && styles.segmentTextActive]}>Email</Text></Pressable><Pressable style={[styles.compactSegment, method === "phone" && styles.segmentActive]} onPress={() => { setMethod("phone"); setPhoneCodeSent(false); setMessage(null); }}><Text style={[styles.segmentText, method === "phone" && styles.segmentTextActive]}>SMS</Text></Pressable></View>
-      {method === "phone" ? <>
+      {mode !== "forgot" && mode !== "reset" && <><Text style={styles.fieldLabel}>Verification method</Text><View style={styles.segmentRow}><Pressable style={[styles.compactSegment, method === "email" && styles.segmentActive]} onPress={() => { setMethod("email"); setPhoneCodeSent(false); setMessage(null); }}><Text style={[styles.segmentText, method === "email" && styles.segmentTextActive]}>Email</Text></Pressable><Pressable style={[styles.compactSegment, method === "phone" && styles.segmentActive]} onPress={() => { setMethod("phone"); setPhoneCodeSent(false); setMessage(null); }}><Text style={[styles.segmentText, method === "phone" && styles.segmentTextActive]}>SMS</Text></Pressable></View></>}
+      {mode === "reset" ? <>
+        <Field label="New password" value={password} onChangeText={setPassword} placeholder="At least 8 characters" secureTextEntry autoCapitalize="none" />
+        <Field label="Confirm new password" value={passwordConfirmation} onChangeText={setPasswordConfirmation} placeholder="Enter the password again" secureTextEntry autoCapitalize="none" />
+      </> : mode === "forgot" ? <Field label="Email" value={email} onChangeText={setEmail} placeholder="you@example.com" autoCapitalize="none" keyboardType="email-address" /> : method === "phone" ? <>
         {mode === "signup" ? <Field label="Display name" value={displayName} onChangeText={setDisplayName} placeholder="How your name should appear" autoCapitalize="words" /> : null}
         <Field label="Phone number" value={phone} onChangeText={setPhone} placeholder="+27821234567" autoCapitalize="none" keyboardType="phone-pad" editable={!phoneCodeSent} />
         {phoneCodeSent ? <Field label="SMS code" value={phoneCode} onChangeText={setPhoneCode} placeholder="6-digit code" keyboardType="number-pad" autoCapitalize="none" maxLength={6} /> : null}
@@ -440,9 +471,11 @@ function SellerAccess({ auth }: { auth: MobileAuth }) {
       </>}
       {(message || auth.error) ? <View style={styles.notice}><ShieldCheck color={COLORS.amber} size={18} /><Text style={styles.noticeText}>{message ?? auth.error}</Text></View> : null}
       <Pressable style={[styles.primaryButton, disabled && styles.disabledButton]} disabled={disabled} onPress={() => void submit()}>
-        {auth.loading ? <ActivityIndicator color={COLORS.surface} /> : <><LogIn color={COLORS.surface} size={17} /><Text style={styles.primaryButtonText}>{method === "phone" ? phoneCodeSent ? "Verify SMS code" : "Send SMS code" : mode === "signup" ? "Create seller account" : "Sign in"}</Text></>}
+        {auth.loading ? <ActivityIndicator color={COLORS.surface} /> : <><LogIn color={COLORS.surface} size={17} /><Text style={styles.primaryButtonText}>{mode === "forgot" ? "Send reset link" : mode === "reset" ? "Update password" : method === "phone" ? phoneCodeSent ? "Verify SMS code" : "Send SMS code" : mode === "signup" ? "Create seller account" : "Sign in"}</Text></>}
       </Pressable>
-      <Pressable style={styles.secondaryButton} onPress={() => { setMode((current) => current === "signup" ? "signin" : "signup"); setMessage(null); setPassword(""); setPhoneCodeSent(false); }}><Text style={styles.secondaryButtonText}>{mode === "signup" ? "I already have an account" : "Create a seller account"}</Text></Pressable>
+      {mode === "signin" && method === "email" ? <Pressable style={styles.secondaryButton} onPress={() => { setMode("forgot"); setMessage(null); setPassword(""); }}><Text style={styles.secondaryButtonText}>Forgot password?</Text></Pressable> : null}
+      {mode === "forgot" || mode === "reset" ? <Pressable style={styles.secondaryButton} onPress={() => { setMode("signin"); setMessage(null); setPassword(""); setPasswordConfirmation(""); }}><Text style={styles.secondaryButtonText}>Back to sign in</Text></Pressable> : null}
+      {mode === "signin" || mode === "signup" ? <Pressable style={styles.secondaryButton} onPress={() => { setMode((current) => current === "signup" ? "signin" : "signup"); setMessage(null); setPassword(""); setPasswordConfirmation(""); setPhoneCodeSent(false); }}><Text style={styles.secondaryButtonText}>{mode === "signup" ? "I already have an account" : "Create a seller account"}</Text></Pressable> : null}
     </>}
   </ScrollView>;
 }

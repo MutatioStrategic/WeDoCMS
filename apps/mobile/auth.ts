@@ -1,7 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { createClient, processLock, type Session } from "@supabase/supabase-js";
 import * as SecureStore from "expo-secure-store";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState, Linking, Platform } from "react-native";
 import "react-native-url-polyfill/auto";
 
@@ -152,6 +152,8 @@ export function useMobileAuth(apiBaseUrl: string) {
   const [session, setSession] = useState<MobileApiSession | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [passwordRecovery, setPasswordRecovery] = useState(false);
+  const recoveryPending = useRef(false);
 
   const adoptIdentitySession = useCallback(async (identitySession: Session, accountIntent?: AccountIntent) => {
     const next = await exchangeSupabaseSession(apiBaseUrl, identitySession, accountIntent);
@@ -164,13 +166,19 @@ export function useMobileAuth(apiBaseUrl: string) {
     let active = true;
     void (async () => {
       try {
-        const restored = await restoreApiSession(apiBaseUrl);
+        const initialUrl = await Linking.getInitialURL();
+        const openedForRecovery = initialUrl?.startsWith("veldarchive://auth/recovery") ?? false;
+        if (openedForRecovery) {
+          recoveryPending.current = true;
+          if (active) setPasswordRecovery(true);
+        }
+        const restored = openedForRecovery ? null : await restoreApiSession(apiBaseUrl);
         if (restored) {
           if (active) setSession(restored);
           return;
         }
         const identitySession = (await supabase?.auth.getSession())?.data.session;
-        if (identitySession) {
+        if (identitySession && !recoveryPending.current) {
           const next = await exchangeSupabaseSession(apiBaseUrl, identitySession, await readAccountIntent());
           if (active) setSession(next);
         }
@@ -187,7 +195,12 @@ export function useMobileAuth(apiBaseUrl: string) {
         if (active) setSession(null);
         return;
       }
-      if ((event === "TOKEN_REFRESHED" || event === "USER_UPDATED") && identitySession) {
+      if (event === "PASSWORD_RECOVERY") {
+        recoveryPending.current = true;
+        if (active) setPasswordRecovery(true);
+        return;
+      }
+      if ((event === "TOKEN_REFRESHED" || event === "USER_UPDATED") && identitySession && !recoveryPending.current) {
         void exchangeSupabaseSession(apiBaseUrl, identitySession).then((next) => {
           if (active) setSession(next);
         }).catch((exchangeError) => {
@@ -202,7 +215,8 @@ export function useMobileAuth(apiBaseUrl: string) {
     });
 
     const handleAuthLink = async (url: string | null) => {
-      if (!url || !supabase || !url.startsWith("veldarchive://auth/confirmed")) return;
+      if (!url || !supabase || !(url.startsWith("veldarchive://auth/confirmed") || url.startsWith("veldarchive://auth/recovery"))) return;
+      const isRecovery = url.startsWith("veldarchive://auth/recovery");
       try {
         const normalized = url.replace("#", "?");
         const parameters = new URL(normalized).searchParams;
@@ -220,6 +234,11 @@ export function useMobileAuth(apiBaseUrl: string) {
             if (result.error) throw result.error;
             identitySession = result.data.session;
           }
+        }
+        if (identitySession && isRecovery) {
+          recoveryPending.current = true;
+          if (active) setPasswordRecovery(true);
+          return;
         }
         if (identitySession) {
           const next = await exchangeSupabaseSession(apiBaseUrl, identitySession, await readAccountIntent());
@@ -288,6 +307,44 @@ export function useMobileAuth(apiBaseUrl: string) {
     }
   }, [adoptIdentitySession]);
 
+  const requestPasswordReset = useCallback(async (email: string) => {
+    if (!supabase) throw new Error("Supabase authentication is not configured for this build.");
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await supabase.auth.resetPasswordForEmail(email.trim(), { redirectTo: "veldarchive://auth/recovery" });
+      if (result.error) throw result.error;
+    } catch (resetError) {
+      const message = resetError instanceof Error ? resetError.message : "The password reset email could not be sent.";
+      setError(message);
+      throw new Error(message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const updatePassword = useCallback(async (password: string) => {
+    if (!supabase) throw new Error("Supabase authentication is not configured for this build.");
+    if (password.length < 8) throw new Error("Use a password with at least 8 characters.");
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await supabase.auth.updateUser({ password });
+      if (result.error) throw result.error;
+      await supabase.auth.signOut();
+      await persistSession(null);
+      recoveryPending.current = false;
+      setPasswordRecovery(false);
+      setSession(null);
+    } catch (updateError) {
+      const message = updateError instanceof Error ? updateError.message : "The password could not be updated.";
+      setError(message);
+      throw new Error(message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
   const sendPhoneCode = useCallback(async (phone: string, shouldCreateUser: boolean, accountIntent: AccountIntent = "seller") => {
     if (!supabase) throw new Error("Supabase authentication is not configured for this build.");
     const value = normalizedPhone(phone);
@@ -352,5 +409,5 @@ export function useMobileAuth(apiBaseUrl: string) {
     }
   }, [apiBaseUrl, session]);
 
-  return { configured: mobileAuthConfigured, error, loading, session, sendPhoneCode, signIn, signOut, signUp, verifyPhoneCode };
+  return { configured: mobileAuthConfigured, error, loading, passwordRecovery, requestPasswordReset, updatePassword, session, sendPhoneCode, signIn, signOut, signUp, verifyPhoneCode };
 }

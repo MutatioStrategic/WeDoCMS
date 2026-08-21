@@ -37,6 +37,19 @@ flowchart TD
   E -->|editor/admin| H[Review and governance queue]
 ```
 
+### Password recovery
+
+1. A visitor opens the email sign-in form and chooses **Forgot password?**.
+2. The app sends the email address to Supabase and always shows the same
+   confirmation whether an account exists. The app does not store reset tokens
+   or passwords.
+3. The visitor follows the single-use link back to the web origin or the native
+   `veldarchive://auth/recovery` route. The app shows only the new-password form
+   while Supabase holds the verified recovery session.
+4. After the password is updated, the recovery session is signed out and the
+   visitor is returned to sign-in. Expired or unavailable links show the provider
+   error and offer a path to request another link.
+
 ## Buyer licence validation
 
 1. A signed-in buyer opens the Buyer ROI workspace and selects a published asset.
