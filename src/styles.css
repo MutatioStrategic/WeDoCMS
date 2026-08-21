@@ -869,6 +869,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .auth-method-switch { display: flex; gap: 6px; }.auth-method-switch button { border: 1px solid #d7d4ca; padding: 8px 12px; color: #697168; background: #f4f1e9; cursor: pointer; font: 10px 'DM Mono', monospace; }.auth-method-switch button.active { border-color: #375c47; color: #fffdf9; background: #375c47; }
 .auth-panel .auth-feedback { margin: 0; padding: 10px 12px; border-left: 3px solid #5f8157; color: #405343; background: #eef4ea; font-size: 12px; line-height: 1.45; }
 .auth-panel .auth-feedback.error { border-left-color: #9a4834; color: #7a3524; background: #fbefea; }
+.auth-panel:has(input[type="tel"])::after { content: "South African mobile numbers only. Enter a local number such as 073 712 3456; +27 is added automatically."; grid-column: 1 / -1; color: #697168; font-size: 12px; line-height: 1.5; padding-top: 2px; }
 @media (max-width: 760px) { .auth-panel { grid-template-columns: 1fr; width: calc(100% - 24px); } }
 .app-shell .toolbar-select, .app-shell .trending-searches > strong { color: #34443a !important; }
 .app-shell .asset-visual .media-unavailable span { color: #172019 !important; }

@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { Auth0Provider, useAuth0, type Auth0ContextInterface } from "@auth0/auth0-react";
 import { createClient, type Session as SupabaseSession, type SupabaseClient } from "@supabase/supabase-js";
 import { archiveDomain, type AccountLifecycle, type Asset, type BuyerAnalytics, type CommunityOverview, type ContributorAnalytics, type ContributorPerformance, type CreatorProfile, type DiscoveryResponse, type LicenceProduct, type LicenceType, type MonetizationModel, type PortfolioCollection, type SavedSearch, type SearchResponse, type TakedownReason, type UserLightbox, type WorkflowStage } from "./shared";
+import { friendlySupabasePhoneError } from "./phone";
 import "./styles.css";
 import { CommunityWorkspace } from "./community";
 import { StudioWorkspace } from "./studio";
@@ -209,8 +210,7 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
         return;
       }
       if (supabaseAuthMethod === "phone") {
-        const phone = supabasePhone.trim();
-        if (!/^\+[1-9]\d{7,14}$/.test(phone)) throw new Error("Enter a phone number in international format, for example +27821234567.");
+        const phone = archiveDomain.normalizeSouthAfricanPhone(supabasePhone);
         if (!supabasePhoneCodeSent) {
           const result = await supabase.auth.signInWithOtp({ phone, options: { shouldCreateUser: supabaseAuthMode === "signup" } });
           if (result.error) throw result.error;
@@ -243,13 +243,23 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
         setNotice("Account created. Check your email to confirm it, then sign in.");
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Supabase authentication failed.";
+      const message = supabaseAuthMethod === "phone"
+        ? friendlySupabasePhoneError(error, supabasePhoneCodeSent ? "verify" : "send")
+        : error instanceof Error ? error.message : "Supabase authentication failed.";
       setSupabaseAuthMessage({ tone: "error", text: message });
       setNotice(message);
     } finally {
       setSupabaseAuthBusy(false);
     }
   }
+
+  useEffect(() => {
+    if (supabaseAuthOpen && supabaseAuthMethod === "phone") {
+      const phoneInput = document.querySelector<HTMLInputElement>(".auth-panel input[type='tel']");
+      phoneInput?.removeAttribute("pattern");
+      if (phoneInput) phoneInput.placeholder = "073 712 3456";
+    }
+  }, [supabaseAuthOpen, supabaseAuthMethod]);
 
   useEffect(() => {
     if (!sessionUser) { setLightboxes([]); return; }
@@ -1110,7 +1120,8 @@ function SellerVerificationPanel({ api, onNotice }: { api: (path: string, init?:
   async function submit(event: React.FormEvent) {
     event.preventDefault(); setSaving(true);
     try {
-      const sellerResponse = await api("/api/onboarding/seller", { method: "PUT", body: JSON.stringify({ ...seller, sellerType: seller.sellerType === "company" ? "company" : "individual", registeredName: seller.sellerType === "company" ? seller.registeredName : undefined, cipcRegistrationNumber: seller.sellerType === "company" ? seller.cipcRegistrationNumber : undefined, representativeName: seller.sellerType === "company" ? seller.representativeName : undefined, representativeAuthority: seller.sellerType === "company" ? seller.representativeAuthority : false, beneficialOwnerRequired: seller.sellerType === "company" && seller.beneficialOwnerRequired }) });
+      const phone = archiveDomain.normalizeSouthAfricanPhone(seller.phone);
+      const sellerResponse = await api("/api/onboarding/seller", { method: "PUT", body: JSON.stringify({ ...seller, phone, sellerType: seller.sellerType === "company" ? "company" : "individual", registeredName: seller.sellerType === "company" ? seller.registeredName : undefined, cipcRegistrationNumber: seller.sellerType === "company" ? seller.cipcRegistrationNumber : undefined, representativeName: seller.sellerType === "company" ? seller.representativeName : undefined, representativeAuthority: seller.sellerType === "company" ? seller.representativeAuthority : false, beneficialOwnerRequired: seller.sellerType === "company" && seller.beneficialOwnerRequired }) });
       if (!sellerResponse.ok) throw new Error("seller");
       if (seller.sellerType === "company") {
         const cipc = await api("/api/onboarding/cipc/lookup", { method: "POST", body: JSON.stringify({ registrationNumber: seller.cipcRegistrationNumber }) });
@@ -1124,7 +1135,7 @@ function SellerVerificationPanel({ api, onNotice }: { api: (path: string, init?:
       const contractResponse = await api("/api/onboarding/contract", { method: "POST", body: JSON.stringify({ signerName: seller.signerName, signatureMethod: "firma", signatureReference: seller.signatureReference, turnstileToken: turnstileToken || undefined }) });
       if (!contractResponse.ok) throw new Error("contract");
       onNotice("Seller details saved. Open Didit to finish identity verification; approval remains blocked until its signed result returns.");
-    } catch (error) { onNotice(error instanceof Error && error.message === "didit" ? "Didit is not ready yet. Check the API key and KYC/KYB workflow ID." : "Seller onboarding could not be submitted. Complete every field and configure the required provider."); } finally { setSaving(false); }
+  } catch (error) { onNotice(error instanceof Error && error.message === "didit" ? "Didit is not ready yet. Check the API key and KYC/KYB workflow ID." : error instanceof Error && error.message.includes("South African mobile") ? error.message : "Seller onboarding could not be submitted. Complete every field and configure the required provider."); } finally { setSaving(false); }
   }
   return <form className="workspace-card seller-verification-panel" onSubmit={submit}><div className="card-heading"><span className="section-kicker">02 · SELLER SETUP</span><span className="status-pill warm">Pending verification</span></div><h2>Verify your seller identity</h2><p className="dialog-intro">Individuals and sole proprietors can onboard without a company. Didit verifies the ID/passport, liveness, and phone in a hosted flow; WeDoCMS stores only the decision and provider reference.</p><label>Seller type<select value={seller.sellerType} onChange={(event) => update("sellerType", event.target.value)}><option value="individual">Individual / sole proprietor</option><option value="company">Registered company</option></select></label><div className="two-fields"><label>Legal name<input required value={seller.legalName} onChange={(event) => update("legalName", event.target.value)} /></label><label>Verified phone<input required type="tel" placeholder="+27821234567" value={seller.phone} onChange={(event) => update("phone", event.target.value)} /></label></div><div className="two-fields"><label>ID or passport<select value={seller.identityDocumentType} onChange={(event) => update("identityDocumentType", event.target.value)}><option value="sa_id">South African ID</option><option value="passport">Passport</option></select></label><label className="checkbox-row"><input type="checkbox" checked={seller.ageConfirmed} onChange={(event) => update("ageConfirmed", event.target.checked)} /> I confirm I am at least 18</label></div>{seller.sellerType === "company" && <><label>Registered company name<input required value={seller.registeredName} onChange={(event) => update("registeredName", event.target.value)} /></label><div className="two-fields"><label>CIPC registration number<input required value={seller.cipcRegistrationNumber} onChange={(event) => update("cipcRegistrationNumber", event.target.value)} /></label><label>Director / authorised representative<input required value={seller.representativeName} onChange={(event) => update("representativeName", event.target.value)} /></label></div><label className="checkbox-row"><input type="checkbox" checked={seller.representativeAuthority} onChange={(event) => update("representativeAuthority", event.target.checked)} /> I confirm I am authorised to act for this company</label><label className="checkbox-row"><input type="checkbox" checked={seller.beneficialOwnerRequired} onChange={(event) => update("beneficialOwnerRequired", event.target.checked)} /> Beneficial-owner information is required by our payment provider / legal classification</label><small className="field-help">A configured CIPC lookup runs before the company Didit session.</small></>}<label>Bank account name<input required value={seller.bankAccountName} onChange={(event) => update("bankAccountName", event.target.value)} /><small className="field-help">Must match the legal name (or registered company name). Never enter the account number here.</small></label><label className="checkbox-row"><input type="checkbox" checked={seller.copyrightDeclaration} onChange={(event) => update("copyrightDeclaration", event.target.checked)} /> I own/control the copyright and required releases for my work.</label><label className="checkbox-row"><input type="checkbox" checked={seller.taxResponsibilityDeclaration} onChange={(event) => update("taxResponsibilityDeclaration", event.target.checked)} /> I accept responsibility for my tax affairs and declarations.</label><label className="checkbox-row"><input type="checkbox" checked={seller.contributorAgreement} onChange={(event) => update("contributorAgreement", event.target.checked)} /> I accept the current contributor agreement and licensing terms.</label>{diditUrl && <p className="dialog-intro"><strong>Didit is ready.</strong> <a href={diditUrl} target="_blank" rel="noreferrer">Open the secure verification flow ↗</a></p>}<label>Signer name<input required value={seller.signerName} onChange={(event) => update("signerName", event.target.value)} /></label><label>Firma signature reference<input required minLength={8} value={seller.signatureReference} onChange={(event) => update("signatureReference", event.target.value)} placeholder="Reference returned by Firma" /></label><div className="two-fields"><label>Payout rail<select value={seller.provider} onChange={(event) => update("provider", event.target.value)}><option value="paystack">Paystack marketplace split</option></select></label><label>Paystack subaccount code<input required value={seller.providerAccountId} onChange={(event) => update("providerAccountId", event.target.value)} placeholder="ACCT_... from Paystack" /></label></div><label>Account holder<input required value={seller.accountHolderName} onChange={(event) => update("accountHolderName", event.target.value)} /></label><div className="two-fields"><label>Account last 4<input inputMode="numeric" pattern="\d{4}" value={seller.accountLast4} onChange={(event) => update("accountLast4", event.target.value)} /></label><label>Branch last 4<input inputMode="numeric" pattern="\d{4}" value={seller.branchLast4} onChange={(event) => update("branchLast4", event.target.value)} /></label></div><TurnstileChallenge onToken={setTurnstileToken} /><label className="checkbox-row"><input type="checkbox" required /> I agree to the current Contributor Terms of Service and authorise this digital signature record.</label><button className="dark-button" disabled={saving}>{saving ? "Saving seller details…" : "Save & start Didit verification ↗"}</button></form>;
 }

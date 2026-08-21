@@ -1935,7 +1935,7 @@ function buyerSubscriptionConfiguration(env: Bindings): { configured: boolean; p
 const sellerOnboardingSchema = z.object({
   sellerType: z.enum(["individual", "company"]),
   legalName: z.string().trim().min(2).max(180),
-  phone: z.string().trim().regex(/^\+[1-9]\d{7,14}$/, "Phone must be in E.164 format"),
+  phone: z.string().trim().min(1, "South African mobile number is required"),
   ageConfirmed: z.literal(true),
   identityDocumentType: z.enum(["sa_id", "passport"]),
   bankAccountName: z.string().trim().min(2).max(180),
@@ -1959,6 +1959,7 @@ app.put("/api/onboarding/seller", async (c) => {
   const user = await requestUser(c);
   if (!user || !allowedRole(user, ["contributor", "admin"])) return c.json({ error: "Contributor access required" }, 403);
   const payload = sellerOnboardingSchema.parse(await c.req.json());
+  const phone = archiveDomain.normalizeSouthAfricanPhone(payload.phone);
   const now = new Date().toISOString();
   const termsHash = await sha256Hex(agreementText(sellerAgreement));
   await c.env.DB.batch([
@@ -1966,7 +1967,7 @@ app.put("/api/onboarding/seller", async (c) => {
       (contributor_id, seller_type, legal_name, phone_e164, age_confirmed_at, identity_document_type, bank_account_name, copyright_declaration_at, tax_responsibility_declaration_at, contributor_agreement_at, registered_name, cipc_registration_number, representative_name, representative_authority_at, beneficial_owner_required, beneficial_owner_status)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(contributor_id) DO UPDATE SET seller_type = excluded.seller_type, legal_name = excluded.legal_name, phone_e164 = excluded.phone_e164, age_confirmed_at = excluded.age_confirmed_at, identity_document_type = excluded.identity_document_type, bank_account_name = excluded.bank_account_name, copyright_declaration_at = excluded.copyright_declaration_at, tax_responsibility_declaration_at = excluded.tax_responsibility_declaration_at, contributor_agreement_at = excluded.contributor_agreement_at, registered_name = excluded.registered_name, cipc_registration_number = excluded.cipc_registration_number, representative_name = excluded.representative_name, representative_authority_at = excluded.representative_authority_at, beneficial_owner_required = excluded.beneficial_owner_required, beneficial_owner_status = excluded.beneficial_owner_status, cipc_status = CASE WHEN excluded.cipc_registration_number IS seller_onboarding_profiles.cipc_registration_number THEN seller_onboarding_profiles.cipc_status ELSE 'not_checked' END, updated_at = CURRENT_TIMESTAMP`)
-      .bind(user.id, payload.sellerType, payload.legalName, payload.phone, now, payload.identityDocumentType, payload.bankAccountName, now, now, now, payload.registeredName ?? null, payload.cipcRegistrationNumber ?? null, payload.representativeName ?? null, payload.representativeAuthority ? now : null, payload.beneficialOwnerRequired ? 1 : 0, payload.beneficialOwnerRequired ? "pending" : "not_required"),
+      .bind(user.id, payload.sellerType, payload.legalName, phone, now, payload.identityDocumentType, payload.bankAccountName, now, now, now, payload.registeredName ?? null, payload.cipcRegistrationNumber ?? null, payload.representativeName ?? null, payload.representativeAuthority ? now : null, payload.beneficialOwnerRequired ? 1 : 0, payload.beneficialOwnerRequired ? "pending" : "not_required"),
     c.env.DB.prepare("INSERT OR IGNORE INTO marketplace_agreement_acceptances (id, organization_id, user_id, agreement_type, agreement_version, terms_sha256, context_type, context_id, accepted_at) VALUES (?, ?, ?, 'seller', ?, ?, 'onboarding', ?, ?)").bind(crypto.randomUUID(), user.organizationId, user.id, sellerAgreement.version, termsHash, user.id, now),
   ]);
   return c.json({ sellerType: payload.sellerType, status: "saved", sellerAgreementVersion: sellerAgreement.version, agreementPersisted: true });

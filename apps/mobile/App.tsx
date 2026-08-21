@@ -43,6 +43,7 @@ import {
 } from "react-native";
 import { WebView } from "react-native-webview";
 import { mobileSessionHeaders, type MobileApiSession, useMobileAuth } from "./auth";
+import { normalizeSouthAfricanPhone } from "../../src/phone";
 import { AdvancedSearchScreen, CampaignDeliveryScreen, CommunityActionsScreen, GovernanceEditorScreen, MarketplaceParityScreen, OperationsScreen } from "./advanced-workspaces";
 
 declare const process: { env: { EXPO_PUBLIC_API_BASE_URL?: string; EXPO_PUBLIC_TURNSTILE_SITE_KEY?: string } };
@@ -182,7 +183,7 @@ function confidenceFor(asset: Asset) {
   return value > 1 ? Math.round(value) : Math.round(value * 100);
 }
 
-function ExploreScreen({ onOpenAsset, onSearch }: { onOpenAsset: (asset: Asset) => void; onSearch: (query: string) => void }) {
+function ExploreScreen({ onOpenAsset, onSearch, onAccount }: { onOpenAsset: (asset: Asset) => void; onSearch: (query: string) => void; onAccount: () => void }) {
   const [assets, setAssets] = useState<Asset[]>([]);
   const [discovery, setDiscovery] = useState<DiscoveryResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -221,7 +222,7 @@ function ExploreScreen({ onOpenAsset, onSearch }: { onOpenAsset: (asset: Asset) 
           <Text style={styles.eyebrow}>VELD ARCHIVE</Text>
           <Text style={styles.screenTitle}>Find the story.</Text>
         </View>
-        <Pressable style={styles.avatarButton} onPress={() => void Haptics.selectionAsync()} accessibilityLabel="Account">
+        <Pressable style={styles.avatarButton} onPress={onAccount} accessibilityLabel="Account">
           <UserCircle2 color={COLORS.ink} size={22} strokeWidth={1.8} />
         </Pressable>
       </View>
@@ -379,8 +380,8 @@ function TurnstileChallenge({ onToken }: { onToken: (token: string) => void }) {
   return <View style={styles.turnstileFrame}><WebView originWhitelist={["https://*"]} source={{ html, baseUrl: `${API_BASE_URL}/` }} javaScriptEnabled onMessage={(event) => { try { const value = JSON.parse(event.nativeEvent.data) as { token?: string }; onToken(value.token ?? ""); } catch { onToken(""); } }} /></View>;
 }
 
-function SellerAccess({ auth }: { auth: MobileAuth }) {
-  const [mode, setMode] = useState<"signin" | "signup" | "forgot" | "reset">(() => auth.passwordRecovery ? "reset" : "signup");
+function SellerAccess({ auth, initialMode = "signup" }: { auth: MobileAuth; initialMode?: "signin" | "signup" }) {
+  const [mode, setMode] = useState<"signin" | "signup" | "forgot" | "reset">(() => auth.passwordRecovery ? "reset" : initialMode);
   const [method, setMethod] = useState<"email" | "phone">("email");
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
@@ -462,7 +463,8 @@ function SellerAccess({ auth }: { auth: MobileAuth }) {
         <Field label="Confirm new password" value={passwordConfirmation} onChangeText={setPasswordConfirmation} placeholder="Enter the password again" secureTextEntry autoCapitalize="none" />
       </> : mode === "forgot" ? <Field label="Email" value={email} onChangeText={setEmail} placeholder="you@example.com" autoCapitalize="none" keyboardType="email-address" /> : method === "phone" ? <>
         {mode === "signup" ? <Field label="Display name" value={displayName} onChangeText={setDisplayName} placeholder="How your name should appear" autoCapitalize="words" /> : null}
-        <Field label="Phone number" value={phone} onChangeText={setPhone} placeholder="+27821234567" autoCapitalize="none" keyboardType="phone-pad" editable={!phoneCodeSent} />
+        <Field label="Phone number" value={phone} onChangeText={setPhone} placeholder="073 712 3456" autoCapitalize="none" keyboardType="phone-pad" editable={!phoneCodeSent} />
+        {!phoneCodeSent ? <Text style={styles.fieldHint}>South African mobile numbers only. You do not need to type +27.</Text> : null}
         {phoneCodeSent ? <Field label="SMS code" value={phoneCode} onChangeText={setPhoneCode} placeholder="6-digit code" keyboardType="number-pad" autoCapitalize="none" maxLength={6} /> : null}
       </> : <>
         {mode === "signup" ? <Field label="Display name" value={displayName} onChangeText={setDisplayName} placeholder="How your name should appear" autoCapitalize="words" /> : null}
@@ -540,12 +542,13 @@ function SellerOnboarding({ session }: { session: MobileApiSession }) {
   };
 
   const saveIdentity = async () => {
-    if (!/^\+[1-9]\d{7,14}$/.test(phone.trim())) { setMessage("Use an international phone number such as +27821234567."); return; }
+    let normalizedPhone: string;
+    try { normalizedPhone = normalizeSouthAfricanPhone(phone); } catch (error) { setMessage(error instanceof Error ? error.message : "Enter a valid South African mobile number, for example 073 712 3456."); return; }
     if (!ageConfirmed || !copyrightDeclaration || !taxResponsibilityDeclaration || !contributorAgreement) { setMessage("Complete the age, rights, tax, and contributor declarations."); return; }
     if (sellerType === "company" && (!registeredName.trim() || !cipcRegistrationNumber.trim() || !representativeName.trim() || !representativeAuthority)) { setMessage("Complete the registered company and representative details."); return; }
     setSaving(true); setMessage(null);
     const seller = await apiRequest<{ error?: string }>("/api/onboarding/seller", session, { method: "PUT", body: {
-      sellerType, legalName: legalName.trim(), phone: phone.trim(), ageConfirmed: true, identityDocumentType, bankAccountName: bankAccountName.trim(),
+      sellerType, legalName: legalName.trim(), phone: normalizedPhone, ageConfirmed: true, identityDocumentType, bankAccountName: bankAccountName.trim(),
       copyrightDeclaration: true, taxResponsibilityDeclaration: true, contributorAgreement: true,
       ...(sellerType === "company" ? { registeredName: registeredName.trim(), cipcRegistrationNumber: cipcRegistrationNumber.trim(), representativeName: representativeName.trim(), representativeAuthority, beneficialOwnerRequired } : {}),
     } });
@@ -600,7 +603,7 @@ function SellerOnboarding({ session }: { session: MobileApiSession }) {
     {step === "identity" ? <View style={styles.formCard}><Text style={styles.sectionTitle}>Seller identity</Text><Text style={styles.screenIntro}>Didit handles ID/passport and liveness checks. Veld stores the decision and provider reference, not raw documents.</Text>
       <Text style={styles.fieldLabel}>Seller type</Text><View style={styles.segmentRow}>{(["individual", "company"] as const).map((value) => <Pressable key={value} style={[styles.segment, sellerType === value && styles.segmentActive]} onPress={() => setSellerType(value)}><Text style={[styles.segmentText, sellerType === value && styles.segmentTextActive]}>{value === "individual" ? "Individual" : "Company"}</Text></Pressable>)}</View>
       <Field label="Legal name" value={legalName} onChangeText={setLegalName} placeholder="As shown on ID or registration" autoCapitalize="words" />
-      <Field label="Phone" value={phone} onChangeText={setPhone} placeholder="+27821234567" keyboardType="phone-pad" autoCapitalize="none" />
+      <Field label="Phone" value={phone} onChangeText={setPhone} placeholder="073 712 3456" keyboardType="phone-pad" autoCapitalize="none" />
       <Text style={styles.fieldLabel}>Identity document</Text><View style={styles.segmentRow}>{(["sa_id", "passport"] as const).map((value) => <Pressable key={value} style={[styles.segment, identityDocumentType === value && styles.segmentActive]} onPress={() => setIdentityDocumentType(value)}><Text style={[styles.segmentText, identityDocumentType === value && styles.segmentTextActive]}>{value === "sa_id" ? "South African ID" : "Passport"}</Text></Pressable>)}</View>
       {sellerType === "company" ? <><Field label="Registered company name" value={registeredName} onChangeText={setRegisteredName} placeholder="CIPC registered name" /><Field label="CIPC registration number" value={cipcRegistrationNumber} onChangeText={setCipcRegistrationNumber} placeholder="Registration number" autoCapitalize="characters" /><Field label="Authorised representative" value={representativeName} onChangeText={setRepresentativeName} placeholder="Director or authorised person" /><CheckField checked={representativeAuthority} onPress={() => setRepresentativeAuthority((value) => !value)} label="I am authorised to act for this company." /><CheckField checked={beneficialOwnerRequired} onPress={() => setBeneficialOwnerRequired((value) => !value)} label="Beneficial-owner information is required for this seller." /></> : null}
       <Field label="Bank account name" value={bankAccountName} onChangeText={setBankAccountName} placeholder="Name only — never enter the account number" />
@@ -643,7 +646,7 @@ function SellerLibrary({ session }: { session: MobileApiSession }) {
   return <View><View style={styles.progressCard}><Text style={styles.cardKind}>YOUR PHOTO LIBRARY</Text><Text style={styles.cardTitle}>{assets.length} owned record{assets.length === 1 ? "" : "s"}</Text><Text style={styles.cardMeta}>{assets.filter((asset) => asset.status === "published").length} published · {assets.filter((asset) => asset.status === "needs_review").length} held for review</Text></View>{message ? <View style={styles.notice}><ShieldCheck color={message.includes("saved") ? COLORS.green : COLORS.amber} size={18} /><Text style={styles.noticeText}>{message}</Text></View> : null}{!assets.length ? <EmptyState label="No uploaded records yet. Use Upload to submit your first photo." /> : <><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.libraryRow}>{assets.map((asset) => <Pressable key={asset.id} style={[styles.libraryItem, selected?.id === asset.id && styles.libraryItemActive]} onPress={() => choose(asset)}><Image source={{ uri: imageFor(asset) }} style={styles.libraryThumb} /><Text style={styles.cardTitle} numberOfLines={1}>{asset.title}</Text><Text style={styles.cardMeta}>{asset.status.replaceAll("_", " ")}</Text></Pressable>)}</ScrollView>{selected ? <View style={styles.formCard}><Text style={styles.cardKind}>SELLER-OWNED RECORD · {selected.status.replaceAll("_", " ")}</Text><Text style={styles.sectionTitle}>Update metadata</Text><Text style={styles.screenIntro}>Changes stay auditable and return to editorial review when required.</Text><Field label="Title" value={title} onChangeText={setTitle} placeholder="Asset title" /><Field label="Description" value={description} onChangeText={setDescription} placeholder="What is visible and what you can verify" multiline /><Field label="Caption (optional)" value={caption} onChangeText={setCaption} placeholder="Concise buyer-facing context" multiline /><Field label="City (optional)" value={city} onChangeText={setCity} placeholder="Evidence-backed location" /><Field label="Subject tags" value={tags} onChangeText={setTags} placeholder="Comma separated" /><Text style={styles.fieldLabel}>Rights status</Text><View style={styles.segmentRow}>{["pending", "editorial_only", "verified", "restricted"].map((value) => <Pressable key={value} style={[styles.compactSegment, rights === value && styles.segmentActive]} onPress={() => setRights(value)}><Text style={[styles.segmentText, rights === value && styles.segmentTextActive]}>{value.replaceAll("_", " ")}</Text></Pressable>)}</View><Pressable style={[styles.primaryButton, saving && styles.disabledButton]} disabled={saving} onPress={() => void save()}>{saving ? <ActivityIndicator color={COLORS.surface} /> : <Text style={styles.primaryButtonText}>Save metadata</Text>}</Pressable></View> : null}</>}</View>;
 }
 
-function CreateScreen({ auth }: { auth: MobileAuth }) {
+function CreateScreen({ auth, initialAuthMode = "signup" }: { auth: MobileAuth; initialAuthMode?: "signin" | "signup" }) {
   const [section, setSection] = useState<"onboarding" | "upload" | "library">("onboarding");
   const [title, setTitle] = useState("");
   const [caption, setCaption] = useState("");
@@ -726,7 +729,7 @@ function CreateScreen({ auth }: { auth: MobileAuth }) {
 
   if (auth.loading && !auth.session) return <ScrollView contentContainerStyle={styles.scrollContent}><Text style={styles.eyebrow}>CONTRIBUTE</Text><Text style={styles.screenTitle}>Add to the archive</Text><LoadingState label="Restoring contributor access" /></ScrollView>;
 
-  if (!auth.session) return <SellerAccess auth={auth} />;
+  if (!auth.session) return <SellerAccess auth={auth} initialMode={initialAuthMode} />;
 
   if (!["contributor", "editor", "admin"].includes(auth.session.user.role)) return (
     <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
@@ -803,7 +806,7 @@ function AnalyticsScreen({ session, onBack }: { session: MobileApiSession; onBac
   return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}><Pressable onPress={onBack}><Text style={styles.sectionAction}>← More</Text></Pressable><Text style={styles.eyebrow}>{role === "buyer" ? "BUYER ROI" : "CONTRIBUTOR INSIGHTS"}</Text><Text style={styles.screenTitle}>{role === "buyer" ? "Licence performance" : "What buyers need"}</Text><Text style={styles.screenIntro}>Privacy-conscious aggregate signals from the same reporting API as desktop.</Text>{error ? <ErrorState message={error} onRetry={load} /> : !data ? <LoadingState label="Loading insights" /> : <><View style={styles.metricGrid}>{metrics.map(([label, value]) => <View key={String(label)} style={styles.metricCard}><Text style={styles.cardKind}>{label}</Text><Text style={styles.metricValue}>{String(value ?? 0)}</Text></View>)}</View>{role === "contributor" ? <View style={styles.stack}>{(data.opportunities ?? []).map((item: { title: string; detail: string }) => <View key={item.title} style={styles.featureCard}><Text style={styles.cardKind}>OPPORTUNITY</Text><Text style={styles.cardTitle}>{item.title}</Text><Text style={styles.cardMeta}>{item.detail}</Text></View>)}</View> : <View style={styles.stack}>{(data.campaigns ?? []).map((campaign: { id: string; name: string; assetTitle: string; roi: number }) => <View key={campaign.id} style={styles.listCard}><Text style={styles.cardTitle}>{campaign.name}</Text><Text style={styles.cardMeta}>{campaign.assetTitle}</Text><Text style={styles.cardKind}>ROI {campaign.roi}%</Text></View>)}</View>}</>}</ScrollView>;
 }
 
-function AccountScreen({ auth, onBack, onSell }: { auth: MobileAuth; onBack: () => void; onSell: () => void }) {
+function AccountScreen({ auth, onBack, onSell, onSignIn }: { auth: MobileAuth; onBack: () => void; onSell: () => void; onSignIn: () => void }) {
   const [account, setAccount] = useState<AccountLifecycle | null>(null);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [licences, setLicences] = useState<Array<Record<string, unknown>>>([]);
@@ -824,7 +827,7 @@ function AccountScreen({ auth, onBack, onSell }: { auth: MobileAuth; onBack: () 
     setSubscription(subscriptionResponse.status === 200 ? subscriptionResponse.body : null);
   }, [session]);
   useEffect(() => { void load(); }, [load]);
-  if (!session) return <ScrollView contentContainerStyle={styles.scrollContent}><Pressable onPress={onBack}><Text style={styles.sectionAction}>← More</Text></Pressable><Text style={styles.eyebrow}>ACCOUNT</Text><Text style={styles.screenTitle}>Sign in to continue</Text><Text style={styles.screenIntro}>Seller signup, email confirmation, and sign-in are available in the Create workspace.</Text><Pressable style={styles.primaryButton} onPress={onSell}><Text style={styles.primaryButtonText}>Open seller access</Text></Pressable></ScrollView>;
+  if (!session) return <ScrollView contentContainerStyle={styles.scrollContent}><Pressable onPress={onBack}><Text style={styles.sectionAction}>← More</Text></Pressable><Text style={styles.eyebrow}>ACCOUNT</Text><Text style={styles.screenTitle}>Sign in to continue</Text><Text style={styles.screenIntro}>Sign in to view your profile, account controls, alerts, and licence history.</Text><Pressable style={styles.primaryButton} onPress={onSignIn}><LogIn color={COLORS.surface} size={17} /><Text style={styles.primaryButtonText}>Sign in</Text></Pressable><Pressable style={styles.secondaryButton} onPress={onSell}><Text style={styles.secondaryButtonText}>Create a seller account</Text></Pressable></ScrollView>;
   const updatePreferences = async (next: Pick<AccountLifecycle, "emailNotifications" | "productNotifications">) => { const response = await apiRequest<{ error?: string }>("/api/account/preferences", session, { method: "PUT", body: next }); setMessage(response.status === 200 ? "Notification preferences saved." : messageFrom(response.body, "Preferences could not be saved.")); await load(); };
   const requestExport = async () => { const response = await apiRequest<{ error?: string }>("/api/account/exports", session, { method: "POST", body: {} }); setMessage(response.status < 300 ? "Account export requested." : messageFrom(response.body, "Export could not be requested.")); await load(); };
   const scheduleDeletion = () => Alert.alert("Schedule account deletion?", "The account enters a 30-day recovery window before deletion.", [{ text: "Cancel", style: "cancel" }, { text: "Schedule deletion", style: "destructive", onPress: () => { void apiRequest("/api/account/deletion", session, { method: "POST", body: {} }).then(async () => { setMessage("Account deletion scheduled."); await load(); }); } }]);
@@ -869,9 +872,9 @@ function GovernanceScreen({ session, onBack, onOpenAsset }: { session: MobileApi
 }
 
 type MoreView = "menu" | "account" | "community" | "creators" | "insights" | "campaigns" | "governance" | "rights" | "status" | "advanced-search" | "marketplace" | "operations";
-function MoreScreen({ auth, onOpenAsset, onSell }: { auth: MobileAuth; onOpenAsset: (asset: Asset) => void; onSell: () => void }) {
-  const [view, setView] = useState<MoreView>("menu");
-  if (view === "account") return <AccountScreen auth={auth} onBack={() => setView("menu")} onSell={onSell} />;
+function MoreScreen({ initialView = "menu", auth, onOpenAsset, onSell, onSignIn }: { initialView?: MoreView; auth: MobileAuth; onOpenAsset: (asset: Asset) => void; onSell: () => void; onSignIn: () => void }) {
+  const [view, setView] = useState<MoreView>(initialView);
+  if (view === "account") return <AccountScreen auth={auth} onBack={() => setView("menu")} onSell={onSell} onSignIn={onSignIn} />;
   if (view === "community") return <CommunityActionsScreen session={auth.session} onBack={() => setView("menu")} />;
   if (view === "creators") return <CreatorsScreen onBack={() => setView("menu")} onOpenAsset={onOpenAsset} />;
   if (view === "insights" && auth.session) return <AnalyticsScreen session={auth.session} onBack={() => setView("menu")} />;
@@ -940,9 +943,13 @@ export default function App() {
   const [tab, setTab] = useState<TabKey>("explore");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
+  const [moreInitialView, setMoreInitialView] = useState<"menu" | "account">("menu");
+  const [createAuthMode, setCreateAuthMode] = useState<"signin" | "signup">("signup");
   const changeTab = (nextTab: TabKey) => { void Haptics.selectionAsync(); setTab(nextTab); };
   const openSearch = (query: string) => { setSearchQuery(query); changeTab("search"); };
-  return <SafeAreaView style={styles.app}><StatusBar style="dark" /><View style={styles.content}>{tab === "explore" ? <ExploreScreen onOpenAsset={setSelectedAsset} onSearch={openSearch} /> : tab === "search" ? <SearchScreen initialQuery={searchQuery} onOpenAsset={setSelectedAsset} auth={auth} /> : tab === "create" ? <CreateScreen auth={auth} /> : <MoreScreen auth={auth} onOpenAsset={setSelectedAsset} onSell={() => changeTab("create")} />}</View><View style={styles.tabBar}>{tabs.map(({ key, label, icon: TabIcon }) => { const active = tab === key; return <Pressable key={key} style={styles.tabItem} onPress={() => changeTab(key)} accessibilityRole="tab" accessibilityState={{ selected: active }}><TabIcon color={active ? COLORS.green : COLORS.muted} size={21} strokeWidth={active ? 2.4 : 1.8} /><Text style={[styles.tabLabel, active && styles.tabLabelActive]}>{label}</Text></Pressable>; })}</View><AssetDetail asset={selectedAsset} onClose={() => setSelectedAsset(null)} auth={auth} /></SafeAreaView>;
+  const openAccount = () => { setMoreInitialView("account"); changeTab("more"); };
+  const openCreate = (mode: "signin" | "signup") => { setCreateAuthMode(mode); changeTab("create"); };
+  return <SafeAreaView style={styles.app}><StatusBar style="dark" /><View style={styles.content}>{tab === "explore" ? <ExploreScreen onOpenAsset={setSelectedAsset} onSearch={openSearch} onAccount={openAccount} /> : tab === "search" ? <SearchScreen initialQuery={searchQuery} onOpenAsset={setSelectedAsset} auth={auth} /> : tab === "create" ? <CreateScreen auth={auth} initialAuthMode={createAuthMode} /> : <MoreScreen initialView={moreInitialView} auth={auth} onOpenAsset={setSelectedAsset} onSell={() => openCreate("signup")} onSignIn={() => { setMoreInitialView("menu"); openCreate("signin"); }} />}</View><View style={styles.tabBar}>{tabs.map(({ key, label, icon: TabIcon }) => { const active = tab === key; return <Pressable key={key} style={styles.tabItem} onPress={() => { if (key === "more") setMoreInitialView("menu"); if (key === "create") setCreateAuthMode("signup"); changeTab(key); }} accessibilityRole="tab" accessibilityState={{ selected: active }}><TabIcon color={active ? COLORS.green : COLORS.muted} size={21} strokeWidth={active ? 2.4 : 1.8} /><Text style={[styles.tabLabel, active && styles.tabLabelActive]}>{label}</Text></Pressable>; })}</View><AssetDetail asset={selectedAsset} onClose={() => setSelectedAsset(null)} auth={auth} /></SafeAreaView>;
 }
 
 const styles = StyleSheet.create({
@@ -1010,6 +1017,7 @@ const styles = StyleSheet.create({
   dropzoneMeta: { color: COLORS.muted, fontSize: 11, marginTop: 5, textAlign: "center" },
   field: { marginBottom: 15 },
   fieldLabel: { color: COLORS.ink, fontSize: 12, fontWeight: "800", marginBottom: 7 },
+  fieldHint: { color: COLORS.muted, fontSize: 11, lineHeight: 16, marginTop: -9, marginBottom: 15 },
   textField: { minHeight: 48, borderWidth: 1, borderColor: COLORS.line, borderRadius: 12, backgroundColor: COLORS.surface, paddingHorizontal: 14, color: COLORS.ink, fontSize: 14 },
   multilineField: { minHeight: 92, paddingTop: 13, textAlignVertical: "top" },
   notice: { backgroundColor: COLORS.amberSoft, borderRadius: 12, padding: 12, flexDirection: "row", gap: 8, alignItems: "flex-start", marginBottom: 15 },

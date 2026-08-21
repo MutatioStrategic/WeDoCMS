@@ -1,5 +1,24 @@
 import { describe, expect, it } from "vitest";
 import { archiveDomain, buildMatchExplanation, evaluateLicenceRequest, type Asset } from "./shared";
+import { friendlySupabasePhoneError, normalizeSouthAfricanPhone } from "./phone";
+
+describe("South African phone rules", () => {
+  it("normalizes local input to the Supabase E.164 format", () => {
+    expect(normalizeSouthAfricanPhone("073 712 3456")).toBe("+27737123456");
+    expect(archiveDomain.normalizeSouthAfricanPhone("+27 73 712 3456")).toBe("+27737123456");
+    expect(normalizeSouthAfricanPhone("0027 73-712-3456")).toBe("+27737123456");
+  });
+
+  it("rejects foreign, landline, and malformed numbers", () => {
+    expect(() => normalizeSouthAfricanPhone("+14155550123")).toThrow("South African mobile");
+    expect(() => normalizeSouthAfricanPhone("021 555 0123")).toThrow("South African mobile");
+    expect(() => normalizeSouthAfricanPhone("0737")).toThrow("South African mobile");
+  });
+
+  it("turns an unavailable SMS provider into a useful recovery message", () => {
+    expect(friendlySupabasePhoneError(new Error("SMS provider is not configured"), "send")).toContain("configure an SMS provider");
+  });
+});
 
 describe("asset domain contract", () => {
   it("preserves the rights and authenticity fields needed for trusted discovery", () => {

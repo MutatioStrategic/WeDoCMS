@@ -32,6 +32,15 @@ describe("verified identity exchange", () => {
     expect(identityDisplayNameForClaims(claims)).toBe("Phone Seller");
   });
 
+  it("rejects a Supabase phone identity outside South Africa", async () => {
+    const secret = "test-secret-that-is-long-enough-for-auth";
+    const header = encode({ alg: "HS256", typ: "JWT" });
+    const payload = encode({ sub: "foreign-phone-user", phone: "+14155550123", exp: Math.floor(Date.now() / 1000) + 60 });
+    const signingInput = `${header}.${payload}`;
+    const token = `${signingInput}.${await sign(secret, signingInput)}`;
+    await expect(verifyExternalJwtWithProvider({ AUTH_PROVIDER: "supabase", SUPABASE_JWT_SECRET: secret } as never, token)).resolves.toBeNull();
+  });
+
   it("accepts native app sessions through the dedicated authorization scheme", () => {
     expect(sessionTokenFromRequest(new Request("https://api.example.test/me", { headers: { Authorization: "VeldSession session-id.token-secret" } }))).toBe("session-id.token-secret");
     expect(sessionTokenFromRequest(new Request("https://api.example.test/me", { headers: { Authorization: "Bearer external.jwt.token" } }))).toBeNull();

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { jwtVerify, createRemoteJWKSet } from "jose";
+import { isSouthAfricanPhone } from "../phone";
 
 export type AuthBindings = {
   DB: D1Database;
@@ -278,7 +279,7 @@ export async function verifyExternalJwtWithProvider(env: AuthBindings, token: st
   if (providerEnabled(env, "supabase")) {
     const profile = supabaseProfile(env);
     const supabaseClaims = await verifyJoseToken(token, profile, profile.secret ? ["HS256"] : ["RS256", "ES256"]);
-    if (supabaseClaims) return { provider: "supabase", claims: supabaseClaims };
+    if (supabaseClaims && (!supabaseClaims.phone || isSouthAfricanPhone(supabaseClaims.phone))) return { provider: "supabase", claims: supabaseClaims };
   }
   return null;
 }

@@ -19,6 +19,10 @@ enable_confirmations = true
 max_frequency = "1m0s"
 otp_length = 8
 
+[auth.sms]
+enable_signup = true
+enable_confirmations = false
+
 [storage.vector]
 enabled = false
 max_buckets = 10

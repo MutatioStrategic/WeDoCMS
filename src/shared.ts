@@ -1,3 +1,5 @@
+import { normalizeSouthAfricanPhone } from "./phone";
+
 export type AssetKind = "image" | "video";
 export type AssetStatus = "draft" | "processing" | "needs_review" | "published" | "rejected" | "withdrawn";
 export type WorkflowStage = "ingestion" | "ai_tagging" | "curator_correction" | "approval";
@@ -714,6 +716,10 @@ export class ArchiveDomain {
 
   licenceDescription(licenceType: LicenceType): LicenceDescription {
     return licenceDescription(licenceType);
+  }
+
+  normalizeSouthAfricanPhone(phone: string): string {
+    return normalizeSouthAfricanPhone(phone);
   }
 }
 

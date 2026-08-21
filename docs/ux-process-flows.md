@@ -50,6 +50,21 @@ flowchart TD
    visitor is returned to sign-in. Expired or unavailable links show the provider
    error and offer a path to request another link.
 
+### South African phone OTP
+
+1. A visitor chooses **SMS** and enters a South African mobile number in the
+   familiar local format, for example `073 712 3456`. The form explains that
+   `+27` is added automatically; users do not need to type it.
+2. The client validates the number, converts it to canonical `+27…` E.164,
+   and asks Supabase for a six-digit SMS code. Invalid country codes,
+   landlines, and malformed numbers are rejected before an SMS request.
+3. If Supabase has no SMS provider configured, the form explains that an
+   administrator must enable Phone authentication and an SMS provider in the
+   Supabase project. The entered number remains available for correction and
+   retry.
+4. After verification, the Worker accepts only a South African phone claim
+   and exchanges the verified Supabase identity for the normal Veld session.
+
 ## Buyer licence validation
 
 1. A signed-in buyer opens the Buyer ROI workspace and selects a published asset.

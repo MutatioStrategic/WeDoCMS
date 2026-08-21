@@ -4,6 +4,7 @@ import * as SecureStore from "expo-secure-store";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState, Linking, Platform } from "react-native";
 import "react-native-url-polyfill/auto";
+import { friendlySupabasePhoneError, normalizeSouthAfricanPhone } from "../../src/phone";
 
 declare const process: {
   env: {
@@ -92,9 +93,7 @@ export function mobileSessionHeaders(session: MobileApiSession): Record<string, 
 type AccountIntent = "seller";
 
 function normalizedPhone(phone: string): string {
-  const value = phone.trim();
-  if (!/^\+[1-9]\d{7,14}$/.test(value)) throw new Error("Enter a phone number in international format, for example +27821234567.");
-  return value;
+  return normalizeSouthAfricanPhone(phone);
 }
 
 async function persistAccountIntent(intent: AccountIntent | null): Promise<void> {
@@ -357,7 +356,7 @@ export function useMobileAuth(apiBaseUrl: string) {
       return { phone: value };
     } catch (phoneError) {
       await persistAccountIntent(null);
-      const message = phoneError instanceof Error ? phoneError.message : "The SMS code could not be sent.";
+      const message = friendlySupabasePhoneError(phoneError, "send");
       setError(message);
       throw new Error(message);
     } finally {
@@ -382,7 +381,7 @@ export function useMobileAuth(apiBaseUrl: string) {
       const current = (await supabase.auth.getSession()).data.session ?? result.data.session;
       return await adoptIdentitySession(current, accountIntent);
     } catch (phoneError) {
-      const message = phoneError instanceof Error ? phoneError.message : "SMS verification failed.";
+      const message = friendlySupabasePhoneError(phoneError, "verify");
       setError(message);
       throw new Error(message);
     } finally {
