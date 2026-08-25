@@ -884,6 +884,65 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .campaign-layout { display: grid; grid-template-columns: 250px 1fr; gap: 18px; align-items: start; }.campaign-sidebar, .campaign-brief-card, .campaign-heading, .brief-fields, .campaign-result { border: 1px solid #dedbd2; background: #fffdf9; }.campaign-sidebar { padding: 18px; }.campaign-new-button { width: 100%; margin: 18px 0 12px; border: 1px dashed #bfc7b8; padding: 13px; color: #405343; background: #e8efe4; text-align: left; font-size: 11px; }.campaign-picker { display: block; width: 100%; border: 0; border-top: 1px solid #e8e5dd; padding: 13px 3px; color: #34443a; background: transparent; text-align: left; }.campaign-picker.active { color: #7a3524; }.campaign-picker strong, .campaign-picker small { display: block; }.campaign-picker small { margin-top: 5px; color: #93978d; font: 8px 'DM Mono', monospace; }.campaign-main { min-width: 0; }.campaign-brief-card { max-width: 760px; padding: 30px; }.campaign-brief-card h2 { margin: 13px 0 9px; font-size: 28px; font-weight: 500; letter-spacing: -.05em; }.campaign-brief-card > p { max-width: 600px; margin: 0 0 25px; color: #747a6f; font-size: 11px; line-height: 1.55; }.campaign-brief-card label, .campaign-form-grid label { display: block; margin-top: 15px; color: #697268; font: 8px 'DM Mono', monospace; text-transform: uppercase; }.campaign-brief-card input, .campaign-brief-card textarea { width: 100%; margin-top: 7px; border: 1px solid #d6d3c9; padding: 12px; color: #26332a; background: #fff; font: 12px 'DM Sans', sans-serif; text-transform: none; }.campaign-brief-card textarea { min-height: 170px; resize: vertical; line-height: 1.55; }.campaign-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; margin-bottom: 25px; }.campaign-heading { display: flex; justify-content: space-between; gap: 20px; padding: 25px 28px; }.campaign-heading h2 { margin: 11px 0; font-size: clamp(32px, 4vw, 52px); line-height: .95; font-weight: 500; letter-spacing: -.06em; }.campaign-heading p { max-width: 690px; margin: 0; color: #70776e; font-size: 11px; line-height: 1.55; }.campaign-heading .outline-button { flex: 0 0 auto; align-self: start; }.brief-fields { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; margin-top: 9px; background: #dedbd2; }.brief-fields > div { min-width: 0; padding: 17px; background: #fffdf9; }.brief-fields small, .brief-fields strong { display: block; }.brief-fields small, .campaign-result-detail small { color: #92978e; font: 8px 'DM Mono', monospace; text-transform: uppercase; }.brief-fields strong { margin-top: 8px; overflow: hidden; color: #34443a; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.campaign-results-heading { display: flex; justify-content: space-between; gap: 20px; align-items: end; margin: 38px 0 13px; }.campaign-results-heading h3 { margin: 10px 0 0; font-size: 23px; font-weight: 500; letter-spacing: -.04em; }.campaign-results-heading > small { max-width: 300px; color: #92978e; font: 8px 'DM Mono', monospace; line-height: 1.5; text-align: right; }.campaign-results { display: grid; gap: 9px; }.campaign-result { overflow: hidden; }.campaign-result.approved { border-color: #8eaa82; box-shadow: inset 3px 0 #729265; }.campaign-result.rejected { opacity: .62; }.campaign-result-top { display: grid; grid-template-columns: 215px 1fr; gap: 20px; padding: 15px; }.campaign-result-media { min-height: 180px; border: 0; padding: 0; background: transparent; overflow: hidden; text-align: left; }.campaign-result-media .asset-visual { height: 180px; }.campaign-result-copy { min-width: 0; }.campaign-result-copy h3 { margin: 10px 0 5px; font-size: 20px; font-weight: 500; letter-spacing: -.04em; }.campaign-result-copy > p { margin: 0; color: #868c82; font: 9px 'DM Mono', monospace; }.campaign-score { color: #7a3524; font: 27px 'DM Mono', monospace; font-weight: 500; }.campaign-score.safe { color: #5f8157; }.campaign-score.risk { color: #bd5e3f; }.campaign-score small { margin-left: 2px; color: #a0a49b; font-size: 9px; }.campaign-reasons { display: grid; gap: 5px; margin: 14px 0; color: #5e7955; font: 9px 'DM Mono', monospace; }.campaign-actions { display: flex; flex-wrap: wrap; gap: 6px; }.campaign-actions button { padding: 8px 10px; font-size: 9px; }.campaign-result-detail { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; border-top: 1px solid #e8e5dd; padding: 15px; background: #faf8f2; }.campaign-result-detail p { margin: 8px 0 0; color: #727970; font: 9px 'DM Mono', monospace; line-height: 1.45; }.campaign-result-detail .warning-blocker { color: #9a4834; }.campaign-result-detail .warning-warning { color: #a15b44; }.campaign-result-detail .warning-info { color: #5f8157; }.readiness-row { display: flex; gap: 5px; margin-top: 9px; }.readiness-row span { display: grid; min-width: 44px; padding: 5px; color: #777d74; background: #e5e9df; font: 7px 'DM Mono', monospace; text-align: center; text-transform: uppercase; }.readiness-row b { margin-bottom: 3px; color: #34443a; font-size: 12px; }.campaign-suggestion { color: #7a3524 !important; }
 @media (max-width: 900px) { .campaign-layout { grid-template-columns: 1fr; }.campaign-sidebar { order: 2; }.campaign-main { order: 1; }.campaign-sidebar { display: flex; flex-wrap: wrap; gap: 6px; }.campaign-sidebar > .card-heading { width: 100%; }.campaign-new-button { width: auto; margin: 0; }.campaign-picker { width: auto; min-width: 180px; border: 1px solid #e8e5dd; padding: 10px; } }
 @media (max-width: 620px) { .campaign-page { padding: 55px 20px 80px; }.campaign-form-grid, .brief-fields, .campaign-result-detail { grid-template-columns: 1fr; }.campaign-heading { display: block; }.campaign-heading .outline-button { margin-top: 18px; }.campaign-results-heading { display: block; }.campaign-results-heading > small { display: block; margin-top: 8px; text-align: left; }.campaign-result-top { grid-template-columns: 1fr; }.campaign-result-media, .campaign-result-media .asset-visual { min-height: 220px; height: 220px; } }
+
+/* Clear UAT surfaces for campaign formatting and admin review. */
+.campaign-format-planner { margin: 22px 0 30px; border: 1px solid #cad8c5; padding: 20px; background: #eef3ea; }
+.campaign-format-heading { display: flex; align-items: start; justify-content: space-between; gap: 18px; }
+.campaign-format-heading h3 { margin: 9px 0 6px; color: #304a35; font-size: 22px; letter-spacing: -.05em; }
+.campaign-format-heading p { max-width: 620px; margin: 0; color: #607460; font-size: 10px; line-height: 1.5; }
+.campaign-format-layout { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 14px; margin-top: 18px; }
+.campaign-format-source { display: grid; gap: 9px; min-width: 0; }
+.campaign-format-photo { height: 150px; }
+.campaign-format-source strong, .campaign-format-source small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.campaign-format-source strong { color: #304a35; font-size: 11px; }
+.campaign-format-source small { margin-top: 4px; color: #708270; font: 8px 'DM Mono', monospace; }
+.campaign-format-options { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.campaign-format-option { display: grid; align-content: start; gap: 7px; min-height: 105px; border: 1px solid #d1decd; padding: 11px; color: #4e664f; background: #f8fbf5; text-align: left; }
+.campaign-format-option:hover, .campaign-format-option.selected { border-color: #76916f; color: #304a35; background: #dfeadb; }
+.campaign-format-option span { font-size: 10px; font-weight: 600; }
+.campaign-format-option strong { font: 19px 'DM Mono', monospace; }
+.campaign-format-option small { color: #789374; font: 8px 'DM Mono', monospace; }
+.campaign-format-action { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-top: 1px solid #cfddca; padding-top: 14px; }
+.campaign-format-action > div:first-child strong, .campaign-format-action > div:first-child span { display: block; }
+.campaign-format-action > div:first-child strong { color: #304a35; font-size: 12px; }
+.campaign-format-action > div:first-child span { margin-top: 4px; color: #688068; font: 8px 'DM Mono', monospace; }
+.campaign-format-action > div:last-child { display: flex; flex-wrap: wrap; gap: 7px; }
+.campaign-format-action .outline-button, .campaign-format-action .approve-button { padding: 9px 11px; font-size: 9px; }
+
+.review-panel { margin-top: 28px; border: 1px solid #d9d6cd; background: #faf8f2; }
+.review-panel-heading { display: flex; align-items: end; justify-content: space-between; gap: 18px; padding: 20px 22px 15px; }
+.review-panel-heading h2 { margin: 9px 0 0; font-size: 22px; font-weight: 500; letter-spacing: -.05em; }
+.review-panel-layout { display: grid; grid-template-columns: minmax(220px, .72fr) minmax(0, 1.28fr); gap: 1px; border-top: 1px solid #dedbd2; background: #dedbd2; }
+.review-record-list { display: grid; align-content: start; gap: 1px; background: #dedbd2; }
+.review-record { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 10px; width: 100%; border: 0; padding: 9px; color: #34443a; background: #f7f4ed; text-align: left; }
+.review-record:hover, .review-record.selected { background: #fffdf9; box-shadow: inset 3px 0 #7a3524; }
+.review-record-thumb { height: 62px; }
+.review-record > span { min-width: 0; }
+.review-record strong, .review-record small, .review-record em { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.review-record strong { margin: 4px 0; font-size: 10px; }
+.review-record small, .review-record em { color: #7d887d; font: 8px 'DM Mono', monospace; font-style: normal; }
+.review-record em { margin-top: 5px; color: #a15b44; }
+.review-detail { min-width: 0; padding: 22px; background: #fffdf9; }
+.review-detail-heading { display: flex; align-items: start; justify-content: space-between; gap: 14px; }
+.review-detail-heading h3 { margin: 9px 0 5px; color: #29352c; font-size: 21px; font-weight: 500; letter-spacing: -.04em; }
+.review-detail-heading p { margin: 0; color: #8a9187; font: 8px 'DM Mono', monospace; }
+.review-detail-photo { height: 235px; margin: 17px 0; }
+.review-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.review-detail-label { display: block; margin-bottom: 8px; color: #7b8377; font: 8px 'DM Mono', monospace; text-transform: uppercase; }
+.review-detail-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+.review-detail-facts span { padding: 8px; color: #5d675d; background: #f0eee7; font: 8px 'DM Mono', monospace; }
+.review-detail-facts b { display: block; margin-bottom: 4px; color: #29352c; font: 10px 'DM Sans', sans-serif; }
+.review-detail-note { margin: 16px 0; padding: 11px; border-left: 2px solid #d58a59; color: #697168; background: #f5eee4; font-size: 10px; line-height: 1.5; }
+.review-detail-actions { border-top: 1px solid #e0ddd4; padding: 15px 0 0; }
+.review-empty-next { display: grid; gap: 6px; padding: 34px 22px; color: #6e7b6d; }
+.review-empty-next strong { color: #304a35; font-size: 15px; }
+.review-empty-next span { font: 9px 'DM Mono', monospace; }
+.review-record-thumb > img, .review-record-thumb > video, .governance-thumb > img, .governance-thumb > video, .governance-preview-media > img, .governance-preview-media > video { width: 100%; height: 100%; object-fit: cover; }
+.governance-preview-media { position: absolute; inset: 0; }
+.governance-preview-media .visual-overlay, .governance-preview-media .visual-place { display: none; }
+.governance-thumb .visual-overlay, .governance-thumb .visual-place { display: none; }
+@media (max-width: 800px) { .campaign-format-layout { grid-template-columns: 1fr; }.campaign-format-photo { height: 210px; }.campaign-format-options { grid-template-columns: 1fr 1fr; }.campaign-format-action { display: grid; }.review-panel-layout { grid-template-columns: 1fr; }.review-record-list { grid-template-columns: 1fr 1fr; }.review-detail { grid-row: 1; }.review-panel-heading { align-items: start; display: block; }.review-panel-heading .status-pill { display: inline-block; margin-top: 12px; } }
+@media (max-width: 520px) { .campaign-format-heading { display: block; }.campaign-format-heading .status-pill { display: inline-block; margin-top: 12px; }.campaign-format-options, .review-record-list, .review-detail-grid { grid-template-columns: 1fr; }.review-detail { padding: 16px; }.review-detail-photo { height: 210px; } }
 @media (max-width: 760px) { .discovery-shelf { padding: 50px 20px 0; }.discovery-shelf .section-heading, .recommendation-block > div:first-child { display: block; }.save-search-control { margin-top: 18px; align-items: stretch; }.save-search-control select, .save-search-control button { flex: 1; }.recommendation-block > div:first-child small { display: block; margin-top: 8px; text-align: left; } }
 
 /* Phase 4 media formatting studio */
