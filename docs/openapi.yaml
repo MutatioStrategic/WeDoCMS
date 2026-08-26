@@ -807,6 +807,257 @@ paths:
           content:
             application/json:
               schema: { type: object, required: [verified], properties: { verified: { type: boolean }, reason: { type: string } }, additionalProperties: false }
+  /api/campaigns/{id}:
+    get:
+      operationId: getCampaignDeliveryDetail
+      summary: Get a tenant-scoped campaign with licences, edit versions, derivatives, blockers, and bundle history
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Campaign delivery detail, content: { application/json: { schema: { $ref: '#/components/schemas/CampaignDetail' } } } }
+        '401': { description: Authentication required, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '404': { description: Campaign not found, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/assets/{id}/edit-versions:
+    get:
+      operationId: listAssetEditVersions
+      summary: List authenticated edit versions for an asset
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Edit versions, content: { application/json: { schema: { $ref: '#/components/schemas/EditVersionListResponse' } } } }
+        '403': { description: Active licence or reviewer access required, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+    post:
+      operationId: createAssetEditVersion
+      summary: Create an immutable-original edit version for a licensed campaign asset
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/EditVersionRequest' } } }
+      responses:
+        '201': { description: Edit version created, content: { application/json: { schema: { $ref: '#/components/schemas/EditVersion' } } } }
+        '403': { description: Licence or campaign access failed, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '422': { description: Rights or release blocker, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/assets/{id}/derivatives:
+    post:
+      operationId: createAssetDerivative
+      summary: Register a derivative before uploading its authenticated content
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/DerivativeRequest' } } }
+      responses:
+        '201': { description: Derivative registered, content: { application/json: { schema: { $ref: '#/components/schemas/Derivative' } } } }
+        '403': { description: Licence or campaign access failed, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/assets/{id}/derivatives/{derivativeId}/content:
+    get:
+      operationId: getDerivativeContent
+      summary: Stream ready derivative content through an authenticated route
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: derivativeId, in: path, required: true, schema: { type: string } }
+        - { name: Range, in: header, required: false, schema: { type: string } }
+      responses:
+        '200': { description: Derivative content }
+        '206': { description: Partial derivative content }
+        '403': { description: Authenticated licence access required, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '404': { description: Derivative not ready or not found, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+    put:
+      operationId: uploadDerivativeContent
+      summary: Upload derivative bytes through the authenticated content route
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: derivativeId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content: { application/octet-stream: { schema: { type: string, format: binary } }, image/webp: { schema: { type: string, format: binary } } }
+      responses:
+        '200': { description: Derivative ready, content: { application/json: { schema: { $ref: '#/components/schemas/Derivative' } } } }
+        '403': { description: Authenticated licence access required, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '413': { description: Derivative too large, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/campaigns/{id}/bundles:
+    post:
+      operationId: requestCampaignBundle
+      summary: Request a rights-checked campaign bundle
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/BundleRequest' } } }
+      responses:
+        '201': { description: Bundle requested, content: { application/json: { schema: { $ref: '#/components/schemas/Bundle' } } } }
+        '422': { description: Bundle blockers, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/campaigns/{id}/bundles/{bundleId}/approve:
+    post:
+      operationId: approveCampaignBundle
+      summary: Build and approve a streamed, auditable campaign ZIP
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: bundleId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Bundle approved, content: { application/json: { schema: { $ref: '#/components/schemas/Bundle' } } } }
+        '409': { description: Build already in progress or bundle not rebuildable, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '422': { description: Bundle build failed or rights blockers remain, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/campaign-bundles/{id}/download:
+    get:
+      operationId: downloadCampaignBundle
+      summary: Download an approved campaign bundle within its seven-day expiry
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Authenticated ZIP download, content: { application/zip: { schema: { type: string, format: binary } } } }
+        '403': { description: Organization authorization failed, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '410': { description: Bundle expired, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/rights/cases/{id}/transition:
+    post:
+      operationId: transitionRightsCase
+      summary: Apply a permitted reviewer rights-case transition
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/RightsTransitionRequest' } } }
+      responses:
+        '200': { description: Rights transition recorded, content: { application/json: { schema: { $ref: '#/components/schemas/RightsTransitionResponse' } } } }
+        '403': { description: Actor is not authorized, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '409': { description: Invalid or concurrent transition, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/rights/cases/{id}/appeal:
+    post:
+      operationId: appealRightsCase
+      summary: Appeal a resolved rights case as requester or asset owner
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/RightsAppealRequest' } } }
+      responses:
+        '200': { description: Appeal recorded, content: { application/json: { schema: { $ref: '#/components/schemas/RightsTransitionResponse' } } } }
+        '403': { description: Requester or asset owner required, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '409': { description: Case is not resolved, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/assets/{id}/stream-upload:
+    post:
+      operationId: provisionStreamUpload
+      summary: Provision a signed Cloudflare Stream direct upload for an owned video
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: Idempotency-Key, in: header, required: false, schema: { type: string, maxLength: 180 } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/StreamUploadRequest' } } }
+      responses:
+        '201': { description: Direct upload provisioned, content: { application/json: { schema: { $ref: '#/components/schemas/StreamUpload' } } } }
+        '503': { description: Stream is not configured, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/assets/{id}/stream-playback:
+    get:
+      operationId: getStreamPlayback
+      summary: Get a short-lived signed Stream playback URL for an authorized viewer
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Signed playback URL, content: { application/json: { schema: { $ref: '#/components/schemas/StreamPlayback' } } } }
+        '409': { description: Stream is not ready, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/webhooks/stream:
+    post:
+      operationId: receiveStreamWebhook
+      summary: Verify and persist a timestamped Cloudflare Stream status callback
+      parameters:
+        - { name: Webhook-Signature, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/StreamWebhookRequest' } } }
+      responses:
+        '200': { description: Webhook accepted or duplicate, content: { application/json: { schema: { $ref: '#/components/schemas/StreamWebhookResponse' } } } }
+        '401': { description: Invalid signature, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/audit/events/{streamId}:
+    get:
+      operationId: listAuditEvents
+      summary: List organization-scoped signed audit events for a permitted stream
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: streamId, in: path, required: true, schema: { type: string } }
+        - { name: residencyRegion, in: query, required: false, schema: { type: string, enum: [za, eu] } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 1000 } }
+      responses:
+        '200': { description: Signed audit events, content: { application/json: { schema: { $ref: '#/components/schemas/AuditEventsResponse' } } } }
+  /api/audit/exports:
+    post:
+      operationId: createAuditExport
+      summary: Create a residency- and organization-scoped audit export
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/AuditExportRequest' } } }
+      responses:
+        '201': { description: Audit export created, content: { application/json: { schema: { $ref: '#/components/schemas/AuditExportResponse' } } } }
+  /api/audit/exports/{exportId}:
+    get:
+      operationId: downloadAuditExport
+      summary: Download an audit export only as its owning organization administrator or service
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: exportId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Audit JSON export, content: { application/json: { schema: { type: string, format: binary } } } }
+        '403': { description: Organization or residency authorization failed, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/verification/cases/{caseId}:
+    get:
+      operationId: getVerificationCase
+      summary: Get a residency- and organization-scoped verification case without private object keys
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: caseId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Verification case, content: { application/json: { schema: { $ref: '#/components/schemas/VerificationCaseResponse' } } } }
+        '403': { description: Organization or residency authorization failed, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/verification/cases/{caseId}/documents:
+    post:
+      operationId: registerVerificationDocument
+      summary: Register KYC document metadata before authenticated content upload
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: caseId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/VerificationDocumentRequest' } } }
+      responses:
+        '201': { description: Document upload handle, content: { application/json: { schema: { $ref: '#/components/schemas/VerificationDocumentResponse' } } } }
+  /api/verification/documents/{documentId}/content:
+    put:
+      operationId: uploadVerificationDocumentContent
+      summary: Upload KYC document bytes through an authenticated, scoped route
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: documentId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content: { application/octet-stream: { schema: { type: string, format: binary } } }
+      responses:
+        '200': { description: Document uploaded, content: { application/json: { schema: { $ref: '#/components/schemas/VerificationDocumentUploadResponse' } } } }
+        '403': { description: Organization or residency authorization failed, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/verification/documents/{documentId}/ocr:
+    post:
+      operationId: runVerificationDocumentOcr
+      summary: Run organization-scoped assistive OCR on an uploaded KYC document
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: documentId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: OCR result, content: { application/json: { schema: { $ref: '#/components/schemas/VerificationOcrResponse' } } } }
+        '403': { description: Organization or residency authorization failed, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
 components:
   securitySchemes:
     sessionCookie:
@@ -818,6 +1069,285 @@ components:
       scheme: bearer
       bearerFormat: JWT
   schemas:
+    CampaignDetail:
+      type: object
+      required: [campaign, recommendations, assets, editVersions, derivatives, bundles, licenceMetadata, blockers]
+      properties:
+        campaign: { type: object, additionalProperties: true }
+        recommendations: { type: array, items: { type: object, additionalProperties: true } }
+        assets: { type: array, items: { $ref: '#/components/schemas/CampaignAsset' } }
+        editVersions: { type: array, items: { $ref: '#/components/schemas/EditVersion' } }
+        derivatives: { type: array, items: { $ref: '#/components/schemas/Derivative' } }
+        bundles: { type: array, items: { $ref: '#/components/schemas/Bundle' } }
+        licenceMetadata: { type: array, items: { $ref: '#/components/schemas/LicenceMetadata' } }
+        blockers: { type: array, items: { $ref: '#/components/schemas/CampaignBlockers' } }
+        buyerTermsAccepted: { type: boolean }
+      additionalProperties: true
+    CampaignAsset:
+      allOf:
+        - $ref: '#/components/schemas/Asset'
+        - type: object
+          required: [campaignStage, campaignNote, activeLicenceId]
+          properties:
+            campaignStage: { type: string, enum: [shortlisted, rejected, approved, needs_review] }
+            campaignNote: { type: string }
+            activeLicenceId: { type: string, nullable: true }
+    CampaignBlockers:
+      type: object
+      required: [assetId, blockers]
+      properties:
+        assetId: { type: string }
+        blockers: { type: array, items: { $ref: '#/components/schemas/DeliveryBlocker' } }
+    DeliveryBlocker:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+    LicenceMetadata:
+      type: object
+      required: [assetId, licenceId, licenceType, territory, expiresAt]
+      properties:
+        assetId: { type: string }
+        licenceId: { type: string, nullable: true }
+        licenceType: { type: string, nullable: true }
+        territory: { type: string, nullable: true }
+        expiresAt: { type: string, format: date-time, nullable: true }
+    EditVersionRequest:
+      type: object
+      required: [campaignId, licenceId]
+      properties:
+        campaignId: { type: string }
+        licenceId: { type: string }
+        recipe: { type: object, additionalProperties: true, default: {} }
+        note: { type: string, maxLength: 1000, default: '' }
+      additionalProperties: false
+    EditVersion:
+      type: object
+      required: [id, assetId, versionNumber, recipe, note, createdAt]
+      properties:
+        id: { type: string }
+        assetId: { type: string }
+        versionNumber: { type: integer, minimum: 1 }
+        recipe: { type: object, additionalProperties: true }
+        note: { type: string }
+        createdAt: { type: string, format: date-time }
+        auditEventId: { type: string }
+      additionalProperties: true
+    EditVersionListResponse:
+      type: object
+      required: [assetId, results]
+      properties:
+        assetId: { type: string }
+        results: { type: array, items: { $ref: '#/components/schemas/EditVersion' } }
+      additionalProperties: false
+    DerivativeRequest:
+      type: object
+      required: [editVersionId, campaignId, licenceId, variant, contentType, sizeBytes]
+      properties:
+        editVersionId: { type: string }
+        campaignId: { type: string }
+        licenceId: { type: string }
+        variant: { type: string, enum: [edited, social_square, portrait, landscape, story_9_16, reel_cover, linkedin, web_hero, email_header] }
+        contentType: { type: string }
+        sizeBytes: { type: integer, minimum: 1, maximum: 50000000 }
+        width: { type: integer, minimum: 1, nullable: true }
+        height: { type: integer, minimum: 1, nullable: true }
+      additionalProperties: false
+    Derivative:
+      type: object
+      required: [id, assetId, editVersionId, licenceId, variant, status, contentType, sizeBytes, contentUrl, createdAt]
+      properties:
+        id: { type: string }
+        assetId: { type: string }
+        editVersionId: { type: string }
+        campaignId: { type: string, nullable: true }
+        licenceId: { type: string }
+        variant: { type: string, enum: [edited, social_square, portrait, landscape, story_9_16, reel_cover, linkedin, web_hero, email_header] }
+        status: { type: string, enum: [pending, ready, failed, revoked] }
+        contentType: { type: string }
+        sizeBytes: { type: integer, minimum: 0 }
+        width: { type: integer, minimum: 1, nullable: true }
+        height: { type: integer, minimum: 1, nullable: true }
+        contentUrl: { type: string, pattern: '^/' }
+        createdAt: { type: string, format: date-time }
+        auditEventId: { type: string }
+      additionalProperties: true
+    BundleRequest:
+      type: object
+      required: [bundleType]
+      properties:
+        bundleType: { type: string, enum: [social_media, website, paid_ads, print_handoff, full_archive] }
+      additionalProperties: false
+    Bundle:
+      type: object
+      required: [id, campaignId, bundleType, status, createdAt]
+      properties:
+        id: { type: string }
+        campaignId: { type: string }
+        bundleType: { type: string }
+        status: { type: string, enum: [pending, building, approved, expired, revoked, failed] }
+        buildStatus: { type: string, nullable: true }
+        error: { type: string, nullable: true }
+        expiresAt: { type: string, format: date-time, nullable: true }
+        download: { type: string, pattern: '^/', nullable: true }
+        manifest: { type: object, additionalProperties: true }
+        createdAt: { type: string, format: date-time }
+        auditEventId: { type: string }
+      additionalProperties: true
+    RightsTransitionRequest:
+      type: object
+      required: [to]
+      properties:
+        to: { type: string, enum: [under_review, mediation, resolved, appealed, closed] }
+        resolutionSummary: { type: string, maxLength: 4000 }
+        summary: { type: string, maxLength: 4000 }
+        evidenceReferences: { type: array, maxItems: 20, items: { type: string, maxLength: 240 } }
+      additionalProperties: false
+    RightsAppealRequest:
+      type: object
+      properties:
+        summary: { type: string, minLength: 10, maxLength: 4000 }
+        resolutionSummary: { type: string, minLength: 10, maxLength: 4000 }
+        evidenceReferences: { type: array, maxItems: 20, items: { type: string, maxLength: 240 } }
+      additionalProperties: false
+    RightsTransitionResponse:
+      type: object
+      required: [id, status, auditEventId]
+      properties:
+        id: { type: string }
+        status: { type: string, enum: [under_review, mediation, resolved, appealed, closed] }
+        auditEventId: { type: string }
+      additionalProperties: false
+    StreamUploadRequest:
+      type: object
+      required: [filename, contentType]
+      properties:
+        filename: { type: string, minLength: 1, maxLength: 240 }
+        contentType: { type: string, pattern: '^video/' }
+        maxDurationSeconds: { type: integer, minimum: 1, maximum: 36000, default: 3600 }
+      additionalProperties: false
+    StreamUpload:
+      type: object
+      required: [assetId, streamUid, uploadUrl, expiresAt, status]
+      properties:
+        assetId: { type: string }
+        streamUid: { type: string }
+        uploadUrl: { type: string, format: uri }
+        expiresAt: { type: string, format: date-time }
+        status: { type: string, enum: [uploading, processing, ready, error] }
+        auditEventId: { type: string }
+      additionalProperties: false
+    StreamPlayback:
+      type: object
+      required: [assetId, streamUid, iframeUrl, expiresInSeconds]
+      properties:
+        assetId: { type: string }
+        streamUid: { type: string }
+        iframeUrl: { type: string, format: uri }
+        expiresInSeconds: { type: integer, minimum: 1 }
+      additionalProperties: false
+    StreamWebhookRequest:
+      type: object
+      properties:
+        uid: { type: string }
+        state: { type: string }
+        readyToStream: { type: boolean }
+        pctComplete: { oneOf: [{ type: string }, { type: number }] }
+        status: { oneOf: [{ type: string }, { type: object, additionalProperties: true }] }
+        errorReasonCode: { type: string, nullable: true }
+        errorReasonText: { type: string, nullable: true }
+      additionalProperties: true
+    StreamWebhookResponse:
+      type: object
+      required: [accepted, streamUid, state, progress, status]
+      properties:
+        accepted: { type: boolean }
+        duplicate: { type: boolean }
+        streamUid: { type: string }
+        state: { type: string }
+        progress: { type: integer, minimum: 0, maximum: 100 }
+        status: { type: string, enum: [uploading, processing, ready, error] }
+      additionalProperties: true
+    AuditExportRequest:
+      type: object
+      required: [streamId, residencyRegion]
+      properties:
+        streamId: { type: string }
+        residencyRegion: { type: string, enum: [za, eu] }
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+      additionalProperties: false
+    AuditExportResponse:
+      type: object
+      required: [exportId, download]
+      properties:
+        exportId: { type: string }
+        download: { type: string, pattern: '^/' }
+      additionalProperties: true
+    AuditEventsResponse:
+      type: object
+      required: [streamId, residencyRegion, events]
+      properties:
+        streamId: { type: string }
+        residencyRegion: { type: string, enum: [za, eu] }
+        events: { type: array, items: { type: object, additionalProperties: true } }
+      additionalProperties: true
+    VerificationCaseResponse:
+      type: object
+      required: [case, documents]
+      properties:
+        case: { type: object, additionalProperties: true }
+        documents: { type: array, items: { $ref: '#/components/schemas/VerificationDocument' } }
+      additionalProperties: false
+    VerificationDocument:
+      type: object
+      required: [id, document_type, content_sha256, created_at]
+      properties:
+        id: { type: string }
+        document_type: { type: string }
+        content_sha256: { type: string }
+        issued_country: { type: string, nullable: true }
+        expires_at: { type: string, nullable: true }
+        created_at: { type: string }
+        uploaded_at: { type: string, nullable: true }
+        size_bytes: { type: integer, nullable: true }
+      additionalProperties: false
+    VerificationDocumentRequest:
+      type: object
+      required: [documentType, contentSha256]
+      properties:
+        documentType: { type: string, enum: [government_id, proof_of_address, business_registration, beneficial_owner_register, bank_account_proof] }
+        contentSha256: { type: string, pattern: '^[a-f0-9]{64}$' }
+        issuedCountry: { type: string, minLength: 2, maxLength: 2 }
+        expiresAt: { type: string, format: date-time }
+      additionalProperties: false
+    VerificationDocumentResponse:
+      type: object
+      required: [documentId, upload, retentionUntil]
+      properties:
+        documentId: { type: string }
+        upload: { type: string }
+        retentionUntil: { type: string, format: date-time }
+      additionalProperties: false
+    VerificationDocumentUploadResponse:
+      type: object
+      required: [documentId, uploaded, sizeBytes]
+      properties:
+        documentId: { type: string }
+        uploaded: { type: boolean }
+        sizeBytes: { type: integer, minimum: 1 }
+      additionalProperties: false
+    VerificationOcrResponse:
+      type: object
+      required: [resultId, documentId, model, extracted, validation]
+      properties:
+        resultId: { type: string }
+        documentId: { type: string }
+        model: { type: string }
+        extracted: { type: object, additionalProperties: true }
+        validation: { type: object, additionalProperties: true }
+      additionalProperties: false
     ErrorResponse:
       type: object
       required: [error]

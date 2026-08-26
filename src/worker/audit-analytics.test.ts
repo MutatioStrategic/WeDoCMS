@@ -46,9 +46,10 @@ describe("audit analytics connector", () => {
       occurred_at: "2026-08-13T10:00:00.000Z", actor_id: "admin-1", actor_type: "admin", action: "asset.approved",
       resource_type: "asset", resource_id: "asset-1", residency_region: "za", event_hash: "hash", previous_hash: "previous", data_json: "{}",
     }] }), { status: 200, headers: { "Content-Type": "application/json" } }));
-    const rows = await searchR2AuditCatalog({ R2_ACCOUNT_ID: "account", R2_ANALYTICS_BUCKET: "bucket", R2_SQL_AUTH_TOKEN: "secret" }, { organizationId: "org-demo", q: "asset", limit: 10 });
+    const rows = await searchR2AuditCatalog({ R2_ACCOUNT_ID: "account", R2_ANALYTICS_BUCKET: "bucket", R2_SQL_AUTH_TOKEN: "secret" }, { organizationId: "org-demo", residencyRegion: "za", q: "asset", limit: 10 });
     expect(rows).toHaveLength(1);
     expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/accounts/account/r2-sql/query/bucket"), expect.objectContaining({ method: "POST" }));
     expect(String(fetchMock.mock.calls[0]?.[1]?.body)).toContain("organization_id = 'org-demo'");
+    expect(String(fetchMock.mock.calls[0]?.[1]?.body)).toContain("residency_region = 'za'");
   });
 });

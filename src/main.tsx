@@ -882,6 +882,11 @@ function CampaignWorkspace({ api, onNotice, onOpen, role }: { api: (path: string
   const [activeCampaign, setActiveCampaign] = useState<CampaignSummary | null>(null);
   const [campaignAssets, setCampaignAssets] = useState<CmsCampaignAsset[]>([]);
   const [recommendations, setRecommendations] = useState<CampaignRecommendationRow[]>([]);
+  const [editVersions, setEditVersions] = useState<CmsDetail["editVersions"]>([]);
+  const [derivatives, setDerivatives] = useState<CmsDerivative[]>([]);
+  const [bundles, setBundles] = useState<CmsBundle[]>([]);
+  const [licenceMetadata, setLicenceMetadata] = useState<CmsLicenceMetadata[]>([]);
+  const [campaignBlockers, setCampaignBlockers] = useState<CmsBlocker[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [zohoSending, setZohoSending] = useState(false);
@@ -922,10 +927,15 @@ function CampaignWorkspace({ api, onNotice, onOpen, role }: { api: (path: string
     try {
       const response = await api(`/api/campaigns/${id}`);
       if (!response.ok) throw new Error();
-      const data = await response.json() as { campaign: CampaignSummary; assets?: CmsCampaignAsset[]; recommendations: CampaignRecommendationRow[] };
+      const data = await response.json() as { campaign: CampaignSummary; assets?: CmsCampaignAsset[]; recommendations: CampaignRecommendationRow[]; editVersions?: CmsDetail["editVersions"]; derivatives?: CmsDerivative[]; bundles?: CmsBundle[]; licenceMetadata?: CmsLicenceMetadata[]; blockers?: CmsBlocker[] };
       setActiveCampaign(data.campaign);
       setCampaignAssets(data.assets ?? []);
       setRecommendations(data.recommendations);
+      setEditVersions(data.editVersions ?? []);
+      setDerivatives(data.derivatives ?? []);
+      setBundles(data.bundles ?? []);
+      setLicenceMetadata(data.licenceMetadata ?? []);
+      setCampaignBlockers(data.blockers ?? []);
       const accepted = Boolean((data as { buyerTermsAccepted?: boolean }).buyerTermsAccepted);
       setBuyerTermsAccepted(accepted);
       setBuyerTermsViewed(accepted);
@@ -1084,7 +1094,8 @@ function CampaignWorkspace({ api, onNotice, onOpen, role }: { api: (path: string
           {assistantTool === "rights" && <><AssistantOutputHeading title="Commercial-use warning" detail="Stored rights evidence is shown before creative approval." />{selectedRecommendation.warnings.length ? selectedRecommendation.warnings.map((warning) => <div className={`rights-warning ${warning.severity}`} key={warning.code}><strong>{warning.label}</strong><p>{warning.detail}</p></div>) : <div className="readability-result pass"><strong>No stored blocker</strong><span>Rights are marked usable for this brief. Confirm the final licence scope and territory before release.</span></div>}<div className="rights-summary"><span>Source: <b>Licensed contributor media</b></span><span>Rights: <b>{selectedAsset.rightsStatus}</b></span><span>Generated media: <b>None</b></span></div></>}
           {assistantTool === "variants" && <><AssistantOutputHeading title="Channel variant plan" detail="Reformatting instructions keep one traceable licensed source across every output." /><div className="variant-grid">{(["linkedin", "instagram", "web", "email"] as const).map((platform) => <article key={platform}><span>{campaignPlatformLabel(platform)}</span><strong>{platform === "instagram" ? "9:16 Story" : platform === "linkedin" ? "1.91:1" : platform === "web" ? "16:9 Hero" : "4:3 / 1:1"}</strong><small>{cropAdvice(selectedAsset, platform === "linkedin" ? "linkedin" : platform)[0]}</small><em>Source: {selectedAsset.id.slice(0, 12)}…</em></article>)}</div><p className="assistant-disclaimer">These are production-ready directions, not silently generated replacements.</p></>}
         </div> : <div className="assistant-empty">Select a ranked source to start. The assistant will keep the asset ID and rights status attached to every suggestion.</div>}</aside>
-      </div>
+       </div>
+      {activeCampaign && <CampaignDeliveryPanel campaign={activeCampaign} selectedAssetId={selectedAssetId} assets={campaignAssets} editVersions={editVersions} derivatives={derivatives} bundles={bundles} licenceMetadata={licenceMetadata} blockers={campaignBlockers} role={role} api={api} onNotice={onNotice} onRefresh={() => void loadCampaign(activeCampaign.id)} />}
     </section>}
   </main>;
 }
@@ -1095,11 +1106,13 @@ function AssistantOutputHeading({ title, detail }: { title: string; detail: stri
 
 type CmsCampaign = { id: string; name: string; briefText: string; brief: Record<string, unknown>; brandKit: BrandKit; status: string; assetCount?: number };
 type CmsCampaignAsset = Asset & { campaignStage: "shortlisted" | "rejected" | "approved" | "needs_review"; campaignNote: string; activeLicenceId: string | null };
-type CmsDerivative = { id: string; assetId: string; editVersionId: string; licenceId: string; variant: string; status: string; sizeBytes: number; createdAt: string };
-type CmsBundle = { id: string; bundleType: string; status: string; expiresAt?: string | null; createdAt: string; manifest?: Record<string, unknown> };
-type CmsDetail = { campaign: CmsCampaign; assets: CmsCampaignAsset[]; editVersions: Array<{ id: string; assetId: string; versionNumber: number; recipe: EditRecipe; note: string; createdAt: string }>; derivatives: CmsDerivative[]; bundles: CmsBundle[] };
+type CmsDerivative = { id: string; assetId: string; editVersionId: string; campaignId?: string | null; licenceId: string; variant: string; status: string; contentType?: string; contentUrl?: string; sizeBytes: number; width?: number | null; height?: number | null; createdAt: string };
+type CmsBundle = { id: string; campaignId?: string; bundleType: string; status: string; buildStatus?: string | null; error?: string | null; expiresAt?: string | null; download?: string | null; createdAt: string; manifest?: Record<string, unknown> };
+type CmsLicenceMetadata = { assetId: string; licenceId: string | null; licenceType?: string | null; territory?: string | null; expiresAt?: string | null };
+type CmsBlocker = { assetId: string; blockers: Array<{ code: string; message: string }> };
+type CmsDetail = { campaign: CmsCampaign; assets: CmsCampaignAsset[]; editVersions: Array<{ id: string; assetId: string; versionNumber: number; recipe: EditRecipe; note: string; createdAt: string }>; derivatives: CmsDerivative[]; bundles: CmsBundle[]; licenceMetadata?: CmsLicenceMetadata[]; blockers?: CmsBlocker[]; buyerTermsAccepted?: boolean };
 
-function ImageEditor({ asset, versions, licenceId, campaignId, api, onNotice, onSaved }: { asset: CmsCampaignAsset; versions: CmsDetail["editVersions"]; licenceId: string | null; campaignId: string; api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void; onSaved: () => void }) {
+function LegacyImageEditor({ asset, versions, licenceId, campaignId, api, onNotice, onSaved }: { asset: CmsCampaignAsset; versions: CmsDetail["editVersions"]; licenceId: string | null; campaignId: string; api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void; onSaved: () => void }) {
   const canvasRef = React.useRef<HTMLCanvasElement>(null); const [recipe, setRecipe] = useState<EditRecipe>(() => defaultEditRecipe()); const [image, setImage] = useState<HTMLImageElement | null>(null); const [guides, setGuides] = useState(true); const [beforeAfter, setBeforeAfter] = useState(false); const [saving, setSaving] = useState(false);
   useEffect(() => { setRecipe(defaultEditRecipe()); setBeforeAfter(false); if (!asset.previewUrl) { setImage(null); return; } const next = new Image(); next.onload = () => setImage(next); next.onerror = () => setImage(null); next.src = asset.previewUrl; }, [asset.id, asset.previewUrl]);
   const render = useCallback((exporting = false) => { const canvas = canvasRef.current; if (!canvas || !image) return; const preset = cropPresets[recipe.preset]; canvas.width = preset.width; canvas.height = preset.height; const ctx = canvas.getContext("2d"); if (!ctx) return; const crop = fitCrop(image.naturalWidth, image.naturalHeight, preset.ratio); ctx.save(); ctx.fillStyle = "#1d211d"; ctx.fillRect(0, 0, canvas.width, canvas.height); if (recipe.background !== "none") { ctx.filter = "blur(28px) saturate(115%)"; ctx.drawImage(image, crop.x, crop.y, crop.width, crop.height, 0, 0, canvas.width, canvas.height); ctx.filter = "none"; } ctx.translate(canvas.width / 2, canvas.height / 2); ctx.rotate(((recipe.rotation + recipe.straighten) * Math.PI) / 180); ctx.scale(recipe.flipX ? -1 : 1, recipe.flipY ? -1 : 1); ctx.filter = exporting || !beforeAfter ? `brightness(${recipe.brightness}%) contrast(${recipe.contrast}%) saturate(${recipe.saturation}%)` : "none"; ctx.drawImage(image, crop.x, crop.y, crop.width, crop.height, -canvas.width / 2, -canvas.height / 2, canvas.width, canvas.height); ctx.restore(); if (recipe.warmth !== 0 && (exporting || !beforeAfter)) { ctx.save(); ctx.globalAlpha = Math.abs(recipe.warmth) / 180; ctx.fillStyle = recipe.warmth > 0 ? "#f3a45e" : "#77a9d6"; ctx.globalCompositeOperation = "soft-light"; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.restore(); } if (!exporting && guides && !beforeAfter) { ctx.save(); ctx.strokeStyle = "rgba(255,250,240,.7)"; ctx.setLineDash([8, 8]); ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(canvas.width / 3, 0); ctx.lineTo(canvas.width / 3, canvas.height); ctx.moveTo((canvas.width / 3) * 2, 0); ctx.lineTo((canvas.width / 3) * 2, canvas.height); ctx.moveTo(0, canvas.height / 3); ctx.lineTo(canvas.width, canvas.height / 3); ctx.moveTo(0, (canvas.height / 3) * 2); ctx.lineTo(canvas.width, (canvas.height / 3) * 2); ctx.stroke(); const margin = canvas.width * (safeZonePercent(recipe.logo.safeMargin) / 100); ctx.strokeStyle = "rgba(227,167,92,.85)"; ctx.strokeRect(margin, margin, canvas.width - margin * 2, canvas.height - margin * 2); ctx.restore(); } if (!exporting && !beforeAfter) { ctx.save(); const margin = canvas.width * (safeZonePercent(recipe.logo.safeMargin) / 100); if (recipe.text.value) { ctx.fillStyle = recipe.text.colour; ctx.font = `600 ${Math.max(28, Math.round(canvas.width / 18))}px ${recipe.text.font}`; ctx.textAlign = recipe.text.align; ctx.fillText(recipe.text.value, recipe.text.align === "left" ? margin : recipe.text.align === "right" ? canvas.width - margin : canvas.width / 2, canvas.height - margin * 2.2); } if (recipe.logo.value) { ctx.font = `700 ${Math.max(18, Math.round(canvas.width / 38))}px Arial`; ctx.fillStyle = recipe.text.colour; ctx.textAlign = recipe.logo.position.includes("right") ? "right" : "left"; ctx.fillText(recipe.logo.value, recipe.logo.position.includes("right") ? canvas.width - margin : margin, recipe.logo.position.includes("bottom") ? canvas.height - margin : margin * 1.8); } ctx.restore(); } }, [beforeAfter, guides, image, recipe]);
@@ -1107,6 +1120,108 @@ function ImageEditor({ asset, versions, licenceId, campaignId, api, onNotice, on
   async function saveVersionAndExport() { if (!image) { onNotice("This image has no usable preview yet; finish media processing before editing."); return; } setSaving(true); try { const versionResponse = await api(`/api/assets/${asset.id}/edit-versions`, { method: "POST", body: JSON.stringify({ recipe, note: `${cropPresets[recipe.preset].label} campaign derivative` }) }); if (!versionResponse.ok) throw new Error("version"); const version = await versionResponse.json() as { id: string; versionNumber: number }; if (!licenceId) { onNotice(`Version ${version.versionNumber} saved. Export is locked until an active paid licence is attached.`); onSaved(); return; } const exportCanvas = document.createElement("canvas"); exportCanvas.width = cropPresets[recipe.preset].width; exportCanvas.height = cropPresets[recipe.preset].height; const originalCanvas = canvasRef.current; if (!originalCanvas) throw new Error("canvas"); const exportContext = exportCanvas.getContext("2d"); if (!exportContext) throw new Error("canvas"); render(true); exportContext.drawImage(originalCanvas, 0, 0, exportCanvas.width, exportCanvas.height); const blob = await new Promise<Blob | null>((resolve) => exportCanvas.toBlob(resolve, "image/webp", .9)); if (!blob) throw new Error("render"); const derivativeResponse = await api(`/api/assets/${asset.id}/derivatives`, { method: "POST", body: JSON.stringify({ editVersionId: version.id, campaignId, licenceId, variant: derivativeForPreset[recipe.preset], contentType: "image/webp", sizeBytes: blob.size, width: exportCanvas.width, height: exportCanvas.height }) }); if (!derivativeResponse.ok) { const detail = await derivativeResponse.json().catch(() => ({})) as { error?: string }; throw new Error(detail.error ?? "derivative"); } const derivative = await derivativeResponse.json() as { uploadUrl: string }; const upload = await api(derivative.uploadUrl, { method: "PUT", body: blob, headers: { "Content-Type": "image/webp" } }); if (!upload.ok) throw new Error("upload"); onNotice(`Version ${version.versionNumber} exported as ${cropPresets[recipe.preset].label}. The original remains unchanged.`); onSaved(); } catch (error) { onNotice(error instanceof Error && error.message.includes("licence") ? error.message : "The edit could not be saved or exported. No source asset was changed."); } finally { setSaving(false); } }
   const setNumber = (key: "brightness" | "contrast" | "saturation" | "warmth" | "sharpen", value: number) => setRecipe((current) => ({ ...current, [key]: value }));
   return <section className="cms-editor"><div className="cms-editor-toolbar"><div><span className="section-kicker">IMAGE EDITOR · SOURCE {asset.id.slice(0, 10)}</span><h3>{asset.title}</h3><small>Original is immutable · {asset.activeLicenceId ? "Active licence attached" : "Licence required for export"}</small></div><div className="editor-toolbar-actions"><button type="button" className="ghost-button" onClick={() => setBeforeAfter((value) => !value)}>{beforeAfter ? "Show edited" : "Before / after"}</button><button type="button" className="dark-button" disabled={saving} onClick={() => void saveVersionAndExport()}>{saving ? "Saving…" : "Save version & export"}</button></div></div>{!image ? <div className="editor-unavailable">Preview unavailable. The editor keeps the source safe until a processed image preview is available.</div> : <div className="cms-editor-grid"><div className="editor-canvas-wrap"><canvas ref={canvasRef} aria-label="Campaign image preview" /><div className="editor-caption"><span>Rule of thirds</span><span>Copy-safe zone</span><span>{cropPresets[recipe.preset].width} × {cropPresets[recipe.preset].height}</span></div></div><div className="editor-controls"><label>Crop preset<select value={recipe.preset} onChange={(event) => setRecipe((current) => ({ ...current, preset: event.target.value as CropPreset }))}>{Object.entries(cropPresets).map(([key, value]) => <option key={key} value={key}>{value.label}</option>)}</select></label><div className="editor-button-row"><button type="button" onClick={() => setRecipe((current) => ({ ...current, rotation: current.rotation - 90 }))}>Rotate left</button><button type="button" onClick={() => setRecipe((current) => ({ ...current, rotation: current.rotation + 90 }))}>Rotate right</button><button type="button" onClick={() => setRecipe((current) => ({ ...current, flipX: !current.flipX }))}>Flip</button></div><label>Guides<select value={guides ? "on" : "off"} onChange={(event) => setGuides(event.target.value === "on")}><option value="on">Rule of thirds + safe zone</option><option value="off">Hidden</option></select></label>{(["brightness", "contrast", "saturation", "warmth", "sharpen"] as const).map((key) => <label key={key} className="range-row"><span>{key[0].toUpperCase() + key.slice(1)} <b>{recipe[key]}</b></span><input type="range" min={key === "warmth" ? -50 : 0} max={key === "warmth" ? 50 : 200} value={recipe[key]} onChange={(event) => setNumber(key, Number(event.target.value))} /></label>)}<label>Background treatment<select value={recipe.background} onChange={(event) => setRecipe((current) => ({ ...current, background: event.target.value as EditRecipe["background"] }))}><option value="none">None</option><option value="blur">Blur behind crop</option><option value="extend">Soft extension</option></select></label><label>Text overlay<input value={recipe.text.value} onChange={(event) => setRecipe((current) => ({ ...current, text: { ...current.text, value: event.target.value } }))} placeholder="Campaign headline" /></label><div className="two-fields"><label>Brand font<input value={recipe.text.font} onChange={(event) => setRecipe((current) => ({ ...current, text: { ...current.text, font: event.target.value } }))} /></label><label>Colour<input type="color" value={recipe.text.colour} onChange={(event) => setRecipe((current) => ({ ...current, text: { ...current.text, colour: event.target.value } }))} /></label></div><label>Logo / wordmark<input value={recipe.logo.value} onChange={(event) => setRecipe((current) => ({ ...current, logo: { ...current.logo, value: event.target.value } }))} placeholder="Brand mark text" /></label><label>Logo placement<select value={recipe.logo.position} onChange={(event) => setRecipe((current) => ({ ...current, logo: { ...current.logo, position: event.target.value as EditRecipe["logo"]["position"] } }))}><option value="top-left">Top left</option><option value="top-right">Top right</option><option value="bottom-left">Bottom left</option><option value="bottom-right">Bottom right</option></select></label>{versions.length > 0 && <div className="version-history"><span className="section-kicker">VERSION HISTORY</span>{versions.slice(0, 5).map((version) => <button type="button" key={version.id} onClick={() => setRecipe(version.recipe)}><span>v{version.versionNumber}</span><small>{new Date(version.createdAt).toLocaleString("en-ZA")}</small></button>)}</div>}</div></div>}</section>;
+}
+
+function AuthenticatedDerivativeEditor({ asset, versions, licenceId, campaignId, api, onNotice, onSaved }: { asset: CmsCampaignAsset; versions: CmsDetail["editVersions"]; licenceId: string | null; campaignId: string; api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void; onSaved: () => void }) {
+  const canvasRef = React.useRef<HTMLCanvasElement>(null);
+  const [recipe, setRecipe] = useState<EditRecipe>(() => defaultEditRecipe());
+  const [image, setImage] = useState<HTMLImageElement | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [state, setState] = useState<"idle" | "unavailable" | "licence_required" | "failed">("idle");
+  const [error, setError] = useState("");
+  useEffect(() => {
+    setRecipe(defaultEditRecipe());
+    setState("idle");
+    setError("");
+    if (!asset.previewUrl) { setImage(null); setState("unavailable"); return; }
+    const next = new Image();
+    next.onload = () => { setImage(next); setState("idle"); };
+    next.onerror = () => { setImage(null); setState("unavailable"); };
+    next.src = asset.previewUrl;
+  }, [asset.id, asset.previewUrl]);
+  const render = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !image) return;
+    const preset = cropPresets[recipe.preset];
+    canvas.width = preset.width;
+    canvas.height = preset.height;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    const crop = fitCrop(image.naturalWidth, image.naturalHeight, preset.ratio);
+    context.fillStyle = "#1d211d";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.filter = `brightness(${recipe.brightness}%) contrast(${recipe.contrast}%) saturate(${recipe.saturation}%)`;
+    context.drawImage(image, crop.x, crop.y, crop.width, crop.height, 0, 0, canvas.width, canvas.height);
+    context.filter = "none";
+  }, [image, recipe]);
+  useEffect(() => { render(); }, [render]);
+  async function saveVersionAndExport(): Promise<void> {
+    if (!image) { setState("unavailable"); setError("Preview unavailable. Finish media processing before editing."); return; }
+    if (!licenceId) { setState("licence_required"); setError("An active paid licence is required before an authenticated derivative can be exported."); return; }
+    setSaving(true); setState("idle"); setError("");
+    try {
+      const versionResponse = await api(`/api/assets/${encodeURIComponent(asset.id)}/edit-versions`, { method: "POST", body: JSON.stringify({ recipe, note: `${cropPresets[recipe.preset].label} campaign derivative`, campaignId, licenceId }) });
+      const versionBody = await versionResponse.json().catch(() => ({})) as { id?: string; versionNumber?: number; error?: string };
+      if (!versionResponse.ok || !versionBody.id) throw new Error(versionBody.error ?? "The edit version could not be saved.");
+      const exportCanvas = document.createElement("canvas");
+      exportCanvas.width = cropPresets[recipe.preset].width;
+      exportCanvas.height = cropPresets[recipe.preset].height;
+      const exportContext = exportCanvas.getContext("2d");
+      if (!exportContext) throw new Error("The browser could not prepare the derivative.");
+      render();
+      if (!canvasRef.current) throw new Error("The browser preview is unavailable.");
+      exportContext.drawImage(canvasRef.current, 0, 0, exportCanvas.width, exportCanvas.height);
+      const blob = await new Promise<Blob | null>((resolve) => exportCanvas.toBlob(resolve, "image/webp", .9));
+      if (!blob) throw new Error("The browser could not encode the derivative.");
+      const derivativeResponse = await api(`/api/assets/${encodeURIComponent(asset.id)}/derivatives`, { method: "POST", body: JSON.stringify({ editVersionId: versionBody.id, campaignId, licenceId, variant: derivativeForPreset[recipe.preset], contentType: "image/webp", sizeBytes: blob.size, width: exportCanvas.width, height: exportCanvas.height }) });
+      const derivativeBody = await derivativeResponse.json().catch(() => ({})) as { contentUrl?: string; error?: string };
+      if (!derivativeResponse.ok || !derivativeBody.contentUrl) throw new Error(derivativeBody.error ?? "The derivative could not be created.");
+      const uploadResponse = await api(derivativeBody.contentUrl, { method: "PUT", body: blob, headers: { "Content-Type": "image/webp" } });
+      if (!uploadResponse.ok) { const uploadBody = await uploadResponse.json().catch(() => ({})) as { error?: string }; throw new Error(uploadBody.error ?? "The derivative upload failed."); }
+      onNotice(`Version ${versionBody.versionNumber ?? ""} exported. The original remains unchanged.`);
+      onSaved();
+    } catch (failure) {
+      setState("failed");
+      setError(failure instanceof Error ? failure.message : "The edit could not be saved or exported.");
+      onNotice("The edit could not be saved or exported. The source asset was not changed.");
+    } finally { setSaving(false); }
+  }
+  const setNumber = (key: "brightness" | "contrast" | "saturation", value: number) => setRecipe((current) => ({ ...current, [key]: value }));
+  return <section className="cms-editor" aria-labelledby="authenticated-editor-heading"><div className="cms-editor-toolbar"><div><span className="section-kicker">AUTHENTICATED DERIVATIVE EDITOR</span><h3 id="authenticated-editor-heading">{asset.title}</h3><small>Original is immutable Â· {licenceId ? "Active licence attached" : "Licence required for export"}</small></div><button type="button" className="dark-button" disabled={saving} onClick={() => void saveVersionAndExport()}>{saving ? "Saving and uploadingâ€¦" : "Save version & export"}</button></div>{state === "unavailable" && <div className="editor-unavailable" role="status">Preview unavailable. Retry after the source preview has finished processing.</div>}{state === "licence_required" && <div className="editor-unavailable" role="alert">Licence required. A valid, paid, non-expired licence owned by this organization must be attached before export.</div>}{state === "failed" && <div className="editor-unavailable" role="alert">{error || "The export failed."} <button type="button" className="text-button" onClick={() => void saveVersionAndExport()}>Retry export</button></div>}{image && <div className="cms-editor-grid"><div className="editor-canvas-wrap"><canvas ref={canvasRef} aria-label="Authenticated derivative preview" /><div className="editor-caption"><span>Source remains unchanged</span><span>{cropPresets[recipe.preset].width} Ã— {cropPresets[recipe.preset].height}</span></div></div><div className="editor-controls"><label>Crop preset<select value={recipe.preset} onChange={(event) => setRecipe((current) => ({ ...current, preset: event.target.value as CropPreset }))}>{Object.entries(cropPresets).map(([key, value]) => <option key={key} value={key}>{value.label}</option>)}</select></label>{(["brightness", "contrast", "saturation"] as const).map((key) => <label key={key} className="range-row"><span>{key[0].toUpperCase() + key.slice(1)} <b>{recipe[key]}</b></span><input type="range" min="0" max="200" value={recipe[key]} onChange={(event) => setNumber(key, Number(event.target.value))} /></label>)}{versions.length > 0 && <div className="version-history"><span className="section-kicker">VERSION HISTORY</span>{versions.slice(0, 5).map((version) => <button type="button" key={version.id} onClick={() => setRecipe(version.recipe)}><span>v{version.versionNumber}</span><small>{new Date(version.createdAt).toLocaleString("en-ZA")}</small></button>)}</div>}</div></div>}</section>;
+}
+
+function ImageEditor(props: { asset: CmsCampaignAsset; versions: CmsDetail["editVersions"]; licenceId: string | null; campaignId: string; api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void; onSaved: () => void }) {
+  return <AuthenticatedDerivativeEditor {...props} />;
+}
+
+function CampaignDeliveryPanel({ campaign, selectedAssetId, assets, editVersions, derivatives, bundles, licenceMetadata, blockers, role, api, onNotice, onRefresh }: { campaign: CampaignSummary; selectedAssetId: string; assets: CmsCampaignAsset[]; editVersions: CmsDetail["editVersions"]; derivatives: CmsDerivative[]; bundles: CmsBundle[]; licenceMetadata: CmsLicenceMetadata[]; blockers: CmsBlocker[]; role?: string; api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void; onRefresh: () => void }) {
+  const [bundleType, setBundleType] = useState("social_media");
+  const [bundleBusy, setBundleBusy] = useState("");
+  const selected = assets.find((asset) => asset.id === selectedAssetId) ?? assets[0] ?? null;
+  const licence = selected ? licenceMetadata.find((item) => item.assetId === selected.id) : undefined;
+  const selectedBlockers = selected ? blockers.find((item) => item.assetId === selected.id)?.blockers ?? [] : [];
+  const selectedDerivatives = selected ? derivatives.filter((item) => item.assetId === selected.id) : [];
+  async function requestBundle(): Promise<void> {
+    setBundleBusy("request");
+    try {
+      const response = await api(`/api/campaigns/${encodeURIComponent(campaign.id)}/bundles`, { method: "POST", body: JSON.stringify({ bundleType }) });
+      const body = await response.json().catch(() => ({})) as { error?: string; blockers?: Array<{ message?: string }> };
+      if (!response.ok) throw new Error(body.blockers?.[0]?.message ?? body.error ?? "The bundle is not ready.");
+      onNotice("Bundle requested. A reviewer must approve the auditable ZIP before download."); onRefresh();
+    } catch (failure) { onNotice(failure instanceof Error ? failure.message : "The bundle request failed."); }
+    finally { setBundleBusy(""); }
+  }
+  async function approveBundle(bundle: CmsBundle): Promise<void> {
+    setBundleBusy(bundle.id);
+    try {
+      const response = await api(`/api/campaigns/${encodeURIComponent(campaign.id)}/bundles/${encodeURIComponent(bundle.id)}/approve`, { method: "POST", body: "{}" });
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) throw new Error(body.error ?? "Bundle approval failed.");
+      onNotice("Bundle approved and built as an auditable streamed ZIP."); onRefresh();
+    } catch (failure) { onNotice(failure instanceof Error ? failure.message : "Bundle approval failed."); }
+    finally { setBundleBusy(""); }
+  }
+  return <section className="cms-delivery-panel" aria-labelledby="campaign-delivery-heading"><div className="card-heading"><div><span className="section-kicker">CAMPAIGN DELIVERY</span><h3 id="campaign-delivery-heading">Versions, derivatives, and auditable bundles</h3></div><span className="status-pill cool">Server-authoritative</span></div>{selected ? <><div className="delivery-evidence"><div><strong>{selected.title}</strong><small>{selected.campaignStage.replaceAll("_", " ")} Â· {selected.rightsStatus}</small></div><div><strong>{licence?.licenceId ? "Licence active" : "Licence required"}</strong><small>{licence?.territory ?? "No territory"}{licence?.expiresAt ? ` Â· expires ${new Date(licence.expiresAt).toLocaleDateString("en-ZA")}` : ""}</small></div></div>{selectedBlockers.length > 0 && <div className="recommendation-warnings" role="status">{selectedBlockers.map((blocker) => <p className="warning-warning" key={blocker.code}><strong>{blocker.code.replaceAll("_", " ")}</strong> {blocker.message}</p>)}</div>}{selected.kind === "image" ? <AuthenticatedDerivativeEditor asset={selected} versions={editVersions.filter((version) => version.assetId === selected.id)} licenceId={selected.activeLicenceId ?? licence?.licenceId ?? null} campaignId={campaign.id} api={api} onNotice={onNotice} onSaved={onRefresh} /> : <div className="editor-unavailable" role="status">Video campaign sources expose Stream processing status here. Image derivatives are edited from the desktop editor after a preview is ready.</div>}<div className="delivery-status-list"><div className="card-heading"><span className="section-kicker">DERIVATIVE STATUS</span><span>{selectedDerivatives.length}</span></div>{selectedDerivatives.length ? selectedDerivatives.map((derivative) => <div className="delivery-status-row" key={derivative.id}><span>{derivative.variant.replaceAll("_", " ")}</span><strong>{derivative.status}</strong><small>{derivative.sizeBytes.toLocaleString()} bytes</small></div>) : <p>No derivative has been created for this campaign asset yet.</p>}</div></> : <div className="empty-state">Select a campaign asset that has been added to the board before opening the authenticated editor.</div>}<div className="bundle-history"><div className="card-heading"><div><span className="section-kicker">BUNDLE HISTORY</span><h4>Approval and download status</h4></div><div className="bundle-request-controls"><label>Bundle type<select value={bundleType} onChange={(event) => setBundleType(event.target.value)}><option value="social_media">Social media</option><option value="website">Website</option><option value="paid_ads">Paid ads</option><option value="print_handoff">Print handoff</option><option value="full_archive">Full archive</option></select></label><button type="button" className="outline-button" disabled={bundleBusy === "request"} onClick={() => void requestBundle()}>{bundleBusy === "request" ? "Requestingâ€¦" : "Request bundle"}</button></div></div>{bundles.length ? bundles.map((bundle) => <div className="delivery-status-row" key={bundle.id}><span>{bundle.bundleType.replaceAll("_", " ")}</span><strong>{bundle.status === "building" || bundle.buildStatus === "building" ? "building" : bundle.status}</strong>{bundle.error && <small>{bundle.error}</small>}{bundle.status === "approved" && bundle.download ? <a className="outline-button" href={bundle.download}>Authenticated download</a> : null}{["pending", "failed"].includes(bundle.status) && ["editor", "admin"].includes(role ?? "") ? <button type="button" className="dark-button" disabled={Boolean(bundleBusy)} onClick={() => void approveBundle(bundle)}>{bundleBusy === bundle.id ? "Buildingâ€¦" : bundle.status === "failed" ? "Retry and approve" : "Approve and build"}</button> : null}</div>) : <p>No bundle requests yet. A ready derivative and valid licence are required before requesting delivery.</p>}</div></section>;
 }
 
 function CmsCampaignWorkspace({ api, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {

@@ -25,6 +25,11 @@ Bundle requests support `social_media`, `website`, `paid_ads`, `print_handoff`, 
 
 Approved downloads expire after seven days. Bundle history exposes pending, approved, expired, revoked, and failed states.
 
+The Worker claims one bundle build per bundle and writes the ZIP as a streamed
+R2 object; source originals are resolved from the primary media bucket first and
+the read-only production library fallback only in the demo environment. A
+failed build is retained with its error so an authorised reviewer can retry it.
+
 Buyer approval is terms-gated: the buyer must open and accept the current buyer
 licence and payment disclosures above the source photos. The acceptance is
 stored for the campaign and rechecked by the Worker before an asset can move to
@@ -42,3 +47,8 @@ stored for the campaign and rechecked by the Worker before an asset can move to
 - `GET/POST /api/campaigns/:id/bundles`
 - `POST /api/campaigns/:id/bundles/:bundleId/approve`
 - `GET /api/campaign-bundles/:id/download`
+- `POST /api/rights/cases/:id/transition`
+- `POST /api/rights/cases/:id/appeal`
+- `POST /api/assets/:id/stream-upload`
+- `GET /api/assets/:id/stream-playback`
+- `POST /api/webhooks/stream`

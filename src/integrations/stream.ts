@@ -76,6 +76,6 @@ export class CloudflareStreamAdapter implements StreamProvider {
     if (value.success !== true || !token) throw new IntegrationError(this.provider, "Stream returned no playback token", { details: value });
     const customerCode = this.config.customerCode?.trim();
     if (!customerCode) throw new IntegrationError(this.provider, "Stream customer code is not configured");
-    return { uid: cleanUid, token, iframeUrl: `https://customer-${encodeURIComponent(customerCode)}.cloudflarestream.com/${encodeURIComponent(cleanUid)}/iframe?token=${encodeURIComponent(token)}`, expiresInSeconds: 3600 };
+    return { uid: cleanUid, token, iframeUrl: `https://customer-${encodeURIComponent(customerCode)}.cloudflarestream.com/${encodeURIComponent(token)}/iframe`, expiresInSeconds: 3600 };
   }
 }

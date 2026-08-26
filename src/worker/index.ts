@@ -277,9 +277,9 @@ async function runMaintenance(env: Bindings): Promise<void> {
     env.DB.prepare("DELETE FROM rate_limit_buckets WHERE updated_at < datetime('now', '-2 day')"),
     env.DB.prepare("DELETE FROM notifications WHERE created_at < datetime('now', '-365 day') AND read_at IS NOT NULL"),
     env.DB.prepare("UPDATE upload_sessions SET status = 'expired', failure_reason = 'upload_session_expired' WHERE status = 'created' AND created_at < datetime('now', '-1 day')"),
-    env.DB.prepare("UPDATE campaign_bundles SET status = 'expired', updated_at = CURRENT_TIMESTAMP WHERE status = 'approved' AND expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP"),
+    env.DB.prepare("UPDATE campaign_bundles SET status = 'expired', updated_at = CURRENT_TIMESTAMP WHERE status = 'approved' AND expires_at IS NOT NULL AND datetime(expires_at) <= CURRENT_TIMESTAMP"),
     env.DB.prepare("UPDATE campaign_bundle_builds SET status = 'failed', error_text = 'bundle_build_timeout', updated_at = CURRENT_TIMESTAMP WHERE status = 'building' AND started_at < datetime('now', '-1 hour')"),
-    env.DB.prepare("UPDATE stream_uploads SET status = 'expired', updated_at = CURRENT_TIMESTAMP WHERE status IN ('created', 'uploading') AND expires_at <= CURRENT_TIMESTAMP"),
+    env.DB.prepare("UPDATE stream_uploads SET status = 'expired', updated_at = CURRENT_TIMESTAMP WHERE status IN ('created', 'uploading') AND datetime(expires_at) <= CURRENT_TIMESTAMP"),
     env.DB.prepare("UPDATE photographer_subscriptions SET status = 'expired', updated_at = CURRENT_TIMESTAMP WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP"),
   ]);
 }
@@ -1219,9 +1219,9 @@ app.get("/api/onboarding/status", async (c) => {
     LEFT JOIN onboarding_tenders t ON t.contributor_id = p.user_id AND t.organization_id = ? AND t.status IN ('pending', 'corrections_requested', 'approved')
     LEFT JOIN seller_contracts sc ON sc.id = t.contract_id
     LEFT JOIN payout_wallets w ON w.id = t.wallet_id
-    LEFT JOIN contributor_verification_cases vc ON vc.id = t.verification_case_id
-    WHERE p.user_id = ? ORDER BY t.created_at DESC LIMIT 1
-  `).bind(user.organizationId, user.id).first<Record<string, unknown>>();
+      LEFT JOIN contributor_verification_cases vc ON vc.id = t.verification_case_id AND vc.organization_id = t.organization_id AND vc.residency_region = ?
+      WHERE p.user_id = ? ORDER BY t.created_at DESC LIMIT 1
+  `).bind(user.organizationId, user.residencyRegion, user.id).first<Record<string, unknown>>();
   return c.json({ user, workflow: result ?? null });
 });
 
@@ -1302,10 +1302,10 @@ app.get("/api/admin/onboarding/tenders", async (c) => {
       w.id AS wallet_id, w.provider AS wallet_provider, w.status AS wallet_status, w.account_holder_name, w.account_last4
     FROM onboarding_tenders t JOIN users u ON u.id = t.contributor_id
       JOIN seller_contracts sc ON sc.id = t.contract_id
-      LEFT JOIN contributor_verification_cases vc ON vc.id = t.verification_case_id
+      LEFT JOIN contributor_verification_cases vc ON vc.id = t.verification_case_id AND vc.organization_id = t.organization_id AND vc.residency_region = ?
       LEFT JOIN payout_wallets w ON w.id = t.wallet_id
-    WHERE t.organization_id = ? AND ${where} ORDER BY t.created_at ASC LIMIT 100
-  `).bind(...(status === "all" ? [user.organizationId] : [user.organizationId, status])).all<Record<string, unknown>>();
+      WHERE t.organization_id = ? AND ${where} ORDER BY t.created_at ASC LIMIT 100
+  `).bind(...(status === "all" ? [user.residencyRegion, user.organizationId] : [user.residencyRegion, user.organizationId, status])).all<Record<string, unknown>>();
   return c.json({ results: result.results });
 });
 
@@ -1329,8 +1329,8 @@ app.post("/api/admin/onboarding/tenders/:id/decision", async (c) => {
   const payload = tenderDecisionSchema.parse(await c.req.json());
   const tender = await c.env.DB.prepare(`SELECT t.*, sc.status AS contract_status, vc.status AS verification_status, w.status AS wallet_status, u.email
     FROM onboarding_tenders t JOIN seller_contracts sc ON sc.id = t.contract_id JOIN users u ON u.id = t.contributor_id
-    LEFT JOIN contributor_verification_cases vc ON vc.id = t.verification_case_id LEFT JOIN payout_wallets w ON w.id = t.wallet_id
-    WHERE t.id = ? AND t.organization_id = ?`).bind(c.req.param("id"), admin.organizationId).first<Record<string, unknown>>();
+    LEFT JOIN contributor_verification_cases vc ON vc.id = t.verification_case_id AND vc.organization_id = t.organization_id AND vc.residency_region = ? LEFT JOIN payout_wallets w ON w.id = t.wallet_id
+    WHERE t.id = ? AND t.organization_id = ?`).bind(admin.residencyRegion, c.req.param("id"), admin.organizationId).first<Record<string, unknown>>();
   if (!tender) return c.json({ error: "Tender not found" }, 404);
   if (payload.decision === "approved" && (tender.contract_status !== "signed" || tender.verification_status !== "verified" || tender.wallet_status !== "verified")) {
     return c.json({ error: "Tender cannot be approved until the contract, KYC case, and payout wallet are verified", requirements: { contract: tender.contract_status, verification: tender.verification_status, wallet: tender.wallet_status } }, 422);
@@ -2160,7 +2160,7 @@ app.post("/api/onboarding/didit/session", async (c) => {
     const caseId = await ensureVerificationCase(c, user, actor.residencyRegion, seller.seller_type === "company" ? "business" : "individual");
     await c.env.DB.batch([
       c.env.DB.prepare("UPDATE seller_onboarding_profiles SET didit_session_id = ?, didit_session_kind = ?, didit_status = ?, didit_provider_reference = ?, updated_at = CURRENT_TIMESTAMP WHERE contributor_id = ?").bind(session.sessionId, session.sessionKind, session.status, session.sessionId, user.id),
-      c.env.DB.prepare("UPDATE contributor_verification_cases SET provider = 'didit', provider_case_id = ?, status = 'pending', updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(session.sessionId, caseId),
+      c.env.DB.prepare("UPDATE contributor_verification_cases SET provider = 'didit', provider_case_id = ?, status = 'pending', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ? AND contributor_id = ? AND residency_region = ?").bind(session.sessionId, caseId, user.organizationId, user.id, actor.residencyRegion),
     ]);
     return c.json({ sessionId: session.sessionId, sessionKind: session.sessionKind, url: session.url, status: session.status, verificationCaseId: caseId }, 201);
   } catch (error) {
@@ -2981,7 +2981,7 @@ app.get("/api/admin/approval-ledger", async (c) => {
       LEFT JOIN users tender_user ON tender_user.id = tender.contributor_id
       LEFT JOIN seller_contracts contract ON e.resource_type = 'seller_contract' AND contract.id = e.resource_id AND contract.organization_id = ?
       LEFT JOIN users contract_user ON contract_user.id = contract.contributor_id
-      LEFT JOIN contributor_verification_cases verification ON e.resource_type = 'verification_case' AND verification.id = e.resource_id
+      LEFT JOIN contributor_verification_cases verification ON e.resource_type = 'verification_case' AND verification.id = e.resource_id AND verification.organization_id = e.organization_id AND verification.residency_region = e.residency_region
       LEFT JOIN organization_memberships verification_membership ON verification_membership.user_id = verification.contributor_id AND verification_membership.organization_id = ? AND verification_membership.status = 'active'
       LEFT JOIN users verification_user ON verification_user.id = verification.contributor_id
     WHERE e.organization_id = ?
@@ -3026,7 +3026,8 @@ app.get("/api/admin/approval-ledger", async (c) => {
         WHERE e.event_type IN ('approved', 'rejected', 'curator_corrected')
           AND NOT EXISTS (
             SELECT 1 FROM audit_log_events audit
-            WHERE audit.resource_type = 'asset'
+            WHERE audit.organization_id = ?
+              AND audit.resource_type = 'asset'
               AND audit.resource_id = e.asset_id
               AND audit.actor_id = e.actor_id
               AND audit.action = CASE e.event_type
@@ -3037,7 +3038,7 @@ app.get("/api/admin/approval-ledger", async (c) => {
           )
         ORDER BY e.created_at DESC
         LIMIT ?
-      `).bind(user.organizationId, filters.limit).all<Record<string, unknown>>();
+      `).bind(user.organizationId, user.organizationId, filters.limit).all<Record<string, unknown>>();
       entries.push(...(metadataRows.results as Record<string, unknown>[]).map(workflowLedgerEntry));
     } catch (error) {
       logEvent("warn", "approval_ledger.workflow_events_unavailable", c.get("trace"), { error: error instanceof Error ? error.message : "unknown-error" });
@@ -3081,7 +3082,7 @@ app.get("/api/admin/analytics/audit-search", async (c) => {
       OR EXISTS (SELECT 1 FROM assets scoped_asset WHERE e.resource_type = 'asset' AND scoped_asset.id = e.resource_id AND scoped_asset.organization_id = ?)
       OR EXISTS (SELECT 1 FROM onboarding_tenders scoped_tender WHERE e.resource_type = 'onboarding_tender' AND scoped_tender.id = e.resource_id AND scoped_tender.organization_id = ?)
       OR EXISTS (SELECT 1 FROM seller_contracts scoped_contract WHERE e.resource_type = 'seller_contract' AND scoped_contract.id = e.resource_id AND scoped_contract.organization_id = ?)
-      OR EXISTS (SELECT 1 FROM contributor_verification_cases scoped_case JOIN organization_memberships scoped_membership ON scoped_membership.user_id = scoped_case.contributor_id AND scoped_membership.organization_id = ? AND scoped_membership.status = 'active' WHERE e.resource_type = 'verification_case' AND scoped_case.id = e.resource_id))`,
+      OR EXISTS (SELECT 1 FROM contributor_verification_cases scoped_case JOIN organization_memberships scoped_membership ON scoped_membership.user_id = scoped_case.contributor_id AND scoped_membership.organization_id = ? AND scoped_membership.status = 'active' WHERE e.resource_type = 'verification_case' AND scoped_case.id = e.resource_id AND scoped_case.organization_id = e.organization_id AND scoped_case.residency_region = e.residency_region))`,
   ];
   const values: (string | number)[] = [user.organizationId, user.residencyRegion, user.organizationId, user.organizationId, user.organizationId, user.organizationId, user.organizationId];
   if (filters.q) {
@@ -3107,7 +3108,7 @@ app.get("/api/admin/analytics/audit-search", async (c) => {
       LEFT JOIN users tender_user ON tender_user.id = tender.contributor_id
       LEFT JOIN seller_contracts contract ON e.resource_type = 'seller_contract' AND contract.id = e.resource_id AND contract.organization_id = ?
       LEFT JOIN users contract_user ON contract_user.id = contract.contributor_id
-      LEFT JOIN contributor_verification_cases verification ON e.resource_type = 'verification_case' AND verification.id = e.resource_id
+      LEFT JOIN contributor_verification_cases verification ON e.resource_type = 'verification_case' AND verification.id = e.resource_id AND verification.organization_id = e.organization_id AND verification.residency_region = e.residency_region
       LEFT JOIN users verification_user ON verification_user.id = verification.contributor_id
     WHERE ${clauses.join(" AND ")}
     ORDER BY e.occurred_at DESC LIMIT ?`).bind(user.organizationId, user.organizationId, user.organizationId, ...values, filters.limit).all<Record<string, unknown>>();
@@ -3123,7 +3124,7 @@ app.get("/api/admin/analytics/audit-search", async (c) => {
   let catalogSearch: "ready" | "not_configured" | "unavailable" = connectorStatus.r2Sql === "configured" ? "ready" : "not_configured";
   if (connectorStatus.r2Sql === "configured") {
     try {
-      const catalogRows = await searchR2AuditCatalog(c.env as AuditAnalyticsConfig, { ...filters, organizationId: user.organizationId });
+      const catalogRows = await searchR2AuditCatalog(c.env as AuditAnalyticsConfig, { ...filters, organizationId: user.organizationId, residencyRegion: user.residencyRegion });
       catalogEntries = catalogRows.map(catalogLedgerEntry);
     } catch (error) {
       catalogSearch = "unavailable";
@@ -3172,7 +3173,7 @@ app.post("/api/audit/events", async (c) => {
     return c.json({ ...result, integrity: { algorithm: "SHA-256 + Ed25519", immutable: true } }, result.created ? 201 : 200);
   } catch (error) {
     const message = error instanceof Error ? error.message : "AUDIT_WRITE_FAILED";
-    const status = message === "RESIDENCY_POLICY_VIOLATION" ? 403 : message === "AUDIT_CHAIN_CONFLICT" ? 409 : 400;
+    const status = message === "RESIDENCY_POLICY_VIOLATION" || message === "AUDIT_EVENT_SCOPE_MISMATCH" ? 403 : message === "AUDIT_CHAIN_CONFLICT" ? 409 : 400;
     return c.json({ error: message }, status);
   }
 });
@@ -3217,9 +3218,8 @@ app.get("/api/audit/exports/:exportId", async (c) => {
   const actor = await requestActor(c);
   if (!actor) return c.json({ error: "Authentication required" }, 401);
   if (actor.type !== "admin" && actor.type !== "service") return c.json({ error: "Admin or service identity required" }, 403);
-  const row = await c.env.DB.prepare("SELECT * FROM audit_exports WHERE id = ? AND organization_id = ? AND created_by IS NOT NULL").bind(c.req.param("exportId"), actor.organizationId).first<Record<string, unknown>>();
+  const row = await c.env.DB.prepare("SELECT * FROM audit_exports WHERE id = ? AND organization_id = ? AND residency_region = ? AND created_by IS NOT NULL").bind(c.req.param("exportId"), actor.organizationId, actor.residencyRegion).first<Record<string, unknown>>();
   if (!row) return c.json({ error: "Export not found" }, 404);
-  if (String(row.residency_region) !== actor.residencyRegion) return c.json({ error: "Export residency mismatch" }, 403);
   const object = await getAuditBucket(c.env, actor.residencyRegion).get(String(row.object_key));
   if (!object) return c.json({ error: "Export object not found" }, 404);
   return new Response(object.body, { headers: { "Content-Type": "application/json; charset=utf-8", "Content-Disposition": `attachment; filename=veld-audit-${c.req.param("exportId")}.json`, "Cache-Control": "no-store" } });
@@ -3316,7 +3316,8 @@ app.put("/api/verification/documents/:documentId/content", async (c) => {
   const contentSha256 = hex(await crypto.subtle.digest("SHA-256", bytes));
   if (contentSha256 !== String(document.content_sha256)) return c.json({ error: "Document checksum does not match the registered metadata" }, 422);
   await verificationBucket(c.env, residencyRegionSchema.parse(String(document.residency_region))).put(String(document.object_key), bytes, { httpMetadata: { contentType: c.req.header("content-type") ?? "application/octet-stream" } });
-  await c.env.DB.prepare("UPDATE verification_documents SET uploaded_at = CURRENT_TIMESTAMP, size_bytes = ? WHERE id = ?").bind(bytes.byteLength, String(document.id)).run();
+  await c.env.DB.prepare("UPDATE verification_documents SET uploaded_at = CURRENT_TIMESTAMP, size_bytes = ? WHERE id = ? AND case_id = (SELECT id FROM contributor_verification_cases WHERE id = ? AND organization_id = ? AND residency_region = ?)")
+    .bind(bytes.byteLength, String(document.id), String(document.case_id), actor.organizationId, actor.residencyRegion).run();
   return c.json({ documentId: document.id, uploaded: true, sizeBytes: bytes.byteLength });
 });
 
@@ -3401,15 +3402,36 @@ app.post("/api/webhooks/didit", async (c) => {
   const eventId = typeof payload.event_id === "string" && payload.event_id ? payload.event_id : `didit:${await sha256Hex(`${sessionId}:${webhookType}:${String(payload.timestamp ?? c.req.header("x-timestamp") ?? "")}:${rawBody}`)}`;
   const seller = await c.env.DB.prepare("SELECT contributor_id FROM seller_onboarding_profiles WHERE didit_session_id = ?").bind(sessionId).first<{ contributor_id: string }>();
   if (!seller) return c.json({ error: "Didit session is not recognized" }, 404);
+  const verificationCases = await c.env.DB.prepare(`
+    SELECT id, organization_id, contributor_id, residency_region
+    FROM contributor_verification_cases
+    WHERE contributor_id = ? AND provider = 'didit' AND provider_case_id = ? AND organization_id IS NOT NULL
+    ORDER BY updated_at DESC LIMIT 2
+  `).bind(seller.contributor_id, sessionId).all<{ id: string; organization_id: string; contributor_id: string; residency_region: string }>();
+  if (verificationCases.results.length !== 1) return c.json({ error: verificationCases.results.length ? "Didit verification case is ambiguous across organizations" : "Didit verification case is not recognized for an organization" }, verificationCases.results.length ? 409 : 404);
+  const verificationCase = verificationCases.results[0];
   const inserted = await c.env.DB.prepare("INSERT OR IGNORE INTO didit_webhook_events (event_id, session_id, webhook_type, status) VALUES (?, ?, ?, ?)").bind(eventId, sessionId, webhookType, status).run();
   if (!Number(inserted.meta.changes ?? 0)) return c.json({ accepted: true, duplicate: true, eventId });
   const normalizedStatus = normalizeDiditStatus(status);
   await c.env.DB.batch([
     c.env.DB.prepare("UPDATE seller_onboarding_profiles SET didit_status = ?, didit_provider_reference = ?, updated_at = CURRENT_TIMESTAMP WHERE contributor_id = ? AND didit_session_id = ?").bind(normalizedStatus, sessionId, seller.contributor_id, sessionId),
-    c.env.DB.prepare("UPDATE contributor_verification_cases SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE contributor_id = ? AND provider = 'didit' AND provider_case_id = ?").bind(normalizedStatus, seller.contributor_id, sessionId),
+    c.env.DB.prepare("UPDATE contributor_verification_cases SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ? AND contributor_id = ? AND provider = 'didit' AND provider_case_id = ?").bind(normalizedStatus, verificationCase.id, verificationCase.organization_id, verificationCase.contributor_id, sessionId),
     c.env.DB.prepare("UPDATE contributor_profiles SET identity_status = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?").bind(normalizedStatus === "verified" ? "verified" : normalizedStatus === "rejected" ? "rejected" : "submitted", seller.contributor_id),
   ]);
-  return c.json({ accepted: true, eventId, sessionId, status: normalizedStatus });
+  const audit = await appendAuditEvent(c.env, {
+    eventId: `didit:${await sha256Hex(eventId)}`,
+    streamId: `contributor:${verificationCase.contributor_id}`,
+    actorId: "didit-provider",
+    actorType: "service",
+    action: "verification.case.updated",
+    resourceType: "verification_case",
+    resourceId: verificationCase.id,
+    data: { status: normalizedStatus, provider: "didit", webhookType },
+    organizationId: verificationCase.organization_id,
+    residencyRegion: residencyRegionSchema.parse(verificationCase.residency_region),
+    actorResidencyRegion: residencyRegionSchema.parse(verificationCase.residency_region),
+  });
+  return c.json({ accepted: true, eventId, sessionId, status: normalizedStatus, auditEventId: audit.event.eventId });
 });
 
 app.post("/api/webhooks/kyc", async (c) => {
@@ -3422,8 +3444,8 @@ app.post("/api/webhooks/kyc", async (c) => {
   await c.env.DB.prepare(`
     UPDATE contributor_verification_cases
     SET status = ?, risk_level = ?, sanctions_status = ?, pep_status = ?, adverse_media_status = ?, updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `).bind(payload.status, payload.riskLevel, payload.sanctionsStatus, payload.pepStatus, payload.adverseMediaStatus, payload.caseId).run();
+    WHERE id = ? AND organization_id = ? AND residency_region = ?
+  `).bind(payload.status, payload.riskLevel, payload.sanctionsStatus, payload.pepStatus, payload.adverseMediaStatus, payload.caseId, String(row.organization_id), String(row.residency_region)).run();
   for (const check of payload.checks) {
     await c.env.DB.prepare("INSERT INTO verification_checks (id, case_id, check_type, result, provider_reference, checked_at) VALUES (?, ?, ?, ?, ?, ?)")
       .bind(crypto.randomUUID(), payload.caseId, check.type, check.result, check.providerReference ?? null, check.checkedAt ?? new Date().toISOString()).run();
@@ -3919,10 +3941,22 @@ function recentAttestation(value: string | undefined, maxAgeDays = 90): boolean 
   return Number.isFinite(time) && time <= Date.now() && Date.now() - time <= maxAgeDays * 86_400_000;
 }
 
+function isFutureTimestamp(value: unknown): boolean {
+  if (typeof value !== "string" || !value.trim()) return false;
+  const text = value.trim();
+  const normalized = text.includes("T")
+    ? text
+    : text.includes(" ")
+      ? `${text.replace(" ", "T")}${/[zZ]|[+-]\d{2}:?\d{2}$/.test(text) ? "" : "Z"}`
+      : `${text}T00:00:00Z`;
+  const time = Date.parse(normalized);
+  return Number.isFinite(time) && time > Date.now();
+}
+
 async function launchReadiness(env: Bindings): Promise<Record<string, unknown>> {
   const tableRows = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all<{ name: string }>();
   const tables = new Set(tableRows.results.map((row) => row.name));
-  const requiredTables = ["seller_onboarding_profiles", "didit_webhook_events", "marketplace_agreement_acceptances", "payment_split_allocations", "buyer_subscriptions", "buyer_subscription_payments", "buyer_free_downloads"];
+  const requiredTables = ["seller_onboarding_profiles", "didit_webhook_events", "marketplace_agreement_acceptances", "payment_split_allocations", "buyer_subscriptions", "buyer_subscription_payments", "buyer_free_downloads", "asset_edit_versions", "asset_derivative_exports", "campaign_bundles", "campaign_bundle_builds", "stream_uploads", "audit_log_events", "audit_exports", "contributor_verification_cases"];
   const scalar = async (sql: string, key = "total"): Promise<number> => Number((await env.DB.prepare(sql).first<Record<string, unknown>>())?.[key] ?? 0);
   const productionMembers = tables.has("organization_memberships") ? await scalar("SELECT COUNT(*) AS total FROM organization_memberships WHERE organization_id = 'org-production' AND status = 'active'") : 0;
   const demoAssets = tables.has("assets") ? await scalar("SELECT COUNT(*) AS total FROM assets WHERE COALESCE(demo_seed, 0) = 1 OR id LIKE 'asset-demo-%' OR id LIKE 'asset-test-photo-%'") : 0;
@@ -3948,7 +3982,7 @@ async function launchReadiness(env: Bindings): Promise<Record<string, unknown>> 
     { id: "seller_split_rail", ready: verifiedPaystackWallets > 0, action: "Verify at least one seller Paystack subaccount before marketplace checkout." },
     { id: "audit_signing", ready: Boolean(env.AUDIT_SIGNING_PRIVATE_JWK?.trim() && env.AUDIT_SIGNING_PUBLIC_JWK?.trim() && env.AUDIT_SIGNING_KEY_ID?.trim()), action: "Configure the Ed25519 audit signing keypair and key ID." },
     { id: "media_scanning", ready: Boolean(env.MEDIA_SCANNER_URL?.trim() && env.MEDIA_SCANNER_SECRET?.trim()), action: "Configure fail-closed media malware scanning." },
-    { id: "stream", ready: Boolean(streamSecretConfigured && env.STREAM_CUSTOMER_CODE?.trim()), action: "Configure Stream playback identity and signed webhooks." },
+    { id: "stream", ready: Boolean(streamSecretConfigured && env.STREAM_ACCOUNT_ID?.trim() && env.STREAM_ALLOWED_ORIGINS?.trim() && env.STREAM_CUSTOMER_CODE?.trim()), action: "Configure Stream account, allowed origins, customer code, and signed webhook secret." },
     { id: "ai_workflow", ready: Boolean(env.AI && env.PHOTO_INDEX && env.PHOTO_ENRICHMENT_QUEUE && env.PHOTO_EMBEDDING_MODEL?.trim()), action: "Bind Workers AI, Vectorize, and the enrichment queue." },
     { id: "storage_bindings", ready: Boolean(env.MEDIA_BUCKET && env.MEDIA_DR_BUCKET && env.BACKUP_BUCKET && env.AUDIT_BUCKET_ZA && env.AUDIT_BUCKET_EU && env.KYC_BUCKET_ZA && env.KYC_BUCKET_EU), action: "Bind primary, DR, backup, audit, and regional KYC R2 buckets." },
     { id: "migrations", ready: requiredTables.every((table) => tables.has(table)), action: `Apply missing production migrations: ${requiredTables.filter((table) => !tables.has(table)).join(", ") || "none"}.` },
@@ -4616,17 +4650,21 @@ app.post("/api/rights/takedown", async (c) => {
   await c.env.DB.prepare("INSERT INTO rights_case_events (id, organization_id, case_id, actor_id, event_type, payload_json) VALUES (?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), user.organizationId, id, requesterId, "lodged", JSON.stringify({ reason: payload.reason })).run();
   await c.env.DB.prepare("INSERT INTO notifications (id, organization_id, user_id, type, title, body, resource_type, resource_id) SELECT lower(hex(randomblob(16))), ?, user_id, 'rights_case', 'New rights case', ?, 'takedown_request', ? FROM organization_memberships WHERE organization_id = ? AND role IN ('editor', 'admin') AND status = 'active'")
     .bind(user.organizationId, `A rights case was lodged for ${asset.title}.`, id, user.organizationId).run();
+  const auditEventId = await appendCampaignAudit(c, user, "rights.case.created", "takedown_request", id, { assetId: asset.id, reason: payload.reason, mediationRequested: payload.mediationRequested });
   const moderators = await c.env.DB.prepare("SELECT u.email FROM organization_memberships om JOIN users u ON u.id = om.user_id WHERE om.organization_id = ? AND om.role IN ('editor', 'admin') AND om.status = 'active'").bind(user.organizationId).all<{ email: string }>();
   c.executionCtx.waitUntil(Promise.all(moderators.results.map((moderator) => dispatchEmailBestEffort(c.env, moderator.email, "New rights case", `A rights case was lodged for ${asset.title}. Case ID: ${id}.`, `rights-case:${id}:${moderator.email}`))));
-  const result: RightsCase = { id, assetId: asset.id, assetTitle: asset.title, reason: payload.reason as TakedownReason, summary: payload.summary, status, dueAt: "Within 5 working days", mediationRequested: payload.mediationRequested, createdAt: new Date().toISOString() };
+  const result: RightsCase & { auditEventId: string } = { id, assetId: asset.id, assetTitle: asset.title, reason: payload.reason as TakedownReason, summary: payload.summary, status, dueAt: "Within 5 working days", mediationRequested: payload.mediationRequested, createdAt: new Date().toISOString(), auditEventId };
   return c.json(result, 201);
 });
 
 app.get("/api/rights/cases", async (c) => {
   const user = await requestUser(c);
   if (!user) return c.json({ error: "Authentication required" }, 401);
-  const rows = await c.env.DB.prepare(`SELECT t.*, a.title AS asset_title FROM takedown_requests t JOIN assets a ON a.id = t.asset_id WHERE t.organization_id = ? AND (t.requester_id = ? OR a.owner_id = ? OR ? IN ('editor', 'admin')) ORDER BY t.created_at DESC LIMIT 50`).bind(user.organizationId, user.id, user.id, user.role).all<Record<string, unknown>>();
-  return c.json(rows.results.map((row) => ({ id: String(row.id), assetId: String(row.asset_id), assetTitle: String(row.asset_title), reason: row.reason as TakedownReason, summary: String(row.summary), status: row.status, dueAt: String(row.response_due_at), mediationRequested: row.status === "mediation", createdAt: String(row.created_at) })));
+  const rows = await c.env.DB.prepare(`SELECT t.*, a.title AS asset_title,
+      EXISTS(SELECT 1 FROM mediation_sessions ms WHERE ms.takedown_request_id = t.id) AS mediation_requested
+    FROM takedown_requests t JOIN assets a ON a.id = t.asset_id AND a.organization_id = t.organization_id
+    WHERE t.organization_id = ? AND (t.requester_id = ? OR a.owner_id = ? OR ? IN ('editor', 'admin')) ORDER BY t.created_at DESC LIMIT 50`).bind(user.organizationId, user.id, user.id, user.role).all<Record<string, unknown>>();
+  return c.json(rows.results.map((row) => ({ id: String(row.id), assetId: String(row.asset_id), assetTitle: String(row.asset_title), reason: row.reason as TakedownReason, summary: String(row.summary), status: row.status, dueAt: String(row.response_due_at), mediationRequested: Number(row.mediation_requested ?? 0) === 1, createdAt: String(row.created_at) })));
 });
 
 const mediationMessageSchema = z.object({ body: z.string().trim().min(1).max(2000), visibility: z.enum(["participants", "facilitator_only", "case_record"]).default("participants") });
@@ -4636,7 +4674,7 @@ app.post("/api/rights/cases/:id/messages", async (c) => {
   if (!user) return c.json({ error: "Authentication required" }, 401);
   const payload = mediationMessageSchema.parse(await c.req.json());
   const caseId = c.req.param("id");
-  const session = await c.env.DB.prepare("SELECT ms.id, t.requester_id, a.owner_id FROM mediation_sessions ms JOIN takedown_requests t ON t.id = ms.takedown_request_id JOIN assets a ON a.id = t.asset_id WHERE ms.takedown_request_id = ? AND t.organization_id = ?").bind(caseId, user.organizationId).first<{ id: string; requester_id: string; owner_id: string }>();
+  const session = await c.env.DB.prepare("SELECT ms.id, t.requester_id, a.owner_id FROM mediation_sessions ms JOIN takedown_requests t ON t.id = ms.takedown_request_id JOIN assets a ON a.id = t.asset_id AND a.organization_id = t.organization_id WHERE ms.takedown_request_id = ? AND t.organization_id = ?").bind(caseId, user.organizationId).first<{ id: string; requester_id: string; owner_id: string }>();
   if (!session) return c.json({ error: "Mediation has not been requested for this case" }, 409);
   const participant = user.id === session.requester_id || user.id === session.owner_id || ["editor", "admin"].includes(user.role);
   if (!participant) return c.json({ error: "You are not a participant in this case" }, 403);
@@ -4645,6 +4683,7 @@ app.post("/api/rights/cases/:id/messages", async (c) => {
   const id = crypto.randomUUID();
   await c.env.DB.prepare("INSERT INTO mediation_messages (id, session_id, author_id, body, visibility) VALUES (?, ?, ?, ?, ?)").bind(id, session.id, authorId, payload.body, payload.visibility).run();
   await c.env.DB.prepare("INSERT INTO rights_case_events (id, organization_id, case_id, actor_id, event_type, payload_json) VALUES (?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), user.organizationId, caseId, user.id, "message_recorded", JSON.stringify({ visibility: payload.visibility })).run();
+  await appendCampaignAudit(c, user, "rights.case.message_recorded", "takedown_request", caseId, { messageId: id, visibility: payload.visibility });
   if (payload.visibility !== "facilitator_only") {
     const otherParticipantId = user.id === session.requester_id ? session.owner_id : session.requester_id;
     if (otherParticipantId && otherParticipantId !== user.id) {
@@ -4658,7 +4697,7 @@ app.get("/api/rights/cases/:id/messages", async (c) => {
   const user = await requestUser(c);
   if (!user) return c.json({ error: "Authentication required" }, 401);
   const caseId = c.req.param("id");
-  const session = await c.env.DB.prepare("SELECT ms.id, t.requester_id, a.owner_id FROM mediation_sessions ms JOIN takedown_requests t ON t.id = ms.takedown_request_id JOIN assets a ON a.id = t.asset_id WHERE ms.takedown_request_id = ? AND t.organization_id = ?").bind(caseId, user.organizationId).first<{ id: string; requester_id: string; owner_id: string }>();
+  const session = await c.env.DB.prepare("SELECT ms.id, t.requester_id, a.owner_id FROM mediation_sessions ms JOIN takedown_requests t ON t.id = ms.takedown_request_id JOIN assets a ON a.id = t.asset_id AND a.organization_id = t.organization_id WHERE ms.takedown_request_id = ? AND t.organization_id = ?").bind(caseId, user.organizationId).first<{ id: string; requester_id: string; owner_id: string }>();
   if (!session) return c.json({ error: "Mediation has not been requested for this case" }, 409);
   const isModerator = ["editor", "admin"].includes(user.role);
   const participant = user.id === session.requester_id || user.id === session.owner_id || isModerator;
@@ -4668,6 +4707,48 @@ app.get("/api/rights/cases/:id/messages", async (c) => {
     FROM mediation_messages m JOIN users u ON u.id = m.author_id
     WHERE m.session_id = ? AND ${visibilityClause} ORDER BY m.created_at ASC LIMIT 200`).bind(session.id).all<Record<string, unknown>>();
   return c.json({ caseId, results: rows.results.map((row) => ({ id: String(row.id), authorId: String(row.author_id), authorName: String(row.author_name), body: String(row.body), visibility: row.visibility, createdAt: String(row.created_at) })) });
+});
+
+async function transitionRightsCase(c: AppContext, user: RequestUser, payload: { to: RightsCase["status"]; resolutionSummary?: string; summary?: string; evidenceReferences?: string[] }): Promise<Response> {
+  const caseId = c.req.param("id");
+  if (!caseId) return c.json({ error: "Rights case id is required", code: "rights_case_id_required" }, 400);
+  const row = await c.env.DB.prepare(`SELECT t.id, t.organization_id, t.status, t.requester_id, t.summary AS case_summary, t.resolution_summary,
+      a.owner_id AS asset_owner_id, a.title AS asset_title
+    FROM takedown_requests t JOIN assets a ON a.id = t.asset_id AND a.organization_id = t.organization_id
+    WHERE t.id = ? AND t.organization_id = ?`).bind(caseId, user.organizationId).first<Record<string, unknown>>();
+  if (!row) return c.json({ error: "Rights case not found" }, 404);
+  const decision = decideRightsTransition({ from: String(row.status) as RightsCase["status"], to: payload.to, actorId: user.id, actorRole: user.role, requesterId: row.requester_id == null ? null : String(row.requester_id), assetOwnerId: String(row.asset_owner_id) });
+  if (!decision.allowed) return c.json({ error: decision.code === "rights_actor_not_authorized" ? "Only the requester, asset owner, or a reviewer can make this decision" : "That rights-case transition is not allowed from the current state", code: decision.code }, decision.code === "rights_actor_not_authorized" ? 403 : 409);
+  const resolutionSummary = String(payload.resolutionSummary ?? payload.summary ?? "").trim();
+  if ((payload.to === "resolved" || payload.to === "closed") && resolutionSummary.length < 10) return c.json({ error: "Resolution text is required for this transition", code: "resolution_summary_required" }, 422);
+  if (payload.to === "appealed" && resolutionSummary.length < 10) return c.json({ error: "An appeal summary is required", code: "appeal_summary_required" }, 422);
+  const updated = await c.env.DB.prepare(`UPDATE takedown_requests
+    SET status = ?,
+      resolution_summary = CASE WHEN ? <> '' THEN ? ELSE resolution_summary END,
+      resolved_at = CASE WHEN ? IN ('resolved', 'closed') THEN COALESCE(resolved_at, CURRENT_TIMESTAMP) ELSE resolved_at END
+    WHERE id = ? AND organization_id = ? AND status = ?`).bind(payload.to, resolutionSummary, resolutionSummary, payload.to, caseId, user.organizationId, row.status).run();
+  if (Number(updated.meta.changes ?? 0) !== 1) return c.json({ error: "The rights case changed while this decision was being applied", code: "rights_transition_conflict" }, 409);
+  if (payload.to === "mediation") await c.env.DB.prepare("INSERT OR IGNORE INTO mediation_sessions (id, takedown_request_id) VALUES (?, ?)").bind(`med-${crypto.randomUUID()}`, caseId).run();
+  await c.env.DB.prepare("INSERT INTO rights_case_events (id, organization_id, case_id, actor_id, event_type, payload_json) VALUES (?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), user.organizationId, caseId, user.id, `transitioned_to_${payload.to}`, JSON.stringify({ from: row.status, to: payload.to, summary: resolutionSummary || null, evidenceReferences: payload.evidenceReferences ?? [] })).run();
+  const auditEventId = await appendCampaignAudit(c, user, "rights.case.transitioned", "takedown_request", caseId, { from: row.status, to: payload.to, summary: resolutionSummary || null, evidenceReferences: payload.evidenceReferences ?? [], assetTitle: String(row.asset_title ?? "") });
+  const recipients = [...new Set([String(row.requester_id), String(row.asset_owner_id)].filter((id) => id && id !== user.id))];
+  for (const recipient of recipients) c.executionCtx.waitUntil(notify(c.env, user.organizationId, recipient, { type: "rights_case_transition", title: `Rights case ${payload.to.replaceAll("_", " ")}`, body: `Rights case ${caseId} moved to ${payload.to.replaceAll("_", " ")}.`, resourceType: "takedown_request", resourceId: caseId }).catch(() => undefined));
+  return c.json(validateContractResponse("POST /api/rights/cases/{id}/transition 200", rightsTransitionResponseSchema, { id: caseId, status: payload.to, auditEventId }));
+}
+
+app.post("/api/rights/cases/:id/transition", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const payload = rightsTransitionRequestSchema.parse(await c.req.json());
+  return transitionRightsCase(c, user, payload);
+});
+
+app.post("/api/rights/cases/:id/appeal", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const raw = await c.req.json() as Record<string, unknown>;
+  const payload = rightsTransitionRequestSchema.parse({ ...raw, to: "appealed" });
+  return transitionRightsCase(c, user, payload);
 });
 
 const campaignBrandKitSchema = z.object({
@@ -4835,13 +4916,14 @@ function derivativePayload(row: Record<string, unknown>) {
 
 function bundlePayload(row: Record<string, unknown>) {
   const buildStatus = String(row.build_status ?? "");
+  const isExpired = String(row.status) === "approved" && row.expires_at != null && !isFutureTimestamp(row.expires_at);
   return {
     id: String(row.id),
     campaignId: String(row.campaign_id),
     bundleType: String(row.bundle_type),
-    status: buildStatus === "building" ? "building" : String(row.status),
+    status: buildStatus === "building" ? "building" : isExpired ? "expired" : String(row.status),
     expiresAt: row.expires_at == null ? null : String(row.expires_at),
-    download: String(row.status) === "approved" && row.expires_at ? `/api/campaign-bundles/${encodeURIComponent(String(row.id))}/download` : null,
+    download: String(row.status) === "approved" && !isExpired && row.expires_at ? `/api/campaign-bundles/${encodeURIComponent(String(row.id))}/download` : null,
     manifest: safeJsonObject<Record<string, unknown>>(row.manifest_json, {}),
     buildStatus: buildStatus || null,
     error: row.build_error == null ? null : String(row.build_error),
@@ -4911,7 +4993,8 @@ app.get("/api/campaigns/:id", async (c) => {
     FROM licences l WHERE l.organization_id = ? AND l.buyer_id = ? AND l.status = 'paid' AND l.paid_at IS NOT NULL
       AND datetime(l.paid_at, '+' || l.duration_days || ' days') > CURRENT_TIMESTAMP AND l.asset_id IN (${placeholders})
     ORDER BY l.created_at DESC`).bind(user.organizationId, user.id, ...assetIds).all<CampaignLicenceRow>() : { results: [] as CampaignLicenceRow[] };
-  const licenceByAsset = new Map(licenceRows.results.map((row) => [String(row.asset_id), row]));
+  const licenceByAsset = new Map<string, CampaignLicenceRow>();
+  for (const row of licenceRows.results) if (!licenceByAsset.has(String(row.asset_id))) licenceByAsset.set(String(row.asset_id), row);
   const assets = stagedRows.results.map((row) => ({ ...assetRowToDomain(row, c.env), campaignStage: String(row.stage) as CampaignStage, campaignNote: String(row.note ?? ""), activeLicenceId: row.active_licence_id == null ? null : String(row.active_licence_id) }));
   const editVersions = assetIds.length ? (await c.env.DB.prepare(`SELECT id, asset_id, version_number, recipe_json, note, created_at FROM asset_edit_versions WHERE organization_id = ? AND asset_id IN (${placeholders}) ORDER BY asset_id, version_number ASC`).bind(user.organizationId, ...assetIds).all<Record<string, unknown>>()).results.map(editVersionPayload) : [];
   const derivativeRows = assetIds.length ? (await c.env.DB.prepare(`SELECT id, asset_id, edit_version_id, campaign_id, licence_id, variant, status, content_type, size_bytes, width, height, created_at FROM asset_derivative_exports WHERE organization_id = ? AND campaign_id = ? AND asset_id IN (${placeholders}) ORDER BY created_at DESC`).bind(user.organizationId, campaignId, ...assetIds).all<Record<string, unknown>>()).results : [];
@@ -4970,6 +5053,294 @@ app.post("/api/campaigns/:id/assets", async (c) => {
     c.env.DB.prepare("INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, metadata_json) VALUES (?, ?, 'campaign_asset_stage_changed', 'campaign', ?, ?)").bind(crypto.randomUUID(), user.id, campaignId, JSON.stringify({ assetId: payload.assetId, stage: payload.stage })),
   ]);
   return c.json({ ok: true, assetId: payload.assetId, stage: payload.stage });
+});
+
+async function campaignBundleAssetRows(env: Bindings, organizationId: string, campaignId: string): Promise<Record<string, unknown>[]> {
+  const rows = await env.DB.prepare(`
+    SELECT c.id AS campaign_id, c.owner_id AS campaign_owner_id, ca.stage,
+      a.id AS asset_id, a.owner_id AS asset_owner_id, a.status AS asset_status, a.kind, a.title,
+      a.rights_status, a.human_verified, a.model_release_status, a.property_release_status,
+      a.original_key, a.source_file_name, a.source_attribution,
+      l.id AS licence_id, l.licence_type, l.territory, l.duration_days, l.paid_at,
+      datetime(l.paid_at, '+' || l.duration_days || ' days') AS licence_expires_at,
+      d.id AS derivative_id, d.object_key AS derivative_key, d.content_type AS derivative_content_type,
+      d.size_bytes AS derivative_size_bytes, d.variant AS derivative_variant
+    FROM campaigns c
+    JOIN campaign_assets ca ON ca.campaign_id = c.id
+    JOIN assets a ON a.id = ca.asset_id AND a.organization_id = c.organization_id
+    LEFT JOIN licences l ON l.id = (
+      SELECT l2.id FROM licences l2
+      WHERE l2.asset_id = a.id AND l2.organization_id = c.organization_id AND l2.buyer_id = c.owner_id
+        AND l2.status = 'paid' AND l2.paid_at IS NOT NULL
+        AND datetime(l2.paid_at, '+' || l2.duration_days || ' days') > CURRENT_TIMESTAMP
+      ORDER BY l2.created_at DESC LIMIT 1
+    )
+    LEFT JOIN asset_derivative_exports d ON d.id = (
+      SELECT d2.id FROM asset_derivative_exports d2
+      WHERE d2.organization_id = c.organization_id AND d2.asset_id = a.id AND d2.campaign_id = c.id
+        AND d2.licence_id = l.id AND d2.status = 'ready'
+      ORDER BY d2.created_at DESC LIMIT 1
+    )
+    WHERE c.id = ? AND c.organization_id = ?
+    ORDER BY ca.updated_at ASC
+  `).bind(campaignId, organizationId).all<Record<string, unknown>>();
+  return rows.results;
+}
+
+function campaignBundleBlockers(row: Record<string, unknown>, requireOriginal = false): Array<{ code: string; message: string }> {
+  const blockers = campaignAssetBlockers(row, row.licence_id != null, row.derivative_id != null);
+  if (String(row.stage) !== "approved") blockers.push({ code: "campaign_asset_not_approved", message: "Only approved campaign sources can be delivered." });
+  if (String(row.asset_status) !== "published") blockers.push({ code: "asset_not_published", message: "The source asset is not currently published." });
+  if (requireOriginal && String(row.original_key ?? "").trim() === "") blockers.push({ code: "original_unavailable", message: "The source original is unavailable." });
+  return blockers;
+}
+
+async function appendCampaignAudit(c: AppContext, user: RequestUser, action: string, resourceType: string, resourceId: string, data: Record<string, unknown>): Promise<string> {
+  const result = await appendAuditEvent(c.env, {
+    streamId: `organization:${user.organizationId}`,
+    actorId: user.id,
+    actorType: auditActorTypeForRole(user.role),
+    action,
+    resourceType,
+    resourceId,
+    data: redactAuditData(data),
+    organizationId: user.organizationId,
+    residencyRegion: user.residencyRegion,
+    actorResidencyRegion: user.residencyRegion,
+  });
+  return result.event.eventId;
+}
+
+app.get("/api/assets/:id/edit-versions", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const assetId = c.req.param("id");
+  const asset = await c.env.DB.prepare("SELECT id, organization_id, owner_id FROM assets WHERE id = ? AND organization_id = ?")
+    .bind(assetId, user.organizationId).first<{ id: string; organization_id: string; owner_id: string }>();
+  if (!asset) return c.json({ error: "Asset not found" }, 404);
+  const licence = await activeCampaignLicence(c.env, user.organizationId, user.id, assetId);
+  const mayRead = asset.owner_id === user.id || allowedRole(user, ["editor", "admin"]) || Boolean(licence);
+  if (!mayRead) return c.json({ error: "An active paid licence is required to inspect edit versions", code: "licence_required" }, 403);
+  const rows = await c.env.DB.prepare(`SELECT id, asset_id, version_number, recipe_json, note, created_at
+    FROM asset_edit_versions WHERE organization_id = ? AND asset_id = ? ORDER BY version_number ASC`)
+    .bind(user.organizationId, assetId).all<Record<string, unknown>>();
+  return c.json({ assetId, results: rows.results.map(editVersionPayload) });
+});
+
+app.post("/api/assets/:id/edit-versions", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["buyer", "editor", "admin"])) return c.json({ error: "Campaign editing access required" }, 403);
+  const payload = editVersionRequestSchema.parse(await c.req.json());
+  const asset = await licensedCampaignAsset(c, user, payload.campaignId, c.req.param("id"), payload.licenceId);
+  if (!asset) return c.json({ error: "A valid paid licence owned by this organization is required for this campaign asset", code: "licence_required" }, 403);
+  const blockers = campaignAssetBlockers(asset, true, true, false);
+  if (blockers.length) return c.json({ error: "The asset is not ready for editing", code: "campaign_edit_blocked", blockers }, 422);
+  const existing = await c.env.DB.prepare("SELECT COALESCE(MAX(version_number), 0) AS version_number FROM asset_edit_versions WHERE organization_id = ? AND asset_id = ?")
+    .bind(user.organizationId, c.req.param("id")).first<{ version_number: number }>();
+  const versionNumber = Number(existing?.version_number ?? 0) + 1;
+  const versionId = crypto.randomUUID();
+  await c.env.DB.prepare(`INSERT INTO asset_edit_versions (id, organization_id, asset_id, version_number, recipe_json, note, created_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?)`)
+    .bind(versionId, user.organizationId, c.req.param("id"), versionNumber, JSON.stringify(payload.recipe), payload.note, user.id).run();
+  const auditEventId = await appendCampaignAudit(c, user, "campaign.edit_version.created", "asset_edit_version", versionId, { assetId: c.req.param("id"), campaignId: payload.campaignId, licenceId: payload.licenceId, versionNumber });
+  const response = validateContractResponse("POST /api/assets/{id}/edit-versions 201", editVersionResponseSchema, {
+    id: versionId, assetId: c.req.param("id"), versionNumber, recipe: payload.recipe, note: payload.note, createdAt: new Date().toISOString(), auditEventId,
+  });
+  return c.json(response, 201);
+});
+
+app.post("/api/assets/:id/derivatives", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["buyer", "editor", "admin"])) return c.json({ error: "Campaign editing access required" }, 403);
+  const payload = derivativeRequestSchema.parse(await c.req.json());
+  const asset = await licensedCampaignAsset(c, user, payload.campaignId, c.req.param("id"), payload.licenceId);
+  if (!asset) return c.json({ error: "A valid paid licence owned by this organization is required for this campaign asset", code: "licence_required" }, 403);
+  const version = await c.env.DB.prepare("SELECT id FROM asset_edit_versions WHERE id = ? AND organization_id = ? AND asset_id = ?")
+    .bind(payload.editVersionId, user.organizationId, c.req.param("id")).first<{ id: string }>();
+  if (!version) return c.json({ error: "Edit version does not belong to this asset" }, 404);
+  const blockers = campaignAssetBlockers(asset, true, true, false);
+  if (blockers.length) return c.json({ error: "The asset is not ready for derivative delivery", code: "derivative_blocked", blockers }, 422);
+  const derivativeId = crypto.randomUUID();
+  const objectKey = `derivatives/${user.organizationId}/${c.req.param("id")}/${derivativeId}`;
+  await c.env.DB.prepare(`INSERT INTO asset_derivative_exports (id, organization_id, asset_id, source_asset_id, edit_version_id, campaign_id, licence_id, variant, object_key, content_type, size_bytes, width, height, rights_snapshot_json, created_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .bind(derivativeId, user.organizationId, c.req.param("id"), c.req.param("id"), payload.editVersionId, payload.campaignId, payload.licenceId, payload.variant, objectKey, payload.contentType, payload.sizeBytes, payload.width ?? null, payload.height ?? null,
+      JSON.stringify({ rightsStatus: asset.rights_status, humanVerified: Number(asset.human_verified) === 1, modelReleaseStatus: asset.model_release_status, propertyReleaseStatus: asset.property_release_status, licenceExpiresAt: asset.licence_expires_at }), user.id).run();
+  const auditEventId = await appendCampaignAudit(c, user, "campaign.derivative.created", "asset_derivative_export", derivativeId, { assetId: c.req.param("id"), campaignId: payload.campaignId, licenceId: payload.licenceId, variant: payload.variant });
+  const response = validateContractResponse("POST /api/assets/{id}/derivatives 201", derivativeResponseSchema, {
+    id: derivativeId, assetId: c.req.param("id"), editVersionId: payload.editVersionId, campaignId: payload.campaignId, licenceId: payload.licenceId, variant: payload.variant, status: "pending", contentType: payload.contentType, sizeBytes: payload.sizeBytes, width: payload.width ?? null, height: payload.height ?? null, contentUrl: `/api/assets/${encodeURIComponent(c.req.param("id"))}/derivatives/${encodeURIComponent(derivativeId)}/content`, createdAt: new Date().toISOString(), auditEventId,
+  });
+  return c.json(response, 201);
+});
+
+app.on(["GET", "HEAD", "PUT"], "/api/assets/:id/derivatives/:derivativeId/content", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const row = await c.env.DB.prepare(`SELECT d.*, a.owner_id AS asset_owner_id, a.rights_status, a.human_verified, a.model_release_status, a.property_release_status,
+      l.buyer_id, l.status AS licence_status, l.paid_at, datetime(l.paid_at, '+' || l.duration_days || ' days') AS licence_expires_at
+    FROM asset_derivative_exports d JOIN assets a ON a.id = d.asset_id AND a.organization_id = d.organization_id
+      JOIN licences l ON l.id = d.licence_id AND l.organization_id = d.organization_id
+    WHERE d.id = ? AND d.asset_id = ? AND d.organization_id = ?`)
+    .bind(c.req.param("derivativeId"), c.req.param("id"), user.organizationId).first<Record<string, unknown>>();
+  if (!row) return c.json({ error: "Derivative not found" }, 404);
+  const licenceValid = String(row.licence_status) === "paid" && row.paid_at != null && isFutureTimestamp(row.licence_expires_at);
+  const mayRead = String(row.asset_owner_id) === user.id || allowedRole(user, ["editor", "admin"]) || (String(row.buyer_id) === user.id && licenceValid);
+  if (!mayRead) return c.json({ error: "Derivative access is not authorized" }, 403);
+  if (c.req.method === "PUT") {
+    if (!allowedRole(user, ["editor", "admin"]) && !(String(row.buyer_id) === user.id && licenceValid)) return c.json({ error: "A valid licence owner or reviewer must upload derivative content" }, 403);
+    if (String(row.status) === "revoked") return c.json({ error: "Revoked derivatives are immutable" }, 409);
+    const contentType = (c.req.header("content-type") ?? String(row.content_type)).split(";", 1)[0].trim().toLowerCase();
+    if (contentType !== String(row.content_type).toLowerCase()) return c.json({ error: "Derivative content type does not match its declaration" }, 415);
+    const claimedLength = Number(c.req.header("content-length") ?? 0);
+    if (claimedLength > 50_000_000) return c.json({ error: "Derivative exceeds the 50 MB limit" }, 413);
+    const bytes = await c.req.raw.arrayBuffer();
+    if (bytes.byteLength === 0 || bytes.byteLength > 50_000_000) return c.json({ error: "Derivative is empty or too large" }, 413);
+    await c.env.MEDIA_BUCKET.put(String(row.object_key), bytes, { httpMetadata: { contentType } });
+    await c.env.DB.prepare("UPDATE asset_derivative_exports SET status = 'ready', size_bytes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?")
+      .bind(bytes.byteLength, row.id, user.organizationId).run();
+    const auditEventId = await appendCampaignAudit(c, user, "campaign.derivative.content_uploaded", "asset_derivative_export", String(row.id), { assetId: c.req.param("id"), sizeBytes: bytes.byteLength, contentType });
+    return c.json(validateContractResponse("PUT /api/assets/{id}/derivatives/{derivativeId}/content 200", derivativeResponseSchema, { ...derivativePayload({ ...row, status: "ready", size_bytes: bytes.byteLength }), auditEventId }));
+  }
+  const canRead = mayRead && String(row.status) === "ready";
+  if (!canRead) return c.json({ error: String(row.status) === "ready" ? "Derivative access is not authorized" : "Derivative content is not ready", code: "derivative_unavailable" }, String(row.status) === "ready" ? 403 : 409);
+  const object = c.req.method === "HEAD" ? await headReadableMedia(c.env, String(row.object_key)) : await getReadableMedia(c.env, String(row.object_key), c.req.header("Range") ? { range: c.req.raw.headers } : undefined);
+  if (!object) return c.json({ error: "Derivative content is unavailable", code: "derivative_unavailable" }, 404);
+  return createMediaResponse(c.req.raw, object as R2ObjectBody, String(row.content_type));
+});
+
+app.post("/api/campaigns/:id/bundles", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["buyer", "editor", "admin"])) return c.json({ error: "Campaign workspace access required" }, 403);
+  const campaignId = c.req.param("id");
+  const payload = bundleRequestSchema.parse(await c.req.json());
+  const campaign = await c.env.DB.prepare("SELECT id, owner_id FROM campaigns WHERE id = ? AND organization_id = ?").bind(campaignId, user.organizationId).first<{ id: string; owner_id: string }>();
+  if (!campaign) return c.json({ error: "Campaign not found" }, 404);
+  if (String(campaign.owner_id) !== user.id && !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Only the campaign owner or a reviewer can request a bundle" }, 403);
+  if (user.role === "buyer" && !(await campaignTermsAccepted(c, campaignId, user))) return c.json({ error: "Accept the campaign terms before requesting delivery", code: "campaign_terms_required" }, 422);
+  const assets = await campaignBundleAssetRows(c.env, user.organizationId, campaignId);
+  if (!assets.length) return c.json({ error: "The campaign has no assets", code: "campaign_empty" }, 422);
+  const blockers = assets.flatMap((row) => campaignBundleBlockers(row, payload.bundleType === "full_archive").map((blocker) => ({ assetId: String(row.asset_id), ...blocker })));
+  if (blockers.length) return c.json({ error: "The campaign is not ready for delivery", code: "bundle_blocked", blockers }, 422);
+  const bundleId = crypto.randomUUID();
+  await c.env.DB.prepare("INSERT INTO campaign_bundles (id, organization_id, campaign_id, owner_id, bundle_type, status) VALUES (?, ?, ?, ?, ?, 'pending')")
+    .bind(bundleId, user.organizationId, campaignId, campaign.owner_id, payload.bundleType).run();
+  const auditEventId = await appendCampaignAudit(c, user, "campaign.bundle.requested", "campaign_bundle", bundleId, { campaignId, bundleType: payload.bundleType, assetCount: assets.length });
+  const row = await c.env.DB.prepare("SELECT * FROM campaign_bundles WHERE id = ? AND organization_id = ?").bind(bundleId, user.organizationId).first<Record<string, unknown>>();
+  return c.json(validateContractResponse("POST /api/campaigns/{id}/bundles 201", bundleResponseSchema, { ...bundlePayload(row ?? { id: bundleId, campaign_id: campaignId, bundle_type: payload.bundleType, status: "pending", created_at: new Date().toISOString() }), auditEventId }), 201);
+});
+
+function safeArchiveSegment(value: string, fallback: string): string {
+  const segment = value.replace(/[^A-Za-z0-9._-]/g, "_").replace(/\.\./g, "_").slice(0, 180);
+  return segment || fallback;
+}
+
+async function buildCampaignBundle(c: AppContext, user: RequestUser, bundle: Record<string, unknown>): Promise<{ objectKey: string; manifest: Record<string, unknown>; items: Array<{ assetId: string; derivativeId: string | null; itemType: string; archivePath: string }> }> {
+  const campaignId = String(bundle.campaign_id);
+  const bundleType = String(bundle.bundle_type);
+  const assets = await campaignBundleAssetRows(c.env, user.organizationId, campaignId);
+  const blockers = assets.flatMap((row) => campaignBundleBlockers(row, bundleType === "full_archive").map((blocker) => ({ assetId: String(row.asset_id), ...blocker })));
+  if (blockers.length) throw new Error(`Bundle blockers: ${JSON.stringify(blockers)}`);
+  const campaign = await c.env.DB.prepare("SELECT id, name, brief_text, brief_json, brand_kit_json, owner_id FROM campaigns WHERE id = ? AND organization_id = ?").bind(campaignId, user.organizationId).first<Record<string, unknown>>();
+  if (!campaign) throw new Error("Campaign not found");
+  const items: Array<{ assetId: string; derivativeId: string | null; itemType: string; archivePath: string }> = [];
+  const entries: ZipEntry[] = [];
+  const manifestAssets = assets.map((row) => ({ assetId: String(row.asset_id), title: String(row.title), derivativeId: String(row.derivative_id), variant: String(row.derivative_variant), licenceId: String(row.licence_id), licenceType: String(row.licence_type), territory: String(row.territory), licenceExpiresAt: String(row.licence_expires_at), sourceAttribution: String(row.source_attribution ?? "") }));
+  const campaignManifest = { version: 1, bundleId: String(bundle.id), campaignId, bundleType, generatedAt: new Date().toISOString(), campaign: { id: campaignId, name: String(campaign.name), brief: safeJsonObject<Record<string, unknown>>(campaign.brief_json, { text: String(campaign.brief_text ?? "") }), brandKit: safeJsonObject<Record<string, unknown>>(campaign.brand_kit_json, {}) }, assets: manifestAssets };
+  entries.push({ path: "manifest.json", body: JSON.stringify(campaignManifest, null, 2) });
+  entries.push({ path: "brief.json", body: JSON.stringify({ campaignId, name: campaign.name, briefText: campaign.brief_text ?? "", brief: safeJsonObject<Record<string, unknown>>(campaign.brief_json, {}), brandKit: safeJsonObject<Record<string, unknown>>(campaign.brand_kit_json, {}) }, null, 2) });
+  entries.push({ path: "audit-manifest.json", body: JSON.stringify({ bundleId: bundle.id, campaignId, generatedAt: campaignManifest.generatedAt, sourceCount: assets.length, immutableOriginals: true }, null, 2) });
+  const manifestAssetId = String(assets[0].asset_id);
+  items.push({ assetId: manifestAssetId, derivativeId: null, itemType: "brief", archivePath: "brief.json" });
+  items.push({ assetId: manifestAssetId, derivativeId: null, itemType: "audit_manifest", archivePath: "audit-manifest.json" });
+  items.push({ assetId: manifestAssetId, derivativeId: null, itemType: "metadata", archivePath: "manifest.json" });
+  for (const row of assets) {
+    const assetSegment = safeArchiveSegment(String(row.asset_id), "asset");
+    const variant = safeArchiveSegment(String(row.derivative_variant), "derivative");
+    const derivativePath = `assets/${assetSegment}/${variant}`;
+    const derivative = await getReadableMedia(c.env, String(row.derivative_key));
+    if (!derivative) throw new Error(`Derivative object is unavailable for ${row.asset_id}`);
+    entries.push({ path: derivativePath, body: derivative.body as ReadableStream<Uint8Array> });
+    items.push({ assetId: String(row.asset_id), derivativeId: String(row.derivative_id), itemType: "derivative", archivePath: derivativePath });
+    const licencePath = `licences/${assetSegment}.json`;
+    entries.push({ path: licencePath, body: JSON.stringify({ licenceId: row.licence_id, licenceType: row.licence_type, territory: row.territory, expiresAt: row.licence_expires_at, assetId: row.asset_id }, null, 2) });
+    items.push({ assetId: String(row.asset_id), derivativeId: null, itemType: "licence_certificate", archivePath: licencePath });
+    const attributionPath = `attribution/${assetSegment}.txt`;
+    entries.push({ path: attributionPath, body: String(row.source_attribution ?? "") || `Contributor asset ${row.asset_id}` });
+    items.push({ assetId: String(row.asset_id), derivativeId: null, itemType: "attribution", archivePath: attributionPath });
+    const metadataPath = `metadata/${assetSegment}.json`;
+    entries.push({ path: metadataPath, body: JSON.stringify({ assetId: row.asset_id, title: row.title, kind: row.kind, rightsStatus: row.rights_status, humanVerified: Number(row.human_verified) === 1, modelReleaseStatus: row.model_release_status, propertyReleaseStatus: row.property_release_status }, null, 2) });
+    items.push({ assetId: String(row.asset_id), derivativeId: null, itemType: "metadata", archivePath: metadataPath });
+    if (bundleType === "full_archive") {
+      const originalKey = String(row.original_key ?? "").trim();
+      const original = originalKey ? await getReadableMedia(c.env, originalKey) : null;
+      if (!original) throw new Error(`Original object is unavailable for ${row.asset_id}`);
+      const originalPath = `originals/${assetSegment}/${safeArchiveSegment(String(row.source_file_name ?? "original"), "original")}`;
+      entries.push({ path: originalPath, body: original.body as ReadableStream<Uint8Array> });
+      items.push({ assetId: String(row.asset_id), derivativeId: null, itemType: "original", archivePath: originalPath });
+    }
+  }
+  const objectKey = `bundles/${user.organizationId}/${campaignId}/${String(bundle.id)}.zip`;
+  await c.env.MEDIA_BUCKET.put(objectKey, createStoredZip(entries), { httpMetadata: { contentType: "application/zip", cacheControl: "private, no-store" }, customMetadata: { bundleId: String(bundle.id), campaignId, organizationId: user.organizationId, bundleType, immutable: "true" } });
+  return { objectKey, manifest: campaignManifest, items };
+}
+
+app.post("/api/campaigns/:id/bundles/:bundleId/approve", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Reviewer access required" }, 403);
+  const campaignId = c.req.param("id");
+  const bundle = await c.env.DB.prepare("SELECT b.*, c.owner_id AS campaign_owner_id FROM campaign_bundles b JOIN campaigns c ON c.id = b.campaign_id AND c.organization_id = b.organization_id WHERE b.id = ? AND b.campaign_id = ? AND b.organization_id = ?")
+    .bind(c.req.param("bundleId"), campaignId, user.organizationId).first<Record<string, unknown>>();
+  if (!bundle) return c.json({ error: "Bundle not found" }, 404);
+  if (String(bundle.status) === "approved") return c.json(validateContractResponse("POST /api/campaigns/{id}/bundles/{bundleId}/approve 200", bundleResponseSchema, bundlePayload(bundle)));
+  if (["expired", "revoked"].includes(String(bundle.status))) return c.json({ error: "This bundle can no longer be approved", code: "bundle_not_rebuildable" }, 409);
+  const currentBuild = await c.env.DB.prepare("SELECT status, error_text FROM campaign_bundle_builds WHERE bundle_id = ? AND organization_id = ?").bind(bundle.id, user.organizationId).first<{ status: string; error_text: string | null }>();
+  if (currentBuild?.status === "building") return c.json({ error: "Bundle is already being built", code: "bundle_building", status: "building" }, 409);
+  const claimed = await c.env.DB.prepare("INSERT INTO campaign_bundle_builds (bundle_id, organization_id, status) VALUES (?, ?, 'building') ON CONFLICT(bundle_id) DO NOTHING")
+    .bind(bundle.id, user.organizationId).run();
+  if (!Number(claimed.meta.changes ?? 0)) {
+    const updatedLock = await c.env.DB.prepare("UPDATE campaign_bundle_builds SET status = 'building', error_text = NULL, started_at = CURRENT_TIMESTAMP, completed_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE bundle_id = ? AND organization_id = ? AND status <> 'building'")
+      .bind(bundle.id, user.organizationId).run();
+    if (!Number(updatedLock.meta.changes ?? 0)) return c.json({ error: "Bundle is already being built", code: "bundle_building", status: "building" }, 409);
+  }
+  try {
+    const built = await buildCampaignBundle(c, user, bundle);
+    const expiresAt = new Date(Date.now() + 7 * 86_400_000).toISOString();
+    await c.env.DB.batch([
+      c.env.DB.prepare("DELETE FROM campaign_bundle_items WHERE bundle_id = ?").bind(bundle.id),
+      ...built.items.map((item) => c.env.DB.prepare("INSERT INTO campaign_bundle_items (bundle_id, derivative_id, asset_id, item_type, archive_path) VALUES (?, ?, ?, ?, ?)").bind(bundle.id, item.derivativeId, item.assetId, item.itemType, item.archivePath)),
+      c.env.DB.prepare("UPDATE campaign_bundles SET status = 'approved', object_key = ?, manifest_json = ?, approved_by = ?, approved_at = CURRENT_TIMESTAMP, expires_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?").bind(built.objectKey, JSON.stringify(built.manifest), user.id, expiresAt, bundle.id, user.organizationId),
+      c.env.DB.prepare("UPDATE campaign_bundle_builds SET status = 'completed', error_text = NULL, completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE bundle_id = ? AND organization_id = ?").bind(bundle.id, user.organizationId),
+    ]);
+    const auditEventId = await appendCampaignAudit(c, user, "campaign.bundle.approved", "campaign_bundle", String(bundle.id), { campaignId, bundleType: bundle.bundle_type, expiresAt, itemCount: built.items.length });
+    if (String(bundle.campaign_owner_id) !== user.id) c.executionCtx.waitUntil(notify(c.env, user.organizationId, String(bundle.campaign_owner_id), { type: "campaign_bundle_ready", title: "Campaign bundle ready", body: "Your approved campaign bundle is ready for authenticated download for seven days.", resourceType: "campaign_bundle", resourceId: String(bundle.id) }).catch(() => undefined));
+    const updated = await c.env.DB.prepare("SELECT b.*, bb.status AS build_status, bb.error_text AS build_error FROM campaign_bundles b LEFT JOIN campaign_bundle_builds bb ON bb.bundle_id = b.id WHERE b.id = ? AND b.organization_id = ?").bind(bundle.id, user.organizationId).first<Record<string, unknown>>();
+    return c.json(validateContractResponse("POST /api/campaigns/{id}/bundles/{bundleId}/approve 200", bundleResponseSchema, { ...bundlePayload(updated ?? { ...bundle, status: "approved", object_key: built.objectKey, expires_at: expiresAt }), auditEventId }));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Bundle build failed";
+    await c.env.DB.batch([
+      c.env.DB.prepare("UPDATE campaign_bundle_builds SET status = 'failed', error_text = ?, updated_at = CURRENT_TIMESTAMP WHERE bundle_id = ? AND organization_id = ?").bind(message.slice(0, 1000), bundle.id, user.organizationId),
+      c.env.DB.prepare("UPDATE campaign_bundles SET status = 'failed', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?").bind(bundle.id, user.organizationId),
+    ]);
+    return c.json({ error: "Bundle could not be built", code: "bundle_build_failed" }, 422);
+  }
+});
+
+app.get("/api/campaign-bundles/:id/download", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const bundle = await c.env.DB.prepare("SELECT b.*, c.owner_id AS campaign_owner_id, c.name AS campaign_name FROM campaign_bundles b JOIN campaigns c ON c.id = b.campaign_id AND c.organization_id = b.organization_id WHERE b.id = ? AND b.organization_id = ?")
+    .bind(c.req.param("id"), user.organizationId).first<Record<string, unknown>>();
+  if (!bundle) return c.json({ error: "Bundle not found" }, 404);
+  if (String(bundle.campaign_owner_id) !== user.id && !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Bundle download is not authorized" }, 403);
+  if (String(bundle.status) !== "approved") return c.json({ error: "Bundle is not available", code: String(bundle.status) === "failed" ? "bundle_build_failed" : "bundle_not_approved" }, 409);
+  if (!bundle.expires_at || String(bundle.expires_at) <= new Date().toISOString()) {
+    await c.env.DB.prepare("UPDATE campaign_bundles SET status = 'expired', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?").bind(bundle.id, user.organizationId).run();
+    return c.json({ error: "Bundle download has expired", code: "bundle_expired" }, 410);
+  }
+  const object = await c.env.MEDIA_BUCKET.get(String(bundle.object_key));
+  if (!object) return c.json({ error: "Bundle object is unavailable", code: "bundle_unavailable" }, 404);
+  const filename = `${safeArchiveSegment(String(bundle.campaign_name ?? "campaign"), "campaign")}-${safeArchiveSegment(String(bundle.bundle_type), "bundle")}.zip`;
+  return new Response(object.body, { headers: { "Content-Type": "application/zip", "Content-Length": String(object.size), "Content-Disposition": `attachment; filename="${filename}"`, "Cache-Control": "private, no-store" } });
 });
 
 app.get("/api/campaigns/:id/manifest", async (c) => {
@@ -5503,8 +5874,8 @@ type StreamWebhookPayload = z.infer<typeof streamWebhookRequestSchema>;
 
 async function verifyStreamWebhook(secret: string, signature: string, body: string): Promise<boolean> {
   const values = new Map(signature.split(",").map((part) => {
-    const [key, ...rest] = part.split("=");
-    return [key, rest.join("=")] as const;
+    const [key, ...rest] = part.trim().split("=");
+    return [key.trim(), rest.join("=").trim()] as const;
   }));
   const timestamp = values.get("time");
   const supplied = values.get("sig1");
@@ -5513,6 +5884,65 @@ async function verifyStreamWebhook(secret: string, signature: string, body: stri
   const expected = hex(await hmac(utf8(secret), `${timestamp}.${body}`));
   return timingSafeEqual(expected, supplied);
 }
+
+function streamUploadStatus(value: string): "uploading" | "processing" | "ready" | "error" {
+  return value === "ready" ? "ready" : value === "processing" ? "processing" : value === "error" || value === "expired" ? "error" : "uploading";
+}
+
+app.post("/api/assets/:id/stream-upload", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["contributor", "editor", "admin"])) return c.json({ error: "Owned video upload access required" }, 403);
+  const payload = streamUploadRequestSchema.parse(await c.req.json());
+  const asset = await c.env.DB.prepare("SELECT id, organization_id, owner_id, kind, stream_uid, stream_status FROM assets WHERE id = ? AND organization_id = ?")
+    .bind(c.req.param("id"), user.organizationId).first<Record<string, unknown>>();
+  if (!asset) return c.json({ error: "Asset not found" }, 404);
+  if (String(asset.kind) !== "video") return c.json({ error: "Stream direct uploads are available for video assets only", code: "video_required" }, 422);
+  if (String(asset.owner_id) !== user.id && !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Only the asset owner or a reviewer can provision a Stream upload" }, 403);
+  const idempotencyKey = (c.req.header("Idempotency-Key")?.trim() || crypto.randomUUID()).slice(0, 180);
+  const existing = await c.env.DB.prepare("SELECT asset_id, provider_uid, upload_url, expires_at, status FROM stream_uploads WHERE organization_id = ? AND asset_id = ? AND idempotency_key = ?")
+    .bind(user.organizationId, asset.id, idempotencyKey).first<Record<string, unknown>>();
+  if (existing && existing.upload_url && isFutureTimestamp(existing.expires_at)) {
+    return c.json(validateContractResponse("POST /api/assets/{id}/stream-upload 200", streamUploadResponseSchema, { assetId: String(existing.asset_id), streamUid: String(existing.provider_uid), uploadUrl: String(existing.upload_url), expiresAt: String(existing.expires_at), status: streamUploadStatus(String(existing.status)) }));
+  }
+  const stream = new IntegrationContainer(c.env).stream;
+  if (!stream) return c.json({ error: "Cloudflare Stream is not configured for this environment", code: "stream_unavailable" }, 503);
+  let directUpload: Awaited<ReturnType<NonNullable<typeof stream>["createDirectUpload"]>>;
+  try {
+    directUpload = await stream.createDirectUpload({ assetId: String(asset.id), organizationId: user.organizationId, creator: user.id, filename: payload.filename, maxDurationSeconds: payload.maxDurationSeconds, idempotencyKey });
+  } catch (error) {
+    logEvent("warn", "stream.direct_upload_failed", c.get("trace"), { assetId: String(asset.id), error: error instanceof Error ? error.message : "unknown-error" });
+    return c.json({ error: "Cloudflare Stream could not provision an upload", code: "stream_upload_unavailable" }, 503);
+  }
+  const uploadId = crypto.randomUUID();
+  await c.env.DB.batch([
+    c.env.DB.prepare("INSERT INTO stream_uploads (id, organization_id, asset_id, uploaded_by, provider_uid, upload_url, idempotency_key, status, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'created', ?)").bind(uploadId, user.organizationId, asset.id, user.id, directUpload.uid, directUpload.uploadUrl, idempotencyKey, directUpload.expiresAt),
+    c.env.DB.prepare("UPDATE assets SET stream_uid = ?, stream_status = 'uploading', stream_progress = 0, stream_error_code = NULL, stream_error_text = NULL, stream_updated_at = CURRENT_TIMESTAMP, stream_ready_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?").bind(directUpload.uid, asset.id, user.organizationId),
+  ]);
+  const auditEventId = await appendCampaignAudit(c, user, "stream.upload.provisioned", "asset", String(asset.id), { streamUid: directUpload.uid, filename: payload.filename, maxDurationSeconds: payload.maxDurationSeconds, uploadId });
+  return c.json(validateContractResponse("POST /api/assets/{id}/stream-upload 201", streamUploadResponseSchema, { assetId: String(asset.id), streamUid: directUpload.uid, uploadUrl: directUpload.uploadUrl, expiresAt: directUpload.expiresAt, status: "uploading", auditEventId }), 201);
+});
+
+app.get("/api/assets/:id/stream-playback", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const asset = await c.env.DB.prepare("SELECT id, organization_id, owner_id, kind, stream_uid, stream_status FROM assets WHERE id = ? AND organization_id = ?")
+    .bind(c.req.param("id"), user.organizationId).first<Record<string, unknown>>();
+  if (!asset) return c.json({ error: "Asset not found" }, 404);
+  if (String(asset.kind) !== "video") return c.json({ error: "Stream playback is available for video assets only", code: "video_required" }, 422);
+  const licensed = await activeCampaignLicence(c.env, user.organizationId, user.id, String(asset.id));
+  const authorized = String(asset.owner_id) === user.id || allowedRole(user, ["editor", "admin"]) || Boolean(licensed);
+  if (!authorized) return c.json({ error: "A valid licence or ownership is required for Stream playback", code: "playback_forbidden" }, 403);
+  if (String(asset.stream_status) !== "ready" || !String(asset.stream_uid ?? "").trim()) return c.json({ error: "Stream playback is not ready", code: "stream_not_ready" }, 409);
+  const stream = new IntegrationContainer(c.env).stream;
+  if (!stream) return c.json({ error: "Cloudflare Stream is not configured for this environment", code: "stream_unavailable" }, 503);
+  try {
+    const playback = await stream.createSignedPlaybackToken(String(asset.stream_uid));
+    return c.json(validateContractResponse("GET /api/assets/{id}/stream-playback 200", streamPlaybackResponseSchema, { assetId: String(asset.id), streamUid: playback.uid, iframeUrl: playback.iframeUrl, expiresInSeconds: playback.expiresInSeconds }));
+  } catch (error) {
+    logEvent("warn", "stream.playback_token_failed", c.get("trace"), { assetId: String(asset.id), error: error instanceof Error ? error.message : "unknown-error" });
+    return c.json({ error: "Signed Stream playback is unavailable", code: "stream_playback_unavailable" }, 503);
+  }
+});
 
 app.post("/api/webhooks/stream", async (c) => {
   const trace = c.get("trace");
@@ -5530,12 +5960,46 @@ app.post("/api/webhooks/stream", async (c) => {
 
   const payload: StreamWebhookPayload = streamWebhookRequestSchema.parse(JSON.parse(body));
   const streamUid = payload.uid ?? "unknown";
-  const state = payload.status?.state ?? "unknown";
+  const statusObject = typeof payload.status === "object" && payload.status !== null ? payload.status : {};
+  const state = payload.state ?? (typeof payload.status === "string" ? payload.status : statusObject.state) ?? "unknown";
   const providerEventId = hex(await crypto.subtle.digest("SHA-256", utf8(body)));
-  await c.env.DB.prepare(`
+  const statusText = String(state).toLowerCase();
+  const errorCode = statusObject.errorReasonCode ?? statusObject.errReasonCode ?? payload.errorReasonCode ?? payload.errReasonCode;
+  const errorText = statusObject.errorReasonText ?? statusObject.errReasonText ?? payload.errorReasonText ?? payload.errReasonText;
+  const parsedProgress = Number.parseFloat(String(payload.pctComplete ?? statusObject.pctComplete ?? ""));
+  const progress = Number.isFinite(parsedProgress) ? Math.max(0, Math.min(100, Math.round(parsedProgress))) : payload.readyToStream || statusText === "ready" ? 100 : 0;
+  const isReady = payload.readyToStream === true && statusText === "ready";
+  const isError = statusText === "error" || Boolean(errorCode || errorText);
+  const nextStatus = isError ? "error" : isReady ? "ready" : "processing";
+  const inserted = await c.env.DB.prepare(`
     INSERT OR IGNORE INTO stream_events (id, provider_event_id, stream_uid, event_type, state, payload_json)
     VALUES (?, ?, ?, ?, ?, ?)
   `).bind(crypto.randomUUID(), providerEventId, streamUid, "video-status", state, body).run();
+
+  if (!Number(inserted.meta.changes ?? 0)) return c.json({ accepted: true, duplicate: true, streamUid, state, progress, status: nextStatus });
+  const upload = streamUid === "unknown" ? null : await c.env.DB.prepare("SELECT id, organization_id, asset_id, uploaded_by FROM stream_uploads WHERE provider_uid = ? ORDER BY updated_at DESC LIMIT 1").bind(streamUid).first<Record<string, unknown>>();
+  const fallbackAsset = upload || streamUid === "unknown" ? null : await c.env.DB.prepare("SELECT id, organization_id, owner_id FROM assets WHERE stream_uid = ? ORDER BY stream_updated_at DESC LIMIT 1").bind(streamUid).first<Record<string, unknown>>();
+  const organizationId = String(upload?.organization_id ?? fallbackAsset?.organization_id ?? "");
+  const assetId = String(upload?.asset_id ?? fallbackAsset?.id ?? "");
+  const notificationUserId = String(upload?.uploaded_by ?? fallbackAsset?.owner_id ?? "");
+  if (organizationId && assetId) {
+    const owner = await c.env.DB.prepare("SELECT u.residency_region FROM users u JOIN assets a ON a.owner_id = u.id WHERE a.id = ? AND a.organization_id = ?").bind(assetId, organizationId).first<{ residency_region: string }>();
+    const updates = [c.env.DB.prepare(`UPDATE assets SET stream_status = ?, stream_progress = ?, stream_error_code = ?, stream_error_text = ?, stream_updated_at = CURRENT_TIMESTAMP,
+        stream_ready_at = CASE WHEN ? = 'ready' THEN COALESCE(stream_ready_at, CURRENT_TIMESTAMP) ELSE stream_ready_at END,
+        workflow_stage = CASE WHEN ? = 'ready' THEN 'approval' ELSE workflow_stage END,
+        status = CASE WHEN ? = 'ready' AND status = 'published' THEN 'needs_review' ELSE status END,
+        updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?`).bind(nextStatus, progress, errorCode ?? null, errorText ?? null, nextStatus, nextStatus, nextStatus, assetId, organizationId)];
+    if (upload) updates.unshift(c.env.DB.prepare("UPDATE stream_uploads SET status = ?, error_code = ?, error_text = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?").bind(nextStatus, errorCode ?? null, errorText ?? null, upload.id, organizationId));
+    await c.env.DB.batch(updates);
+    if (owner) {
+      try {
+        await appendAuditEvent(c.env, { eventId: `stream:${providerEventId}`, streamId: `organization:${organizationId}`, actorId: "stream-provider", actorType: "service", action: isError ? "stream.asset.failed" : isReady ? "stream.asset.ready" : "stream.asset.processing", resourceType: "asset", resourceId: assetId, data: redactAuditData({ streamUid, state: statusText, progress, errorCode: errorCode ?? null, errorText: errorText ?? null }), organizationId, residencyRegion: residencyRegionSchema.parse(owner.residency_region), actorResidencyRegion: residencyRegionSchema.parse(owner.residency_region) });
+      } catch (error) {
+        logEvent("error", "stream.audit_write_failed", trace, { streamUid, assetId, error: error instanceof Error ? error.message : "unknown-error" });
+      }
+      if ((isReady || isError) && notificationUserId) c.executionCtx.waitUntil(notify(c.env, organizationId, notificationUserId, { type: isReady ? "stream_ready" : "stream_error", title: isReady ? "Video processing complete" : "Video processing failed", body: isReady ? "Your video is ready for editorial review." : errorText ?? "Cloudflare Stream reported a processing error. Review the upload and retry.", resourceType: "asset", resourceId: assetId }).catch(() => undefined));
+    }
+  }
 
   recordMetric(c.env, "stream_webhook_received", trace, 1, [state]);
   logEvent("info", "stream.video.status", trace, {
@@ -5543,7 +6007,7 @@ app.post("/api/webhooks/stream", async (c) => {
     state,
     readyToStream: payload.readyToStream ?? false,
   });
-  return c.json({ accepted: true, streamUid, state });
+  return c.json({ accepted: true, streamUid, state, progress, status: nextStatus });
 });
 
 app.all("*", async (c) => {

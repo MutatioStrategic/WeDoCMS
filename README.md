@@ -6,10 +6,10 @@ Veld Archive is a Cloudflare-native foundation for a trusted South African photo
 
 - Editorial landing page and natural-language search interface.
 - Phase 1: contributor onboarding, role-gated asset creation and metadata editing, R2 upload sessions with completion checks, explainable search, governance queues, and editorial review actions.
-- Phase 2: rights-aware licence validation and checkout records, Stream webhook verification, explainability/provenance fields, community collections, takedown cases, mediation records, and provider-neutral integration adapters.
+- Phase 2: rights-aware licence validation and checkout records, Cloudflare Stream direct-upload/playback provisioning and webhook verification, explainability/provenance fields, community collections, takedown cases, mediation records, and provider-neutral integration adapters.
 - Phase 3: privacy-conscious analytics, contributor/buyer reporting endpoints, append-only signed audit exports, residency-aware verification cases, DR replication, observability, and payout/DAM adapter contracts.
 - D1 schema for contributors, organisations, assets, licences, ledger entries, analytics, rights cases, audit events, and upload sessions.
-- Worker API for search, onboarding, asset ingestion, governance, checkout validation, analytics, rights cases, verification, Stream webhooks, upload completion, and server-side Turnstile verification.
+- Worker API for search, onboarding, asset ingestion, governance, campaign derivatives/bundles, checkout validation, analytics, rights cases, verification, Stream upload/playback/webhooks, upload completion, and server-side Turnstile verification.
 - Append-only audit API with SHA-256 hash chaining, Ed25519 signatures, immutable D1 triggers, R2 event objects, and signed legal-dispute exports.
 - Residency-aware contributor verification cases with KYC-provider webhook handling, sanctions/PEP/adverse-media result capture, beneficial-owner checks, document hashes, and retention metadata.
 - R2, D1, and static-assets bindings prepared in `wrangler.jsonc`.
@@ -163,7 +163,7 @@ The code is deployable as a staged foundation, but these external controls must 
 
 - Configure the Auth0 Organization tenant values and map its organization IDs to the provisioned D1 `organizations` rows. The Worker now verifies Auth0 RS256/JWKS tokens and exchanges them for the existing HttpOnly session; keep the development login disabled in production.
 - Configure R2 S3 credentials for presigned PUTs, private preview objects, CORS, media-processing workers/queues, and Cloudflare Images transformations.
-- Configure Cloudflare Stream direct creator uploads, signed playback, and provider status mapping. Webhook verification is implemented; provider provisioning is not.
+- Configure Cloudflare Stream direct creator uploads, signed playback, allowed origins, customer code, and provider webhook delivery. The Worker adapter, short-lived playback-token route, idempotent webhook state mapping, and organization-scoped audit event are implemented; live provider configuration and verification remain a launch gate.
 - Optionally provision the Workers AI binding, the `veld-archive-photo-index` Vectorize index, and both photo queues. Search remains deterministic without AI; when enabled, it embeds only the buyer's query and retrieves approved photo IDs from Vectorize, while image OCR/vision runs only from upload/approval jobs.
 - OCR is separately opt-in. It stays unavailable with a `503` response until both `OCR_ENABLED=true` and an `AI` binding are configured. The model is pinned by `OCR_MODEL`; callers cannot select arbitrary models.
 - Configure Paystack checkout and a verified artist subaccount. The payment session sends the agreed percentage split to Paystack, records the allocation, and only activates a licence after the signed webhook is reconciled. See `docs/marketplace-terms.md` and `IMPORTANT.md`; no fake payment is treated as paid.

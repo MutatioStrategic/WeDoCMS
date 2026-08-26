@@ -8,7 +8,7 @@
 
 ## Media delivery
 
-- Set `STREAM_ACCOUNT_ID`, `STREAM_ALLOWED_ORIGINS`, and the `STREAM_API_TOKEN` Worker secret. Enable direct uploads, signed playback, and the signed webhook at `/api/webhooks/stream`.
+- Set `STREAM_ACCOUNT_ID`, `STREAM_ALLOWED_ORIGINS`, and `STREAM_CUSTOMER_CODE`; configure the `STREAM_API_TOKEN` and webhook signing secret through the bound Secret Store entries (`STREAM_API_TOKEN_STORE` and `STREAM_WEBHOOK_SECRET_STORE`). Local development may use the equivalent Worker secret variables. Enable direct uploads, signed playback, and the signed webhook at `/api/webhooks/stream`.
 - A video remains `processing` until the signed Stream webhook marks it ready; it then enters editorial review. Treat Stream errors as failed processing, not as a publishable asset.
 - The `IMAGES` Worker binding provides cached `thumb`, `card`, and `preview` variants directly from private R2 bytes. Card/thumb use cover crops; preview preserves framing; AVIF/WebP/JPEG is negotiated from `Accept`. Do not expose an anonymous `download` variant.
 - Keep originals private in R2. Buyer downloads use the paid licence endpoint and are recorded in both `asset_events` and immutable licence evidence.

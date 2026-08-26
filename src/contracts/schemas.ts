@@ -215,15 +215,21 @@ export const paymentWebhookRequestSchema = z.object({
 
 export const streamWebhookRequestSchema = z.object({
   uid: z.string().trim().max(240).optional(),
+  state: z.string().trim().max(80).optional(),
   readyToStream: z.boolean().optional(),
-  status: z.object({
+  pctComplete: z.union([z.string().trim().max(40), z.number().finite()]).optional(),
+  errorReasonCode: z.string().trim().max(120).nullable().optional(),
+  errorReasonText: z.string().trim().max(500).nullable().optional(),
+  errReasonCode: z.string().trim().max(120).nullable().optional(),
+  errReasonText: z.string().trim().max(500).nullable().optional(),
+  status: z.union([z.string().trim().max(80), z.object({
     state: z.string().trim().max(80).optional(),
-    pctComplete: z.string().trim().max(40).optional(),
-    errorReasonCode: z.string().trim().max(120).optional(),
-    errorReasonText: z.string().trim().max(500).optional(),
-    errReasonCode: z.string().trim().max(120).optional(),
-    errReasonText: z.string().trim().max(500).optional(),
-  }).optional(),
+    pctComplete: z.union([z.string().trim().max(40), z.number().finite()]).optional(),
+    errorReasonCode: z.string().trim().max(120).nullable().optional(),
+    errorReasonText: z.string().trim().max(500).nullable().optional(),
+    errReasonCode: z.string().trim().max(120).nullable().optional(),
+    errReasonText: z.string().trim().max(500).nullable().optional(),
+  })]).optional(),
   meta: z.object({
     filename: z.string().trim().max(240).optional(),
     filetype: z.string().trim().max(120).optional(),
@@ -242,7 +248,7 @@ export const derivativeRequestSchema = z.object({
   editVersionId: z.string().min(1).max(120),
   campaignId: z.string().min(1).max(120),
   licenceId: z.string().min(1).max(120),
-  variant: z.enum(["original", "edited", "social_square", "portrait", "landscape", "story_9_16", "reel_cover", "linkedin", "web_hero", "email_header"]),
+  variant: z.enum(["edited", "social_square", "portrait", "landscape", "story_9_16", "reel_cover", "linkedin", "web_hero", "email_header"]),
   contentType: z.string().regex(/^[a-z]+\/[a-z0-9.+-]+$/i).max(120),
   sizeBytes: z.number().int().positive().max(50_000_000),
   width: z.number().int().positive().max(20_000).optional(),
@@ -263,7 +269,7 @@ export const rightsTransitionRequestSchema = z.object({
 export const streamUploadRequestSchema = z.object({
   filename: z.string().trim().min(1).max(240),
   contentType: z.string().regex(/^video\//i).max(120),
-  maxDurationSeconds: z.number().int().positive().max(86_400).default(3_600),
+  maxDurationSeconds: z.number().int().positive().max(36_000).default(3_600),
 }).strict();
 
 export const editVersionResponseSchema = z.object({
@@ -273,6 +279,7 @@ export const editVersionResponseSchema = z.object({
   recipe: z.record(z.unknown()),
   note: z.string(),
   createdAt: z.string(),
+  auditEventId: z.string().min(1).optional(),
 });
 
 export const derivativeResponseSchema = z.object({
@@ -289,6 +296,7 @@ export const derivativeResponseSchema = z.object({
   height: z.number().int().positive().nullable().optional(),
   contentUrl: z.string().startsWith("/"),
   createdAt: z.string(),
+  auditEventId: z.string().min(1).optional(),
 });
 
 export const bundleResponseSchema = z.object({
@@ -312,7 +320,8 @@ export const streamUploadResponseSchema = z.object({
   streamUid: z.string().min(1),
   uploadUrl: z.string().url(),
   expiresAt: z.string(),
-  status: z.enum(["uploading", "processing", "ready"]),
+  status: z.enum(["uploading", "processing", "ready", "error"]),
+  auditEventId: z.string().min(1).optional(),
 });
 
 export const streamPlaybackResponseSchema = z.object({

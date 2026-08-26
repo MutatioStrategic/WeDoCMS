@@ -62,4 +62,22 @@ describe("media preview responses", () => {
     expect(library.head).toHaveBeenCalledOnce();
     expect(library.get).toHaveBeenCalledOnce();
   });
+
+  it("prefers the primary media bucket when both sources contain the object", async () => {
+    const primaryObject = mediaObject();
+    const libraryObject = mediaObject();
+    const primary = {
+      head: vi.fn(async () => primaryObject),
+      get: vi.fn(async () => primaryObject),
+    } as unknown as Pick<R2Bucket, "get" | "head">;
+    const library = {
+      head: vi.fn(async () => libraryObject),
+      get: vi.fn(async () => libraryObject),
+    } as unknown as Pick<R2Bucket, "get" | "head">;
+
+    expect(await headReadableMedia({ MEDIA_BUCKET: primary, MEDIA_LIBRARY_BUCKET: library }, "previews/primary.webp")).toBe(primaryObject);
+    expect(await getReadableMedia({ MEDIA_BUCKET: primary, MEDIA_LIBRARY_BUCKET: library }, "previews/primary.webp")).toBe(primaryObject);
+    expect(library.head).not.toHaveBeenCalled();
+    expect(library.get).not.toHaveBeenCalled();
+  });
 });

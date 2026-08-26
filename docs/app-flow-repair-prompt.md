@@ -170,5 +170,7 @@ why; never represent an unrun or environment-blocked check as passing.
 - Letting the browser or mobile client decide role, rights, price, paid state, or
   release access.
 - Making Expo mimic the desktop sidebar.
-- Claiming currently unavailable derivative/bundle routes exist.
+- Hiding the real derivative/bundle route status; mobile stays read-only while the
+  authenticated desktop actions remain visible with useful loading, error, and
+  retry states.
 - A broad visual rebrand or an SDK upgrade mixed into the journey repair.
