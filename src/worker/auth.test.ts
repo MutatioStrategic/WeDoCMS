@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { applicationRoleFromClaims, enrichExternalIdentity, identityDisplayNameForClaims, identityEmailForClaims, isDemoEnvironment, roleForNewAccount, sessionTokenFromRequest, verifyExternalJwt, verifyExternalJwtWithProvider } from "./auth";
+import { applicationRoleFromClaims, enrichExternalIdentity, identityDisplayNameForClaims, identityEmailForClaims, isDemoEnvironment, responseWithSession, roleForNewAccount, sessionTokenFromRequest, verifyExternalJwt, verifyExternalJwtWithProvider } from "./auth";
 
 function encode(value: unknown): string {
   const bytes = new TextEncoder().encode(JSON.stringify(value));
@@ -21,6 +21,13 @@ describe("verified identity exchange", () => {
     expect(isDemoEnvironment({ APP_ENV: "demo", DEMO_AUTH_ENABLED: "true" })).toBe(true);
     expect(isDemoEnvironment({ APP_ENV: "development", DEMO_AUTH_ENABLED: "true" })).toBe(false);
     expect(isDemoEnvironment({ APP_ENV: "production", DEMO_AUTH_ENABLED: "true" })).toBe(false);
+  });
+
+  it("keeps production session cookies host-scoped when no cookie domain is configured", () => {
+    const response = responseWithSession(new Response("ok"), "session.token", { APP_ENV: "production" } as never);
+    const cookie = response.headers.get("Set-Cookie") ?? "";
+    expect(cookie).toContain("Secure");
+    expect(cookie).not.toContain("Domain=");
   });
 
   it("allows a new buyer identity to enroll as a seller without escalating privileged roles", () => {
