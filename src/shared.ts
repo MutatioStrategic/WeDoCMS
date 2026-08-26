@@ -12,6 +12,11 @@ export type LicenceDescription = {
   releaseNote: string;
 };
 export type MonetizationModel = "membership" | "individual_license" | "custom_quote";
+export const INTRODUCTORY_FREE_DOWNLOAD_LIMIT = 3;
+
+export function introductoryDownloadsRemaining(used: number, limit = INTRODUCTORY_FREE_DOWNLOAD_LIMIT): number {
+  return Math.max(0, Math.floor(limit) - Math.max(0, Math.floor(used)));
+}
 export type MetadataReviewStatus = "reviewed" | "needs_context" | "blocked";
 export type MetadataProvenance = "contributor" | "editor" | "ai_suggested";
 export type VisualLocationType = "urban_street" | "coastal_landscape" | "market_scene" | "indoor" | "residential" | "rural_landscape" | "industrial" | "event" | "transport" | "nature" | "sports" | "food" | "other" | "unknown";
@@ -106,6 +111,7 @@ export type Asset = {
   releases?: ContributorRelease[];
   monetizationModel?: MonetizationModel;
   licensePriceCents?: number | null;
+  freeDownloadEnabled?: boolean;
   mediaContentType?: string | null;
   mediaWidth?: number | null;
   mediaHeight?: number | null;
@@ -720,6 +726,10 @@ export class ArchiveDomain {
 
   normalizeSouthAfricanPhone(phone: string): string {
     return normalizeSouthAfricanPhone(phone);
+  }
+
+  introductoryDownloadsRemaining(used: number, limit = INTRODUCTORY_FREE_DOWNLOAD_LIMIT): number {
+    return introductoryDownloadsRemaining(used, limit);
   }
 }
 

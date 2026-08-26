@@ -101,6 +101,13 @@ describe("asset domain contract", () => {
     expect(archiveDomain.canApproveMetadataRevision({ assetRevision: 4, reviewedRevision: 4, metadataReviewStatus: "needs_context" })).toBe(false);
   });
 
+  it("keeps the introductory offer bounded and never returns a negative balance", () => {
+    expect(archiveDomain.introductoryDownloadsRemaining(0)).toBe(3);
+    expect(archiveDomain.introductoryDownloadsRemaining(2)).toBe(1);
+    expect(archiveDomain.introductoryDownloadsRemaining(8)).toBe(0);
+    expect(archiveDomain.introductoryDownloadsRemaining(1, 5)).toBe(4);
+  });
+
   it("filters broad one-token matches out of story searches", () => {
     const baseAsset: Asset = {
       id: "asset-base", kind: "image", status: "published", workflowStage: "approval", title: "", description: "", caption: "", country: "South Africa", province: "Western Cape", city: "Cape Town", locality: null, landmark: null,

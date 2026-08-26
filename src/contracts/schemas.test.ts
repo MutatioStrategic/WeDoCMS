@@ -19,6 +19,7 @@ describe("API contract Zod schemas", () => {
     expect(payload.description).toBe("");
     expect(payload.subjectTags).toEqual([]);
     expect(payload.monetizationModel).toBe("membership");
+    expect(payload.freeDownloadEnabled).toBe(false);
   });
 
   it("rejects malformed requests with actionable issues", () => {

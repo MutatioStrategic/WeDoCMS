@@ -51,6 +51,22 @@ npm run worker:dev
 
 `npm run worker:deploy` is production-only and refuses to deploy the root development bindings. It runs the production bundle gate and requires a dedicated `env.production` block with `APP_ENV=production` and no demo, localhost, or placeholder values. Use `npm run worker:deploy:development` only for an intentional non-production Worker.
 
+### Buyer access demo environment
+
+The demo build includes the complete buyer access choice: three introductory
+free photo downloads, once-off download bundles, and monthly/annual unlimited
+plan cards. Run `npm run build:demo` for the Pages asset and
+`npm run worker:deploy:demo` for the `env.demo` Worker. Demo authentication is
+explicitly enabled, the payment provider is set to `demo` (so no real charge
+can be created), and migration `0032_introductory_free_downloads.sql` marks
+the seeded artist photos as free-download candidates. Configure the demo
+Worker's `SESSION_SECRET` and apply migrations to the demo D1 before sharing
+the URL (`wrangler d1 migrations apply veld-archive --remote --env demo`).
+For local UAT, start the Worker with test R2 signing credentials and run
+`npm run test:e2e:access -- http://127.0.0.1:8787`; this exercises registration,
+the three-download allowance, idempotent retries, subscription/bundle choices,
+and seller photo-only opt-in (including the rejected video case).
+
 ### Auth0 and Supabase identity
 
 Auth0 and Supabase can run together. Configure an Auth0 SPA application with Authorization Code + PKCE and a custom API that issues RS256 access tokens. Set `VITE_AUTH0_DOMAIN`, `VITE_AUTH0_CLIENT_ID`, `VITE_AUTH0_AUDIENCE`, and the optional `VITE_AUTH0_ORGANIZATION` for the frontend. Set `AUTH_JWKS_URL`, `AUTH_ISSUER`, `AUTH_AUDIENCE`, and `AUTH_ROLES_CLAIM` as Worker variables. The tenant Management API (`https://<tenant>/api/v2/`) is not the application API audience and must not be requested by the SPA. Register the deployed app URL as an allowed callback, logout, and web-origin URL in Auth0.

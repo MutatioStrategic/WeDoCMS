@@ -473,19 +473,67 @@ paths:
   /api/subscription:
     get:
       operationId: getBuyerSubscription
-      summary: Return the signed-in buyer's canonical Paystack subscription and payment history
+      summary: Return the signed-in buyer's canonical Paystack subscription, monthly/annual plans, and payment history
       security: [{ sessionCookie: [] }]
       responses:
         '200': { description: Subscription state and plan configuration }
   /api/subscription/session:
     post:
       operationId: createBuyerSubscriptionSession
-      summary: Start hosted checkout for the configured Paystack recurring plan
+      summary: Start hosted checkout for the selected monthly or annual Paystack recurring plan
       security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [successUrl, cancelUrl]
+              properties:
+                successUrl: { type: string, format: uri }
+                cancelUrl: { type: string, format: uri }
+                plan: { type: string, enum: [monthly, annual], default: monthly }
       responses:
         '201': { description: Hosted subscription checkout created }
         '409': { description: Subscription is already active or pending }
         '503': { description: Paystack plan is unconfigured or unavailable }
+  /api/my/free-downloads:
+    get:
+      operationId: getIntroductoryFreeDownloads
+      summary: Return the authenticated buyer's one-time introductory photo allowance
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: "Allowance limit, used count, remaining count, and claimed photo history" }
+        '401': { description: Authentication required }
+  /api/assets/{id}/original:
+    get:
+      operationId: downloadOriginalAsset
+      summary: Download an original using a licence, bundle credit, subscription, owner, staff, or introductory allowance entitlement
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, minLength: 1 } }
+      responses:
+        '302': { description: Short-lived signed R2 download redirect }
+        '403': { description: Entitlement missing or introductory allowance exhausted }
+  /api/buyer/credits/checkout:
+    post:
+      operationId: createBuyerCreditBundleCheckout
+      summary: Start a once-off checkout for archive download credits
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [credits, successUrl, cancelUrl]
+              properties:
+                credits: { type: integer, minimum: 1, maximum: 1000 }
+                successUrl: { type: string, format: uri }
+                cancelUrl: { type: string, format: uri }
+      responses:
+        '201': { description: Once-off credit checkout created }
+        '503': { description: Payment provider is unavailable or unconfigured }
   /api/subscription/manage-link:
     post:
       operationId: createBuyerSubscriptionManageLink
@@ -850,6 +898,7 @@ components:
         sourceAttribution: { type: string, nullable: true }
         monetizationModel: { type: string, enum: [membership, individual_license, custom_quote] }
         licensePriceCents: { type: integer, minimum: 0, nullable: true }
+        freeDownloadEnabled: { type: boolean, description: Seller opt-in for the one-time introductory photo offer }
       additionalProperties: true
     SearchResponse:
       type: object
@@ -888,6 +937,7 @@ components:
         propertyReleaseStatus: { type: string, enum: [unknown, not_required, pending, verified] }
         monetizationModel: { type: string, enum: [membership, individual_license, custom_quote] }
         licensePriceCents: { type: integer, minimum: 0, maximum: 100000000, nullable: true }
+        freeDownloadEnabled: { type: boolean, description: Seller opt-in for the one-time introductory photo offer }
       additionalProperties: false
     AssetCreateResponse:
       type: object
@@ -912,6 +962,7 @@ components:
         aiTags: { type: array, maxItems: 30, items: { type: string, minLength: 1, maxLength: 80 } }
         monetizationModel: { type: string, enum: [membership, individual_license, custom_quote] }
         licensePriceCents: { type: integer, minimum: 0, maximum: 100000000, nullable: true }
+        freeDownloadEnabled: { type: boolean, description: Seller opt-in for the one-time introductory photo offer }
       additionalProperties: false
     GovernanceActionResponse:
       type: object

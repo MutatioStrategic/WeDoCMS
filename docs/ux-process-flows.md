@@ -120,6 +120,24 @@ The unavailable-backend state does not show cached money or credit balances and
 offers a retry. Checkout routes fail closed when the payment provider is not
 configured, and payment success is never inferred from the browser redirect.
 
+## Signup, introductory photos, and access choice
+
+1. A visitor opens **Create an account** from an artist-approved free photo or
+   the Subscribe CTA. Email confirmation (or South African phone OTP) is
+   required before any allowance can be claimed.
+2. After sign-in, the account surface shows a server-authoritative allowance
+   of three free photo downloads. The Worker atomically claims one published
+   artist-approved photo per buyer and asset; retries do not spend another
+   download, and the limit cannot be bypassed by browser storage or a client
+   counter.
+3. When the allowance is exhausted, the buyer sees the evidence and next
+   action: buy a once-off download bundle or choose unlimited monthly/annual
+   access. Paystack webhook confirmation remains the source of truth for paid
+   entitlements.
+4. During upload, an artist can opt an image into the introductory offer.
+   Video, unpublished, rights-pending, or withdrawn records are never eligible;
+   editorial approval remains the publication gate.
+
 ## Contributor to publication
 
 The native Expo route begins with seller account creation by email confirmation or phone OTP. Email confirmation returns through `veldarchive://auth/confirmed`; the verified email or phone identity is exchanged for a short-lived Veld API session and a new seller account is provisioned as a contributor. Existing memberships are never upgraded from a client-provided seller intent. Phone-only accounts use the verified phone as the identity and must collect a real contact email before workflows that require email delivery.

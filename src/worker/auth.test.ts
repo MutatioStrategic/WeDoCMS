@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { applicationRoleFromClaims, enrichExternalIdentity, identityDisplayNameForClaims, identityEmailForClaims, roleForNewAccount, sessionTokenFromRequest, verifyExternalJwt, verifyExternalJwtWithProvider } from "./auth";
+import { applicationRoleFromClaims, enrichExternalIdentity, identityDisplayNameForClaims, identityEmailForClaims, isDemoEnvironment, roleForNewAccount, sessionTokenFromRequest, verifyExternalJwt, verifyExternalJwtWithProvider } from "./auth";
 
 function encode(value: unknown): string {
   const bytes = new TextEncoder().encode(JSON.stringify(value));
@@ -17,6 +17,12 @@ async function sign(secret: string, value: string): Promise<string> {
 }
 
 describe("verified identity exchange", () => {
+  it("only enables demo authentication in the explicit demo environment", () => {
+    expect(isDemoEnvironment({ APP_ENV: "demo", DEMO_AUTH_ENABLED: "true" })).toBe(true);
+    expect(isDemoEnvironment({ APP_ENV: "development", DEMO_AUTH_ENABLED: "true" })).toBe(false);
+    expect(isDemoEnvironment({ APP_ENV: "production", DEMO_AUTH_ENABLED: "true" })).toBe(false);
+  });
+
   it("allows a new buyer identity to enroll as a seller without escalating privileged roles", () => {
     expect(roleForNewAccount("buyer", "seller")).toBe("contributor");
     expect(roleForNewAccount("buyer")).toBe("buyer");
@@ -39,6 +45,28 @@ describe("verified identity exchange", () => {
     const signingInput = `${header}.${payload}`;
     const token = `${signingInput}.${await sign(secret, signingInput)}`;
     await expect(verifyExternalJwtWithProvider({ AUTH_PROVIDER: "supabase", SUPABASE_JWT_SECRET: secret } as never, token)).resolves.toBeNull();
+  });
+
+  it("falls back to Supabase Auth validation for legacy signing while preserving the South African phone boundary", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: "supabase-user-1",
+        email: "person@example.com",
+        phone: "+27821234567",
+        email_confirmed_at: "2026-08-20T10:00:00.000Z",
+        user_metadata: { display_name: "Example Person" },
+      }), { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: "supabase-user-2",
+        phone: "+14155550123",
+        email_confirmed_at: "2026-08-20T10:00:00.000Z",
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const env = { AUTH_PROVIDER: "supabase", SUPABASE_URL: "https://tenant.supabase.co", SUPABASE_ANON_KEY: "public-anon-key" } as never;
+    await expect(verifyExternalJwtWithProvider(env, "header.payload.signature")).resolves.toMatchObject({ provider: "supabase", claims: { sub: "supabase-user-1", phone: "+27821234567", name: "Example Person", email_verified: true } });
+    await expect(verifyExternalJwtWithProvider(env, "header.payload.signature")).resolves.toBeNull();
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "https://tenant.supabase.co/auth/v1/user", expect.objectContaining({ headers: expect.objectContaining({ apikey: "public-anon-key", Authorization: "Bearer header.payload.signature" }) }));
+    vi.unstubAllGlobals();
   });
 
   it("accepts native app sessions through the dedicated authorization scheme", () => {
