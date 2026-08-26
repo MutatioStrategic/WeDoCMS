@@ -306,6 +306,17 @@ describe("photo AI indexing", () => {
     expect(result).toMatchObject({ usedVectorIndex: true, mode: "semantic-preview" });
   });
 
+  it("excludes demo assets from production search filters", async () => {
+    const all = vi.fn(async () => ({ results: [] }));
+    const prepare = vi.fn(() => ({ bind: vi.fn(() => ({ all })) }));
+    await searchPhotoIndex({ DB: { prepare } } as unknown as PhotoPipelineBindings, "forest path", { kind: "image", status: "published", excludeDemo: true });
+
+    const calls = prepare.mock.calls as unknown as unknown[][];
+    const keywordSql = String(calls[0]?.[0] ?? "");
+    expect(keywordSql).toContain("COALESCE(a.demo_seed, 0) = 0");
+    expect(keywordSql).toContain("a.id NOT LIKE 'asset-demo-%'");
+  });
+
   it("builds a stable searchable record from persisted metadata", () => {
     const document = buildPhotoSearchDocument({
       title: "Cape Town market",

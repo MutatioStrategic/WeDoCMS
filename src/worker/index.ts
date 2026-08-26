@@ -3827,7 +3827,7 @@ app.post("/api/search/visual", async (c) => {
       .filter((value) => value && value !== "unknown" && value !== "other").join(" ").trim().slice(0, 1200);
     if (!description) return c.json({ error: "The image could not be described for visual search" }, 422);
     visualStage = "semantic_lookup";
-    const semantic = await searchPhotoIndex(photoPipeline(c.env), description, { kind: "image", status: "published" });
+    const semantic = await searchPhotoIndex(photoPipeline(c.env), description, { kind: "image", status: "published", excludeDemo: String(c.env.APP_ENV) === "production" });
     return c.json({
       query: metadata.description || description,
       mode: semantic.usedVectorIndex ? "visual-to-semantic" : "visual-to-keyword",
@@ -3857,7 +3857,7 @@ app.get("/api/assets", async (c) => {
   let searchMode: SearchResponse["mode"] = "keyword";
   if (params.q && params.status === "published") {
     try {
-      const semantic = await searchPhotoIndex(photoPipeline(c.env), params.q, params);
+      const semantic = await searchPhotoIndex(photoPipeline(c.env), params.q, { ...params, excludeDemo: String(c.env.APP_ENV) === "production" });
       rows = semantic.rows;
       searchMode = semantic.mode;
       if (semantic.fallbackReason) c.header("X-Search-Fallback-Reason", semantic.fallbackReason);
@@ -3868,7 +3868,7 @@ app.get("/api/assets", async (c) => {
   }
 
   if (!searchHandled) {
-    const clauses = [params.status === "all" ? "1 = 1" : "a.status = ?", "a.id NOT LIKE 'asset-test-photo-%'"];
+    const clauses = [params.status === "all" ? "1 = 1" : "a.status = ?", "a.id NOT LIKE 'asset-test-photo-%'", ...(String(c.env.APP_ENV) === "production" ? ["COALESCE(a.demo_seed, 0) = 0", "a.id NOT LIKE 'asset-demo-%'"] : [])];
     const values: string[] = params.status === "all" ? [] : [params.status];
 
     if (params.kind !== "all") {

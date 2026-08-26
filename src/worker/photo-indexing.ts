@@ -1085,9 +1085,10 @@ function ftsQuery(value: string): string {
   return searchTokens(value).map((token) => `"${token.replaceAll('"', '""')}"*`).join(" OR ");
 }
 
-function filterClauses(filters: { kind: "all" | "image" | "video"; status: "published" | "needs_review" | "all"; location?: string; locationType?: string; category?: string }): { clauses: string[]; values: string[] } {
+function filterClauses(filters: { kind: "all" | "image" | "video"; status: "published" | "needs_review" | "all"; location?: string; locationType?: string; category?: string; excludeDemo?: boolean }): { clauses: string[]; values: string[] } {
   const clauses = [filters.status === "all" ? "1 = 1" : "a.status = ?", "a.id NOT LIKE 'asset-test-photo-%'", "COALESCE(a.preview_key, a.original_key, '') <> ''"];
   const values: string[] = filters.status === "all" ? [] : [filters.status];
+  if (filters.excludeDemo) clauses.push("COALESCE(a.demo_seed, 0) = 0", "a.id NOT LIKE 'asset-demo-%'");
   if (filters.kind !== "all") { clauses.push("a.kind = ?"); values.push(filters.kind); }
   if (filters.location) {
     clauses.push("(a.country LIKE ? OR a.city LIKE ? OR a.province LIKE ? OR a.locality LIKE ? OR a.landmark LIKE ?)");
@@ -1102,7 +1103,7 @@ function filterClauses(filters: { kind: "all" | "image" | "video"; status: "publ
 export async function searchPhotoIndex(
   env: PhotoPipelineBindings,
   query: string,
-  filters: { kind: "all" | "image" | "video"; status: "published" | "needs_review" | "all"; location?: string; locationType?: string; category?: string },
+  filters: { kind: "all" | "image" | "video"; status: "published" | "needs_review" | "all"; location?: string; locationType?: string; category?: string; excludeDemo?: boolean },
 ): Promise<{ rows: Record<string, unknown>[]; usedVectorIndex: boolean; mode: "keyword" | "semantic-preview" | "hybrid"; fallbackReason?: "embedding_failed" | "embedding_empty" | "vector_query_failed" }> {
   const filter = filterClauses(filters);
   const match = ftsQuery(query);
