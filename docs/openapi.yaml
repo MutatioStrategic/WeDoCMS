@@ -628,6 +628,16 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/legal/agreements:
+    get:
+      operationId: listMarketplaceAgreements
+      summary: Read the current versioned marketplace agreements
+      responses:
+        '200':
+          description: Seller, buyer, and payment terms that are displayed before acceptance
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MarketplaceAgreementsResponse' }
   /api/checkout/validate:
     post:
       operationId: validateCheckout
@@ -1077,6 +1087,35 @@ components:
         idempotent: { type: boolean }
         enrichment: { type: string }
         etag: { type: string }
+      additionalProperties: false
+    MarketplaceAgreementDocument:
+      type: object
+      required: [type, version, title, audience, effectiveDate, draft, sections]
+      properties:
+        type: { type: string, enum: [seller, buyer, payment] }
+        version: { type: string }
+        title: { type: string }
+        audience: { type: string, enum: [seller, buyer, both] }
+        effectiveDate: { type: string, format: date }
+        draft: { type: boolean }
+        sections:
+          type: array
+          items:
+            type: object
+            required: [heading, body]
+            properties:
+              heading: { type: string }
+              body: { type: string }
+            additionalProperties: false
+      additionalProperties: false
+    MarketplaceAgreementsResponse:
+      type: object
+      required: [documents]
+      properties:
+        documents:
+          type: array
+          minItems: 3
+          items: { $ref: '#/components/schemas/MarketplaceAgreementDocument' }
       additionalProperties: false
     LicenceRequest:
       type: object

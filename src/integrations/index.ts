@@ -9,6 +9,7 @@ export * from "./paystack-webhooks";
 export * from "./didit";
 export * from "./cipc";
 export * from "./zoho";
+export * from "./stream";
 
 import { PayFastPayoutAdapter, PayoutProviderRegistry, SouthAfricanBankPayoutAdapter, StripeConnectPayoutAdapter } from "./payouts";
 import { DemoPaymentAdapter, JsonPaymentAdapter, PaymentProviderRegistry, PaystackPaymentAdapter } from "./payments";
@@ -17,6 +18,7 @@ import { ZohoIntegration, type ZohoIntegrationEnvironment } from "./zoho";
 import { CloudflareEmailAdapter, EmailProviderRegistry, JsonEmailAdapter } from "./email";
 import { DiditVerificationAdapter } from "./didit";
 import { CipcLookupAdapter } from "./cipc";
+import { CloudflareStreamAdapter, type StreamTokenStore } from "./stream";
 
 /** The environment values needed to compose the available integrations. */
 export type IntegrationEnvironment = {
@@ -49,6 +51,11 @@ export type IntegrationEnvironment = {
   DIDIT_URL?: string;
   CIPC_LOOKUP_URL?: string;
   CIPC_API_TOKEN?: string;
+  STREAM_ACCOUNT_ID?: string;
+  STREAM_ALLOWED_ORIGINS?: string;
+  STREAM_CUSTOMER_CODE?: string;
+  STREAM_API_TOKEN?: string;
+  STREAM_API_TOKEN_STORE?: StreamTokenStore;
 } & ZohoIntegrationEnvironment;
 
 /**
@@ -65,6 +72,7 @@ export class IntegrationContainer {
   readonly email: EmailProviderRegistry;
   readonly didit?: DiditVerificationAdapter;
   readonly cipc?: CipcLookupAdapter;
+  readonly stream?: CloudflareStreamAdapter;
 
   constructor(environment: IntegrationEnvironment) {
     this.payments = new PaymentProviderRegistry();
@@ -75,6 +83,15 @@ export class IntegrationContainer {
     const diditApiUrl = environment.DIDIT_API_URL ?? environment.DIDIT_URL;
     if (diditApiKey && environment.DIDIT_KYC_WORKFLOW_ID && environment.DIDIT_KYB_WORKFLOW_ID) this.didit = new DiditVerificationAdapter({ apiKey: diditApiKey, kycWorkflowId: environment.DIDIT_KYC_WORKFLOW_ID, kybWorkflowId: environment.DIDIT_KYB_WORKFLOW_ID, endpoint: diditApiUrl });
     if (environment.CIPC_LOOKUP_URL && environment.CIPC_API_TOKEN) this.cipc = new CipcLookupAdapter({ endpoint: environment.CIPC_LOOKUP_URL, token: environment.CIPC_API_TOKEN });
+    if (environment.STREAM_ACCOUNT_ID && (environment.STREAM_API_TOKEN?.trim() || environment.STREAM_API_TOKEN_STORE)) {
+      this.stream = new CloudflareStreamAdapter({
+        accountId: environment.STREAM_ACCOUNT_ID,
+        token: environment.STREAM_API_TOKEN,
+        tokenStore: environment.STREAM_API_TOKEN_STORE,
+        customerCode: environment.STREAM_CUSTOMER_CODE,
+        allowedOrigins: (environment.STREAM_ALLOWED_ORIGINS ?? "").split(",").map((value) => value.trim()).filter(Boolean),
+      });
+    }
 
     if (environment.PAYMENT_PROVIDER === "payfast" && environment.PAYFAST_MERCHANT_ID && environment.PAYFAST_MERCHANT_KEY && environment.PAYFAST_NOTIFY_URL) {
       this.payments.register(new PayFastPaymentAdapter({

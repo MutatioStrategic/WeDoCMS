@@ -731,14 +731,19 @@ function CreateScreen({ auth, initialAuthMode = "signup" }: { auth: MobileAuth; 
     };
     let currentDraftId = draftId;
     const creating = !currentDraftId;
-    let response = currentDraftId
-      ? await apiRequest<{ error?: string }>(`/api/assets/${encodeURIComponent(currentDraftId)}`, auth.session, { method: "PATCH", body: payload })
-      : await apiPost<{ id?: string; error?: string }>("/api/assets", payload, auth.session);
-    if (!currentDraftId && response.status === 201 && response.body && "id" in response.body && response.body.id) {
-      currentDraftId = response.body.id;
-      setDraftId(currentDraftId);
-    }
-    if ((creating && response.status === 201) || (!creating && response.status === 200)) {
+    try {
+      let response: { status: number; body: { id?: string; error?: string } | null };
+      if (currentDraftId) {
+        response = await apiRequest<{ id?: string; error?: string }>(`/api/assets/${encodeURIComponent(currentDraftId)}`, auth.session, { method: "PATCH", body: payload });
+      } else {
+        response = await apiPost<{ id?: string; error?: string }>("/api/assets", payload, auth.session);
+      }
+      if (!currentDraftId && response.status === 201 && response.body?.id) {
+        currentDraftId = response.body.id;
+        setDraftId(currentDraftId);
+      }
+      if ((creating && response.status === 201) || (!creating && response.status === 200)) {
+        if (!currentDraftId) { setMessage("The draft was created without an id. Nothing was uploaded; try again safely."); return; }
       const mediaType = selectedMedia.mimeType ?? "image/jpeg";
       const fileResponse = await fetch(selectedMedia.uri);
       const mediaBlob = await fileResponse.blob();
@@ -775,11 +780,14 @@ function CreateScreen({ auth, initialAuthMode = "signup" }: { auth: MobileAuth; 
       setDraftId("");
       setUploadIdempotencyKey(newUploadIdempotencyKey());
       setSaving(false);
-    } else if (response.status === 401 || response.status === 403) {
-      setMessage("Sign in with a contributor account to submit assets.");
-      setSaving(false);
-    } else {
-      setMessage(response.body?.error ?? "The draft could not be submitted.");
+      } else if (response.status === 401 || response.status === 403) {
+        setMessage("Sign in with a contributor account to submit assets.");
+      } else {
+        setMessage(response.body?.error ?? "The draft could not be submitted.");
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? `Upload could not be completed. Your draft is still safe to retry. ${error.message}` : "Upload could not be completed. Your draft is still safe to retry.");
+    } finally {
       setSaving(false);
     }
   };
@@ -948,7 +956,7 @@ function MoreScreen({ initialView = "menu", auth, onOpenAsset, onSell, onSignIn 
   if (view === "status") return <StatusScreen onBack={() => setView("menu")} />;
   const canGovern = auth.session && ["editor", "admin"].includes(auth.session.user.role);
   const items: Array<{ key: MoreView; title: string; detail: string; gated?: boolean }> = [{ key: "account", title: "Account", detail: "Security, billing, alerts, exports, deletion, and licences." }, { key: "advanced-search", title: "Advanced search", detail: "Province, category, media type, and human-review filters." }, { key: "community", title: "Community & rights", detail: "Forums, discussions, rights cases, and mediation intake." }, { key: "creators", title: "Creator marketplace", detail: "Search public portfolios and published work." }, { key: "marketplace", title: "Marketplace controls", detail: "Lightboxes, sharing, licence products, buyer automation, and API keys.", gated: true }, { key: "insights", title: "Insights", detail: "Contributor demand or buyer ROI from authenticated reporting.", gated: true }, { key: "campaigns", title: "Campaign delivery", detail: "Campaign recommendations and auditable manifest delivery.", gated: true }, ...(canGovern ? [{ key: "governance" as MoreView, title: "Editorial governance", detail: "Correct metadata, review evidence, and approve or reject records." }] : []), { key: "operations", title: "Connected tools", detail: "WordPress pairing, stakeholder reference, and integration boundaries." }, { key: "rights", title: "Rights guide", detail: "Copyright, releases, provenance, and resolution context." }, { key: "status", title: "App status", detail: "API environment and service availability." }];
-  return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}><Text style={styles.eyebrow}>VELD WORKSPACES</Text><Text style={styles.screenTitle}>More</Text><Text style={styles.screenIntro}>The highest-value desktop journeys are now available as native, API-backed mobile surfaces.</Text><View style={styles.stack}>{items.map((item) => <Pressable key={item.key} style={[styles.navigationCard, item.gated && !auth.session && styles.disabledButton]} disabled={item.gated && !auth.session} onPress={() => setView(item.key)}><View style={styles.navigationIcon}><Layers3 color={COLORS.green} size={20} /></View><View style={styles.navigationCopy}><Text style={styles.cardTitle}>{item.title}</Text><Text style={styles.cardMeta}>{item.gated && !auth.session ? "Sign in as a seller or buyer to open this workspace." : item.detail}</Text></View><ChevronRight color={COLORS.muted} size={18} /></Pressable>)}</View></ScrollView>;
+  return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}><Text style={styles.eyebrow}>VELD WORKSPACES</Text><Text style={styles.screenTitle}>More</Text><Text style={styles.screenIntro}>The highest-value desktop journeys are now available as native, API-backed mobile surfaces.</Text><View style={styles.stack}>{items.map((item) => <Pressable key={item.key} style={styles.navigationCard} onPress={() => { if (item.gated && !auth.session) { onSignIn(); return; } setView(item.key); }}><View style={styles.navigationIcon}><Layers3 color={COLORS.green} size={20} /></View><View style={styles.navigationCopy}><Text style={styles.cardTitle}>{item.title}</Text><Text style={styles.cardMeta}>{item.gated && !auth.session ? "Sign in as a seller or buyer to open this workspace." : item.detail}</Text></View><ChevronRight color={COLORS.muted} size={18} /></Pressable>)}</View></ScrollView>;
 }
 
 function StatusScreen({ onBack }: { onBack?: () => void }) {

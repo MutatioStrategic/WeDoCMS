@@ -29,7 +29,8 @@ try {
     await page.goto(`http://127.0.0.1:${port}`, { waitUntil: "networkidle" });
     const dimensions = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
     expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth + 1);
-    await expect(page.getByRole("button", { name: "Campaign intelligence. Sign in required.", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Create buyer account", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Sell your media", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Open navigation" }).click();
     await page.getByRole("button", { name: "Community", exact: true }).click();
     await expect(page.getByRole("heading", { name: /Make the archive/ })).toBeVisible();

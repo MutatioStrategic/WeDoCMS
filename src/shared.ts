@@ -108,6 +108,7 @@ export type Asset = {
   posterUrl?: string | null;
   streamUid?: string | null;
   streamEmbedUrl?: string | null;
+  streamStatus?: "not_configured" | "uploading" | "processing" | "ready" | "error";
   releases?: ContributorRelease[];
   monetizationModel?: MonetizationModel;
   licensePriceCents?: number | null;
