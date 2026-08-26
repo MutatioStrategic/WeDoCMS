@@ -70,6 +70,7 @@ const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.t
 const supabaseKey = ((import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string | undefined) ?? (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined))?.trim();
 const supabaseConfigured = configuredValue(supabaseUrl) && configuredValue(supabaseKey);
 const supabaseClient: SupabaseClient | undefined = supabaseConfigured ? createClient(supabaseUrl!, supabaseKey!, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } }) : undefined;
+const authRedirectUrl = ((import.meta.env.VITE_AUTH_REDIRECT_URL as string | undefined)?.trim() || "https://veld-archive.pages.dev").replace(/\/$/, "");
 const emptyDiscovery: DiscoveryResponse = { trending: [], savedSearches: [], recommendations: [], personalized: false };
 const recoveryLinkPresent = (): boolean => typeof window !== "undefined" && (new URLSearchParams(window.location.search).get("passwordRecovery") === "1" || /(?:^|&)type=recovery(?:&|$)/.test(window.location.hash.replace(/^#/, "")));
 
@@ -214,7 +215,7 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
       if (supabaseAuthMode === "forgot") {
         const email = supabaseEmail.trim();
         if (!email) throw new Error("Enter the email address for your archive account.");
-        const result = await supabase.auth.resetPasswordForEmail(email, { redirectTo: `${window.location.origin}/?passwordRecovery=1` });
+        const result = await supabase.auth.resetPasswordForEmail(email, { redirectTo: `${authRedirectUrl}/?passwordRecovery=1` });
         if (result.error) throw result.error;
         setSupabaseAuthMode("signin");
         setSupabasePassword("");
@@ -258,7 +259,7 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
         return;
       }
       const result = supabaseAuthMode === "signup"
-        ? await supabase.auth.signUp({ email: supabaseEmail.trim(), password: supabasePassword, options: { emailRedirectTo: window.location.origin, data: { display_name: supabaseEmail.trim().split("@")[0] } } })
+        ? await supabase.auth.signUp({ email: supabaseEmail.trim(), password: supabasePassword, options: { emailRedirectTo: authRedirectUrl, data: { display_name: supabaseEmail.trim().split("@")[0] } } })
         : await supabase.auth.signInWithPassword({ email: supabaseEmail.trim(), password: supabasePassword });
       if (result.error) throw result.error;
       if (result.data.session) await exchangeSupabaseSession(result.data.session);
