@@ -20,6 +20,7 @@ async function filesUnder(directory) {
 
 const failures = [];
 let files = [];
+const builtContents = [];
 try {
   files = await filesUnder(dist);
 } catch {
@@ -28,6 +29,7 @@ try {
 
 for (const file of files.filter((candidate) => textExtensions.has(extname(candidate)))) {
   const content = await readFile(file, "utf8");
+  builtContents.push(content);
   for (const check of forbidden) if (check.pattern.test(content)) failures.push(`${check.label} found in ${file.replaceAll("\\", "/")}`);
 }
 
@@ -58,6 +60,7 @@ if (process.argv.includes("--production")) {
   if (!/"APP_ENV"\s*:\s*"production"/.test(productionConfig)) failures.push("The production Wrangler environment must set APP_ENV to production.");
   if (/"cache"\s*:\s*\{\s*"enabled"\s*:\s*true/s.test(productionConfig)) failures.push("Worker-wide production caching must remain disabled for cookie-authenticated API responses.");
   if (/"AUTH_PROVIDER"\s*:\s*"(?:auth0|both)"/.test(productionConfig) && !/"AUTH_AUDIENCE"\s*:\s*"[^"]+"/.test(productionConfig)) failures.push("Auth0 is selected in production but AUTH_AUDIENCE is missing.");
+  if (!builtContents.some((content) => /https:\/\/[A-Za-z0-9.-]+\.supabase\.co/.test(content) || /https:\/\/[A-Za-z0-9.-]+\.auth0\.com/.test(content))) failures.push("The production frontend bundle has no configured Supabase or Auth0 origin; authentication buttons would be unavailable.");
   if (!/"PAYSTACK_SUBSCRIPTION_PLAN_CODE"\s*:\s*"PLN_[^"]+"/.test(productionConfig)) failures.push("The canonical Paystack subscription plan code is missing.");
   if (!/"binding"\s*:\s*"MEDIA_BUCKET"\s*,\s*"bucket_name"\s*:\s*"veld-archive-media"/.test(productionConfig)) failures.push("The production Worker must remain bound to the production media bucket.");
   if (!/"R2_BUCKET_NAME"\s*:\s*"veld-archive-media"/.test(productionConfig)) failures.push("Production R2 signing must target the production media bucket.");
