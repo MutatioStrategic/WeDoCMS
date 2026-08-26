@@ -37,6 +37,34 @@ flowchart TD
   E -->|editor/admin| H[Review and governance queue]
 ```
 
+### Password recovery
+
+1. A visitor opens the email sign-in form and chooses **Forgot password?**.
+2. The app sends the email address to Supabase and always shows the same
+   confirmation whether an account exists. The app does not store reset tokens
+   or passwords.
+3. The visitor follows the single-use link back to the web origin or the native
+   `veldarchive://auth/recovery` route. The app shows only the new-password form
+   while Supabase holds the verified recovery session.
+4. After the password is updated, the recovery session is signed out and the
+   visitor is returned to sign-in. Expired or unavailable links show the provider
+   error and offer a path to request another link.
+
+### South African phone OTP
+
+1. A visitor chooses **SMS** and enters a South African mobile number in the
+   familiar local format, for example `073 712 3456`. The form explains that
+   `+27` is added automatically; users do not need to type it.
+2. The client validates the number, converts it to canonical `+27…` E.164,
+   and asks Supabase for a six-digit SMS code. Invalid country codes,
+   landlines, and malformed numbers are rejected before an SMS request.
+3. If Supabase has no SMS provider configured, the form explains that an
+   administrator must enable Phone authentication and an SMS provider in the
+   Supabase project. The entered number remains available for correction and
+   retry.
+4. After verification, the Worker accepts only a South African phone claim
+   and exchanges the verified Supabase identity for the normal Veld session.
+
 ## Buyer licence validation
 
 1. A signed-in buyer opens the Buyer ROI workspace and selects a published asset.
@@ -92,7 +120,27 @@ The unavailable-backend state does not show cached money or credit balances and
 offers a retry. Checkout routes fail closed when the payment provider is not
 configured, and payment success is never inferred from the browser redirect.
 
+## Signup, introductory photos, and access choice
+
+1. A visitor opens **Create an account** from an artist-approved free photo or
+   the Subscribe CTA. Email confirmation (or South African phone OTP) is
+   required before any allowance can be claimed.
+2. After sign-in, the account surface shows a server-authoritative allowance
+   of three free photo downloads. The Worker atomically claims one published
+   artist-approved photo per buyer and asset; retries do not spend another
+   download, and the limit cannot be bypassed by browser storage or a client
+   counter.
+3. When the allowance is exhausted, the buyer sees the evidence and next
+   action: buy a once-off download bundle or choose unlimited monthly/annual
+   access. Paystack webhook confirmation remains the source of truth for paid
+   entitlements.
+4. During upload, an artist can opt an image into the introductory offer.
+   Video, unpublished, rights-pending, or withdrawn records are never eligible;
+   editorial approval remains the publication gate.
+
 ## Contributor to publication
+
+The native Expo route begins with seller account creation by email confirmation or phone OTP. Email confirmation returns through `veldarchive://auth/confirmed`; the verified email or phone identity is exchanged for a short-lived Veld API session and a new seller account is provisioned as a contributor. Existing memberships are never upgraded from a client-provided seller intent. Phone-only accounts use the verified phone as the identity and must collect a real contact email before workflows that require email delivery.
 
 ```mermaid
 sequenceDiagram
@@ -117,6 +165,8 @@ sequenceDiagram
   API-->>UI: Published; index current or pending
   C->>UI: Check contributor insights
 ```
+
+On mobile, the seller tender is split into three recoverable steps: contributor profile, individual/company identity verification, then signed contract and payout setup. Company verification uses CIPC before the hosted Didit session. Contract submission uses a transient Turnstile token and Firma reference; payout stores only the provider account reference and optional last-four values. When any provider is unavailable, the completed data remains stored, the failed step explains what happened, and the user can retry without creating a duplicate identity or contract implicitly.
 
 ## Top-admin approval ledger
 

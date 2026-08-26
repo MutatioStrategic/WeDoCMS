@@ -1,5 +1,7 @@
 param(
-  [switch]$Remote
+  [switch]$Remote,
+  [string]$DatabaseName = "veld-archive",
+  [string]$BucketName = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,13 +10,13 @@ $ErrorActionPreference = "Stop"
 Downloads the rights-aware South African demo set and places it in Wrangler D1/R2.
 
 Local is the default. Pass -Remote only when deliberately promoting the fixtures to
-the configured Cloudflare account. Use the source_url/source_download_url fields in
-migrations 0011/0012 when promoting records to a configured staging or production environment.
+the configured Cloudflare account. The remote default uses the isolated demo media bucket;
+pass -BucketName explicitly when deliberately targeting another bucket.
 #>
 
 $root = Split-Path -Parent $PSScriptRoot
 $fixtureRoot = Join-Path $root "fixtures\demo-media"
-$bucket = "veld-archive-media"
+$bucket = if ($BucketName) { $BucketName } elseif ($Remote) { "veld-archive-demo-media" } else { "veld-archive-media" }
 $storageFlag = if ($Remote) { "--remote" } else { "--local" }
 $targetLabel = if ($Remote) { "remote Cloudflare" } else { "local Wrangler" }
 
@@ -41,7 +43,7 @@ foreach ($item in $media) {
 }
 
 Write-Host "Applying $targetLabel D1 migrations..."
-npx.cmd wrangler d1 migrations apply veld-archive $storageFlag
+npx.cmd wrangler d1 migrations apply $DatabaseName $storageFlag
 if ($LASTEXITCODE -ne 0) { throw "D1 migration failed." }
 
 foreach ($item in $media) {
@@ -57,7 +59,7 @@ foreach ($item in $media) {
 
 Write-Host "Verifying seeded D1 records in $targetLabel..."
 $query = "SELECT id, kind, status, title, source_license, source_attribution FROM assets WHERE demo_seed = 1 ORDER BY id"
-npx.cmd wrangler d1 execute veld-archive $storageFlag --command $query
+npx.cmd wrangler d1 execute $DatabaseName $storageFlag --command $query
 if ($LASTEXITCODE -ne 0) { throw "D1 verification failed." }
 
-Write-Host "Demo media seed complete. Files are in $fixtureRoot and $targetLabel R2 bucket $bucket."
+Write-Host "Demo media seed complete. Files are in $fixtureRoot, database $DatabaseName, and $targetLabel R2 bucket $bucket."

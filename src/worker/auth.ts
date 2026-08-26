@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { jwtVerify, createRemoteJWKSet } from "jose";
+import { isSouthAfricanPhone } from "../phone";
 
 export type AuthBindings = {
   DB: D1Database;
@@ -14,6 +15,7 @@ export type AuthBindings = {
   AUTH_USERINFO_URL?: string;
   AUTH_PROVIDER?: "auth0" | "supabase" | "both" | string;
   SUPABASE_URL?: string;
+  SUPABASE_ANON_KEY?: string;
   SUPABASE_JWT_SECRET?: string;
   SUPABASE_JWKS_URL?: string;
   SUPABASE_ISSUER?: string;
@@ -35,6 +37,10 @@ export type RequestUser = {
   csrfToken: string;
 };
 
+export function isDemoEnvironment(env: Pick<AuthBindings, "APP_ENV" | "DEMO_AUTH_ENABLED">): boolean {
+  return String(env.APP_ENV) === "demo" && String(env.DEMO_AUTH_ENABLED) === "true";
+}
+
 type SessionRow = {
   session_id: string;
   csrf_token: string;
@@ -52,7 +58,11 @@ type SessionRow = {
 const jwtClaimsSchema = z.object({
   sub: z.string().min(1).max(200),
   email: z.string().email().max(320).optional(),
+  phone: z.string().regex(/^\+[1-9]\d{7,14}$/).optional(),
   name: z.string().trim().min(1).max(180).optional(),
+  user_metadata: z.object({
+    display_name: z.string().trim().min(1).max(180).optional(),
+  }).passthrough().optional(),
   org_id: z.string().min(1).max(120).optional(),
   org_name: z.string().trim().min(1).max(180).optional(),
   role: z.string().trim().min(1).max(80).optional(),
@@ -66,7 +76,21 @@ const jwtClaimsSchema = z.object({
 
 const applicationRoles = ["buyer", "contributor", "editor", "admin"] as const;
 export type ApplicationRole = (typeof applicationRoles)[number];
-type JwtClaims = z.infer<typeof jwtClaimsSchema>;
+export type JwtClaims = z.infer<typeof jwtClaimsSchema>;
+
+export async function identityEmailForClaims(claims: JwtClaims): Promise<string> {
+  if (claims.email) return claims.email;
+  if (claims.phone) return `phone-${await sha256Hex(claims.phone)}@identity.invalid`;
+  return `${claims.sub}@identity.invalid`;
+}
+
+export function identityDisplayNameForClaims(claims: JwtClaims): string {
+  return claims.name ?? claims.user_metadata?.display_name ?? claims.email ?? claims.phone ?? claims.sub;
+}
+
+export function roleForNewAccount(identityRole: ApplicationRole, accountIntent?: "seller"): ApplicationRole {
+  return accountIntent === "seller" && identityRole === "buyer" ? "contributor" : identityRole;
+}
 
 export type ExternalIdentity = {
   provider: "auth0" | "supabase";
@@ -78,6 +102,14 @@ const auth0UserInfoSchema = z.object({
   email: z.string().email().max(320).optional(),
   email_verified: z.boolean().optional(),
   name: z.string().trim().min(1).max(180).optional(),
+}).passthrough();
+
+const supabaseUserSchema = z.object({
+  id: z.string().min(1).max(200),
+  email: z.string().email().max(320).nullable().optional(),
+  phone: z.string().nullable().optional(),
+  email_confirmed_at: z.string().nullable().optional(),
+  user_metadata: z.record(z.unknown()).optional(),
 }).passthrough();
 
 const utf8 = (value: string): Uint8Array<ArrayBuffer> => new TextEncoder().encode(value) as Uint8Array<ArrayBuffer>;
@@ -120,7 +152,7 @@ export function sessionTokenFromRequest(request: Request): string | null {
 
 function sessionCookie(value: string, env: AuthBindings, maxAge: number): string {
   const attributes = ["HttpOnly", "Path=/", `Max-Age=${maxAge}`, "SameSite=Lax"];
-  if (String(env.APP_ENV) === "production") attributes.push("Secure");
+  if (["production", "demo"].includes(String(env.APP_ENV))) attributes.push("Secure");
   if (env.AUTH_COOKIE_DOMAIN) attributes.push(`Domain=${env.AUTH_COOKIE_DOMAIN}`);
   return `va_session=${encodeURIComponent(value)}; ${attributes.join("; ")}`;
 }
@@ -219,11 +251,44 @@ function supabaseProfile(env: AuthBindings) {
   const baseUrl = env.SUPABASE_URL?.replace(/\/$/, "");
   return {
     secret: env.SUPABASE_JWT_SECRET,
+    anonKey: env.SUPABASE_ANON_KEY,
     issuer: env.SUPABASE_ISSUER ?? (baseUrl ? `${baseUrl}/auth/v1` : undefined),
     jwksUrl: env.SUPABASE_JWKS_URL ?? (baseUrl ? `${baseUrl}/auth/v1/.well-known/jwks.json` : undefined),
     audience: env.SUPABASE_AUDIENCE ?? "authenticated",
     rolesClaim: env.SUPABASE_ROLES_CLAIM,
   };
+}
+
+async function verifySupabaseAccessToken(env: AuthBindings, token: string): Promise<JwtClaims | null> {
+  const baseUrl = env.SUPABASE_URL?.replace(/\/$/, "");
+  const anonKey = env.SUPABASE_ANON_KEY?.trim();
+  if (!baseUrl || !anonKey) return null;
+  try {
+    const response = await fetch(`${baseUrl}/auth/v1/user`, {
+      headers: {
+        Accept: "application/json",
+        apikey: anonKey,
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    if (!response.ok) return null;
+    const user = supabaseUserSchema.parse(await response.json());
+    const displayName = typeof user.user_metadata?.display_name === "string" && user.user_metadata.display_name.trim()
+      ? user.user_metadata.display_name.trim()
+      : user.email ?? undefined;
+    return jwtClaimsSchema.parse({
+      sub: user.id,
+      email: user.email ?? undefined,
+      phone: user.phone ?? undefined,
+      name: displayName,
+      user_metadata: user.user_metadata,
+      iss: `${baseUrl}/auth/v1`,
+      aud: env.SUPABASE_AUDIENCE ?? "authenticated",
+      email_verified: Boolean(user.email_confirmed_at),
+    });
+  } catch {
+    return null;
+  }
 }
 
 async function verifyJoseToken(token: string, profile: { secret?: string; jwksUrl?: string; issuer?: string; audience?: string }, algorithms: string[]): Promise<JwtClaims | null> {
@@ -260,7 +325,9 @@ export async function verifyExternalJwtWithProvider(env: AuthBindings, token: st
   if (providerEnabled(env, "supabase")) {
     const profile = supabaseProfile(env);
     const supabaseClaims = await verifyJoseToken(token, profile, profile.secret ? ["HS256"] : ["RS256", "ES256"]);
-    if (supabaseClaims) return { provider: "supabase", claims: supabaseClaims };
+    if (supabaseClaims && (!supabaseClaims.phone || isSouthAfricanPhone(supabaseClaims.phone))) return { provider: "supabase", claims: supabaseClaims };
+    const remotelyVerifiedClaims = await verifySupabaseAccessToken(env, token);
+    if (remotelyVerifiedClaims && (!remotelyVerifiedClaims.phone || isSouthAfricanPhone(remotelyVerifiedClaims.phone))) return { provider: "supabase", claims: remotelyVerifiedClaims };
   }
   return null;
 }

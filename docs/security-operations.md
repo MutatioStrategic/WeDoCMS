@@ -11,10 +11,10 @@ AUTH_ISSUER                    # expected issuer, including trailing slash
 AUTH_AUDIENCE                  # expected API audience
 AUTH_ROLES_CLAIM               # optional namespaced claim containing application roles
 PAYMENT_WEBHOOK_SECRET         # provider webhook signing secret
-TURNSTILE_SECRET               # required for high-risk public actions
+TURNSTILE_SECRET               # add when high-risk public actions are enabled
 MEDIA_SCANNER_SECRET           # only when MEDIA_SCANNER_URL is configured
-AUDIT_SIGNING_PRIVATE_JWK
-AUDIT_SIGNING_PUBLIC_JWK
+AUDIT_SIGNING_PRIVATE_JWK    # add before enabling audit exports/events
+AUDIT_SIGNING_PUBLIC_JWK     # add before enabling audit exports/events
 ```
 
 `x-user-id`, `x-user-role`, and `x-demo-user-id` are not accepted as identity. Browser sessions use an HttpOnly, signed, revocable cookie plus a CSRF token. External IdP tokens are accepted only through the verified JWT exchange endpoint.

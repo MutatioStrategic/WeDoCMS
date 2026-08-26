@@ -14,8 +14,7 @@
         {
           "photosPermission": "Veld Archive needs access to selected photos for editorial submission."
         }
-      ],
-      "expo-secure-store"
+      ]
     ],
     "ios": {
       "supportsTablet": true,

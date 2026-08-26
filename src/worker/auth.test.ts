@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { applicationRoleFromClaims, enrichExternalIdentity, sessionTokenFromRequest, verifyExternalJwt, verifyExternalJwtWithProvider } from "./auth";
+import { applicationRoleFromClaims, enrichExternalIdentity, identityDisplayNameForClaims, identityEmailForClaims, isDemoEnvironment, roleForNewAccount, sessionTokenFromRequest, verifyExternalJwt, verifyExternalJwtWithProvider } from "./auth";
 
 function encode(value: unknown): string {
   const bytes = new TextEncoder().encode(JSON.stringify(value));
@@ -17,6 +17,58 @@ async function sign(secret: string, value: string): Promise<string> {
 }
 
 describe("verified identity exchange", () => {
+  it("only enables demo authentication in the explicit demo environment", () => {
+    expect(isDemoEnvironment({ APP_ENV: "demo", DEMO_AUTH_ENABLED: "true" })).toBe(true);
+    expect(isDemoEnvironment({ APP_ENV: "development", DEMO_AUTH_ENABLED: "true" })).toBe(false);
+    expect(isDemoEnvironment({ APP_ENV: "production", DEMO_AUTH_ENABLED: "true" })).toBe(false);
+  });
+
+  it("allows a new buyer identity to enroll as a seller without escalating privileged roles", () => {
+    expect(roleForNewAccount("buyer", "seller")).toBe("contributor");
+    expect(roleForNewAccount("buyer")).toBe("buyer");
+    expect(roleForNewAccount("editor", "seller")).toBe("editor");
+    expect(roleForNewAccount("admin", "seller")).toBe("admin");
+  });
+
+  it("derives a stable internal contact for verified phone-only identities", async () => {
+    const claims = { sub: "phone-user", phone: "+27821234567", user_metadata: { display_name: "Phone Seller" } } as never;
+    const email = await identityEmailForClaims(claims);
+    expect(email).toMatch(/^phone-[a-f0-9]{64}@identity\.invalid$/);
+    expect(email).not.toContain("27821234567");
+    expect(identityDisplayNameForClaims(claims)).toBe("Phone Seller");
+  });
+
+  it("rejects a Supabase phone identity outside South Africa", async () => {
+    const secret = "test-secret-that-is-long-enough-for-auth";
+    const header = encode({ alg: "HS256", typ: "JWT" });
+    const payload = encode({ sub: "foreign-phone-user", phone: "+14155550123", exp: Math.floor(Date.now() / 1000) + 60 });
+    const signingInput = `${header}.${payload}`;
+    const token = `${signingInput}.${await sign(secret, signingInput)}`;
+    await expect(verifyExternalJwtWithProvider({ AUTH_PROVIDER: "supabase", SUPABASE_JWT_SECRET: secret } as never, token)).resolves.toBeNull();
+  });
+
+  it("falls back to Supabase Auth validation for legacy signing while preserving the South African phone boundary", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: "supabase-user-1",
+        email: "person@example.com",
+        phone: "+27821234567",
+        email_confirmed_at: "2026-08-20T10:00:00.000Z",
+        user_metadata: { display_name: "Example Person" },
+      }), { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: "supabase-user-2",
+        phone: "+14155550123",
+        email_confirmed_at: "2026-08-20T10:00:00.000Z",
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const env = { AUTH_PROVIDER: "supabase", SUPABASE_URL: "https://tenant.supabase.co", SUPABASE_ANON_KEY: "public-anon-key" } as never;
+    await expect(verifyExternalJwtWithProvider(env, "header.payload.signature")).resolves.toMatchObject({ provider: "supabase", claims: { sub: "supabase-user-1", phone: "+27821234567", name: "Example Person", email_verified: true } });
+    await expect(verifyExternalJwtWithProvider(env, "header.payload.signature")).resolves.toBeNull();
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "https://tenant.supabase.co/auth/v1/user", expect.objectContaining({ headers: expect.objectContaining({ apikey: "public-anon-key", Authorization: "Bearer header.payload.signature" }) }));
+    vi.unstubAllGlobals();
+  });
+
   it("accepts native app sessions through the dedicated authorization scheme", () => {
     expect(sessionTokenFromRequest(new Request("https://api.example.test/me", { headers: { Authorization: "VeldSession session-id.token-secret" } }))).toBe("session-id.token-secret");
     expect(sessionTokenFromRequest(new Request("https://api.example.test/me", { headers: { Authorization: "Bearer external.jwt.token" } }))).toBeNull();

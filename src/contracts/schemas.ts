@@ -93,6 +93,7 @@ export const assetSchema = z.object({
   streamEmbedUrl: z.string().url().nullable().optional(),
   monetizationModel: z.enum(["membership", "individual_license", "custom_quote"]).optional(),
   licensePriceCents: z.number().int().nonnegative().nullable().optional(),
+  freeDownloadEnabled: z.boolean().optional(),
 }).passthrough();
 
 export const searchResponseSchema = z.object({
@@ -120,6 +121,7 @@ export const assetCreateRequestSchema = z.object({
   propertyReleaseStatus: releaseStatusSchema.default("unknown"),
   monetizationModel: z.enum(["membership", "individual_license", "custom_quote"]).default("membership"),
   licensePriceCents: z.number().int().nonnegative().max(100_000_000).nullable().optional(),
+  freeDownloadEnabled: z.boolean().default(false),
   artistLicenseKey: z.enum(["custom", "cc_by_4_0", "cc_by_sa_4_0", "mit", "other"]).default("custom"),
   artistLicenseVersion: z.string().trim().max(80).optional(),
   artistLicenseUrl: z.string().url().max(1000).optional().or(z.literal("")),
@@ -149,6 +151,7 @@ export const governanceActionRequestSchema = z.object({
   visibleText: z.string().trim().max(2000).optional(),
   monetizationModel: z.enum(["membership", "individual_license", "custom_quote"]).optional(),
   licensePriceCents: z.number().int().nonnegative().max(100_000_000).nullable().optional(),
+  freeDownloadEnabled: z.boolean().optional(),
 });
 
 export const governanceActionResponseSchema = z.object({

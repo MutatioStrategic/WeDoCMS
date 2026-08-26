@@ -51,11 +51,27 @@ npm run worker:dev
 
 `npm run worker:deploy` is production-only and refuses to deploy the root development bindings. It runs the production bundle gate and requires a dedicated `env.production` block with `APP_ENV=production` and no demo, localhost, or placeholder values. Use `npm run worker:deploy:development` only for an intentional non-production Worker.
 
+### Buyer access demo environment
+
+The demo build includes the complete buyer access choice: three introductory
+free photo downloads, once-off download bundles, and monthly/annual unlimited
+plan cards. Run `npm run build:demo` for the Pages asset and
+`npm run worker:deploy:demo` for the `env.demo` Worker. Demo authentication is
+explicitly enabled, the payment provider is set to `demo` (so no real charge
+can be created), and migration `0032_introductory_free_downloads.sql` marks
+the seeded artist photos as free-download candidates. Configure the demo
+Worker's `SESSION_SECRET` and apply migrations to the demo D1 before sharing
+the URL (`wrangler d1 migrations apply veld-archive --remote --env demo`).
+For local UAT, start the Worker with test R2 signing credentials and run
+`npm run test:e2e:access -- http://127.0.0.1:8787`; this exercises registration,
+the three-download allowance, idempotent retries, subscription/bundle choices,
+and seller photo-only opt-in (including the rejected video case).
+
 ### Auth0 and Supabase identity
 
 Auth0 and Supabase can run together. Configure an Auth0 SPA application with Authorization Code + PKCE and a custom API that issues RS256 access tokens. Set `VITE_AUTH0_DOMAIN`, `VITE_AUTH0_CLIENT_ID`, `VITE_AUTH0_AUDIENCE`, and the optional `VITE_AUTH0_ORGANIZATION` for the frontend. Set `AUTH_JWKS_URL`, `AUTH_ISSUER`, `AUTH_AUDIENCE`, and `AUTH_ROLES_CLAIM` as Worker variables. The tenant Management API (`https://<tenant>/api/v2/`) is not the application API audience and must not be requested by the SPA. Register the deployed app URL as an allowed callback, logout, and web-origin URL in Auth0.
 
-For Supabase, set `VITE_SUPABASE_URL` and the public `VITE_SUPABASE_ANON_KEY` in the SPA environment, then set `SUPABASE_URL`, `AUTH_PROVIDER=both`, and either an explicit `SUPABASE_JWKS_URL` for asymmetric signing or the `SUPABASE_JWT_SECRET` Wrangler secret for this project’s current legacy HS256 signing. Supabase email/password signup, email confirmation, login, and session refresh are handled by the Supabase client; the Worker verifies the Supabase JWT and exchanges it for the same application session. The anon key is safe for browser use; never put a Supabase service-role key in the client or Worker.
+For Supabase, set `VITE_SUPABASE_URL` and the public `VITE_SUPABASE_ANON_KEY` in the SPA environment, then set `SUPABASE_URL`, `AUTH_PROVIDER=both`, and either an explicit `SUPABASE_JWKS_URL` for asymmetric signing or the `SUPABASE_JWT_SECRET` Wrangler secret for this project's current legacy HS256 signing. Supabase email/password signup, email confirmation, login, phone OTP signup/login, password recovery, and session refresh are handled by the Supabase client; the Worker verifies the Supabase JWT and exchanges it for the same application session. Phone sign-in is restricted to South African mobile numbers. Users enter a local number such as `073 712 3456`; the clients normalize it to `+27737123456` before calling Supabase, and the Worker rejects a Supabase phone claim outside the South African mobile range. Phone-only identities receive a stable internal contact address until a real contact email is collected by a later account workflow. The anon key is safe for browser use; never put a Supabase service-role key in the client or Worker. For hosted Supabase, enable Auth > Providers > Phone and configure a supported SMS provider; the repository config enables SMS signup for local Supabase development but cannot provision hosted provider credentials. The web and native sign-in surfaces use Supabase's password recovery flow: reset requests return a privacy-preserving response, reset links return to the app, and the new password is submitted through the verified recovery session before the user signs in again. Configure the Supabase redirect allow list for the web origin and `veldarchive://auth/recovery` for native builds.
 
 The Worker verifies external tokens against the configured issuer/JWKS, retrieves the Auth0 `openid profile email` UserInfo profile when configured, and creates the existing HttpOnly session. Supabase identities are namespaced in `auth_subject` to prevent cross-provider collisions. For a single-organisation deployment, pre-provision `DEFAULT_ORGANIZATION_ID`; a browser-supplied organization ID is accepted only when it matches a signed claim or that configured default. Keep `AUTH_ALLOW_ORG_PROVISIONING=false` in production. The identity provider owns sign-in; D1 remains the source of truth for application roles, organization memberships, credits, licence ownership, ledger entries, and payment state. D1 `auth_security_events` records provider, outcome, subject hash context, and bounded request metadata; high-risk events are also emitted to Worker Logs and Analytics Engine.
 
@@ -88,6 +104,24 @@ npx playwright install chromium
 npm run test:a11y
 ```
 
+### Desktop Postman/Newman sweep
+
+The checked-in `npm run test:postman` collection exercises the production API,
+Supabase signup and identity-exchange boundaries, and the main desktop web
+shell. It discovers every `/api` route from the Worker source and loads desktop
+Vite values from the root `.env.local` (`VITE_SUPABASE_URL` and
+`VITE_SUPABASE_PUBLISHABLE_KEY`), with the mobile environment as a fallback.
+Publishable keys are used only in memory and are never printed.
+
+```powershell
+$env:POSTMAN_DESKTOP_URL = "https://veld-archive.pages.dev"
+$env:POSTMAN_BASE_URL = "https://veld-archive-api.blewisorlando.workers.dev"
+npm run test:postman
+```
+
+Use `POSTMAN_SKIP_SUPABASE=true` when the Supabase signup rate limit is active;
+the desktop shell and all API routes remain covered.
+
 Apply subsequent migrations in order as well; `0004_explainability_safety.sql` adds persisted metadata provenance and review status. Validate the chain with `npx wrangler d1 migrations list veld-archive --local`.
 
 ## Cloudflare setup
@@ -97,18 +131,16 @@ Apply subsequent migrations in order as well; `0004_explainability_safety.sql` a
 3. Create `veld-archive-audit-za` and `veld-archive-kyc-za` under the approved South African residency policy. Create `veld-archive-audit-eu` and `veld-archive-kyc-eu` with the `eu` R2 jurisdiction for EU subjects. R2 jurisdiction is immutable after bucket creation; confirm the account's data-location controls before production.
 4. Generate an Ed25519 signing keypair and store the private/public JWKs as Worker secrets: `wrangler secret put AUDIT_SIGNING_PRIVATE_JWK`, `wrangler secret put AUDIT_SIGNING_PUBLIC_JWK`, and `wrangler secret put KYC_WEBHOOK_SECRET`.
 5. For seller onboarding, create one Didit KYC workflow (individual/sole proprietor) and one KYB workflow (registered company), configure phone/email, ID/passport, liveness and any risk checks required by your payment/legal classification, then store `DIDIT_API_KEY`, `DIDIT_WEBHOOK_SECRET`, `DIDIT_KYC_WORKFLOW_ID`, and `DIDIT_KYB_WORKFLOW_ID`. Register `POST /api/webhooks/didit` as the Didit webhook destination. Didit returns a hosted URL; the Worker stores only the session ID, status, and provider reference.
-5. Create a Turnstile widget for the development and production hostnames.
-6. Store the Turnstile secret with `wrangler secret put TURNSTILE_SECRET`.
-7. Replace the development `TURNSTILE_HOSTNAMES` value for production.
-8. For browser-direct R2 uploads, configure `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, and `R2_SECRET_ACCESS_KEY` as Worker secrets/vars according to your deployment policy. The API then issues a short-lived presigned PUT URL.
-9. Provision the DR buckets and R2 event queue with `./scripts/provision-dr.ps1`.
-10. Configure `STREAM_WEBHOOK_SECRET` and `CHAOS_TEST_TOKEN` as Worker secrets.
-11. Configure the KYC provider to POST only signed, metadata-only decisions to `/api/webhooks/kyc`; never send raw identity documents through the audit endpoint. The webhook uses HMAC-SHA256 in `x-kyc-signature`.
-12. Create the photo Vectorize index with the same embedding preset used by the Worker: `wrangler vectorize create veld-archive-photo-index --preset @cf/baai/bge-base-en-v1.5`. The committed config already binds it as `PHOTO_INDEX`.
-13. Create the queues before deployment: `wrangler queues create veld-archive-photo-enrichment` and `wrangler queues create veld-archive-photo-enrichment-dlq`. The committed config binds the producer and consumer.
-14. The committed production config sends image-to-text enrichment to the authenticated local Qwen model through `veld-vision.mutatiostrategic.io`; `REMOTE_VISION_TOKEN` remains a Worker secret. Workers AI is retained for `PHOTO_EMBEDDING_MODEL`, which must remain dimension-compatible with Vectorize. Missing vision, embedding, or tunnel connectivity is treated as a retryable job failure, not a buyer-search scan.
-15. Keep verification-document OCR disabled until intentionally enabled. Set `OCR_ENABLED=true` only for the intended environment. The admin-only endpoint is `POST /api/verification/documents/:documentId/ocr`; it verifies the registered SHA-256 before inference and never changes the KYC case decision.
-16. Apply `0006_photo_ai_search.sql`, then run `npm run build` before `npm run worker:deploy`.
+5. Turnstile is optional until high-risk seller, rights, or upload actions are enabled. When those actions are enabled, create separate widgets for the development and production hostnames, store the server secret with `wrangler secret put TURNSTILE_SECRET`, and replace the development `TURNSTILE_HOSTNAMES` value for production.
+6. For browser-direct R2 uploads, configure `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, and `R2_SECRET_ACCESS_KEY` as Worker secrets/vars according to your deployment policy. The API then issues a short-lived presigned PUT URL.
+7. Provision the DR buckets and R2 event queue with `./scripts/provision-dr.ps1`.
+8. Configure `STREAM_WEBHOOK_SECRET` and `CHAOS_TEST_TOKEN` as Worker secrets.
+9. Configure the KYC provider to POST only signed, metadata-only decisions to `/api/webhooks/kyc`; never send raw identity documents through the audit endpoint. The webhook uses HMAC-SHA256 in `x-kyc-signature`.
+10. Create the photo Vectorize index with the same embedding preset used by the Worker: `wrangler vectorize create veld-archive-photo-index --preset @cf/baai/bge-base-en-v1.5`. The committed config already binds it as `PHOTO_INDEX`.
+11. Create the queues before deployment: `wrangler queues create veld-archive-photo-enrichment` and `wrangler queues create veld-archive-photo-enrichment-dlq`. The committed config binds the producer and consumer.
+12. The committed production config sends image-to-text enrichment to the authenticated local Qwen model through `veld-vision.mutatiostrategic.io`; `REMOTE_VISION_TOKEN` remains a Worker secret. Workers AI is retained for `PHOTO_EMBEDDING_MODEL`, which must remain dimension-compatible with Vectorize. Missing vision, embedding, or tunnel connectivity is treated as a retryable job failure, not a buyer-search scan.
+13. Keep verification-document OCR disabled until intentionally enabled. Set `OCR_ENABLED=true` only for the intended environment. The admin-only endpoint is `POST /api/verification/documents/:documentId/ocr`; it verifies the registered SHA-256 before inference and never changes the KYC case decision.
+14. Apply `0006_photo_ai_search.sql`, then run `npm run build` before `npm run worker:deploy`.
 
 ## Audit endpoints
 

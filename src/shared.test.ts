@@ -1,5 +1,24 @@
 import { describe, expect, it } from "vitest";
 import { archiveDomain, buildMatchExplanation, evaluateLicenceRequest, type Asset } from "./shared";
+import { friendlySupabasePhoneError, normalizeSouthAfricanPhone } from "./phone";
+
+describe("South African phone rules", () => {
+  it("normalizes local input to the Supabase E.164 format", () => {
+    expect(normalizeSouthAfricanPhone("073 712 3456")).toBe("+27737123456");
+    expect(archiveDomain.normalizeSouthAfricanPhone("+27 73 712 3456")).toBe("+27737123456");
+    expect(normalizeSouthAfricanPhone("0027 73-712-3456")).toBe("+27737123456");
+  });
+
+  it("rejects foreign, landline, and malformed numbers", () => {
+    expect(() => normalizeSouthAfricanPhone("+14155550123")).toThrow("South African mobile");
+    expect(() => normalizeSouthAfricanPhone("021 555 0123")).toThrow("South African mobile");
+    expect(() => normalizeSouthAfricanPhone("0737")).toThrow("South African mobile");
+  });
+
+  it("turns an unavailable SMS provider into a useful recovery message", () => {
+    expect(friendlySupabasePhoneError(new Error("SMS provider is not configured"), "send")).toContain("configure an SMS provider");
+  });
+});
 
 describe("asset domain contract", () => {
   it("preserves the rights and authenticity fields needed for trusted discovery", () => {
@@ -80,6 +99,13 @@ describe("asset domain contract", () => {
     expect(archiveDomain.canApproveMetadataRevision({ assetRevision: 4, reviewedRevision: 4, metadataReviewStatus: "reviewed" })).toBe(true);
     expect(archiveDomain.canApproveMetadataRevision({ assetRevision: 5, reviewedRevision: 4, metadataReviewStatus: "reviewed" })).toBe(false);
     expect(archiveDomain.canApproveMetadataRevision({ assetRevision: 4, reviewedRevision: 4, metadataReviewStatus: "needs_context" })).toBe(false);
+  });
+
+  it("keeps the introductory offer bounded and never returns a negative balance", () => {
+    expect(archiveDomain.introductoryDownloadsRemaining(0)).toBe(3);
+    expect(archiveDomain.introductoryDownloadsRemaining(2)).toBe(1);
+    expect(archiveDomain.introductoryDownloadsRemaining(8)).toBe(0);
+    expect(archiveDomain.introductoryDownloadsRemaining(1, 5)).toBe(4);
   });
 
   it("filters broad one-token matches out of story searches", () => {

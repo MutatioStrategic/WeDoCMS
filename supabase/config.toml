@@ -1,0 +1,29 @@
+project_id = "fmqwymgmrkrnfkugogbw"
+
+[auth]
+site_url = "https://veld-archive.pages.dev"
+additional_redirect_urls = [
+  "https://veld-archive.pages.dev/**",
+  "veldarchive://auth/confirmed",
+  "veldarchive://auth/recovery",
+]
+enable_manual_linking = true
+
+[auth.mfa.totp]
+enroll_enabled = true
+verify_enabled = true
+
+[auth.email]
+double_confirm_changes = false
+enable_confirmations = true
+max_frequency = "1m0s"
+otp_length = 8
+
+[auth.sms]
+enable_signup = true
+enable_confirmations = false
+
+[storage.vector]
+enabled = false
+max_buckets = 10
+max_indexes = 5

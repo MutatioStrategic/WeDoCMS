@@ -57,8 +57,13 @@ import {
 } from "./photo-indexing";
 import {
   createSession,
+  applicationRoleFromClaims,
   csrfValid,
   getRequestUser,
+  identityDisplayNameForClaims,
+  identityEmailForClaims,
+  isDemoEnvironment,
+  roleForNewAccount,
   responseWithSession,
   responseWithoutSession,
   verifyExternalJwt,
@@ -115,10 +120,13 @@ type SecretBindings = {
   KYC_PROVIDER?: string;
   KYC_WEBHOOK_SECRET?: string;
   DIDIT_API_KEY?: string;
+  DIDIT_API_SECRET?: string;
   DIDIT_WEBHOOK_SECRET?: string;
+  DIDIT_SIGNING_SECRET?: string;
   DIDIT_KYC_WORKFLOW_ID?: string;
   DIDIT_KYB_WORKFLOW_ID?: string;
   DIDIT_API_URL?: string;
+  DIDIT_URL?: string;
   CIPC_LOOKUP_URL?: string;
   CIPC_API_TOKEN?: string;
   APP_PUBLIC_URL?: string;
@@ -164,8 +172,11 @@ type SecretBindings = {
   PAYMENT_ENDPOINT?: string;
   PAYMENT_TOKEN?: string;
   PAYSTACK_SUBSCRIPTION_PLAN_CODE?: string;
+  PAYSTACK_ANNUAL_SUBSCRIPTION_PLAN_CODE?: string;
   BUYER_SUBSCRIPTION_AMOUNT_CENTS?: string;
+  BUYER_ANNUAL_SUBSCRIPTION_AMOUNT_CENTS?: string;
   BUYER_SUBSCRIPTION_INTERVAL?: string;
+  INTRODUCTORY_FREE_DOWNLOAD_LIMIT?: string;
   DEFAULT_ARTIST_SHARE_PERCENTAGE?: string;
   PAYSTACK_SPLIT_FEE_BEARER?: string;
   MARKETPLACE_TERMS_APPROVED?: string;
@@ -194,10 +205,29 @@ type MediaBinding = {
     };
   };
 };
-type Bindings = Omit<Cloudflare.Env, "AI" | "PAYMENT_PROVIDER"> & AuditBindings & SecretBindings & { AI?: WorkersAiBinding; MEDIA?: MediaBinding };
+type Bindings = Omit<Cloudflare.Env, "AI" | "PAYMENT_PROVIDER"> & AuditBindings & SecretBindings & {
+  // These bindings are required by every deployed Worker environment. The
+  // generated Wrangler base type is optional when a lightweight environment
+  // (such as env.demo) overrides only vars, so keep the runtime contract strict
+  // at the application seam.
+  DB: D1Database;
+  MEDIA_BUCKET: R2Bucket;
+  MEDIA_DR_BUCKET: R2Bucket;
+  BACKUP_BUCKET: R2Bucket;
+  KYC_BUCKET_ZA: R2Bucket;
+  KYC_BUCKET_EU: R2Bucket;
+  IMAGES: ImagesBinding;
+  AI?: WorkersAiBinding;
+  MEDIA?: MediaBinding;
+  SUPABASE_ANON_KEY?: string;
+};
 
 type Variables = { trace: TraceContext };
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+
+const diditApiKey = (env: Pick<Bindings, "DIDIT_API_KEY" | "DIDIT_API_SECRET">): string | undefined => env.DIDIT_API_KEY?.trim() || env.DIDIT_API_SECRET?.trim();
+const diditWebhookSecret = (env: Pick<Bindings, "DIDIT_WEBHOOK_SECRET" | "DIDIT_SIGNING_SECRET">): string | undefined => env.DIDIT_WEBHOOK_SECRET?.trim() || env.DIDIT_SIGNING_SECRET?.trim();
+const diditApiUrl = (env: Pick<Bindings, "DIDIT_API_URL" | "DIDIT_URL">): string | undefined => env.DIDIT_API_URL?.trim() || env.DIDIT_URL?.trim();
 
 const photoPipeline = (env: Bindings): PhotoPipelineBindings => env;
 
@@ -327,6 +357,7 @@ const devLoginSchema = z.object({ role: z.enum(["buyer", "contributor", "editor"
 const exchangeSchema = z.object({
   organizationId: z.string().min(1).max(120).optional(),
   sessionTransport: z.enum(["cookie", "bearer"]).optional(),
+  accountIntent: z.literal("seller").optional(),
 });
 type AppContext = Context<{ Bindings: Bindings; Variables: Variables }>;
 type DemoRole = z.infer<typeof devLoginSchema>["role"];
@@ -377,7 +408,7 @@ app.post("/api/auth/dev-login", async (c) => {
 });
 
 app.post("/api/auth/demo-login", async (c) => {
-  if (String(c.env.APP_ENV) === "production" || String(c.env.DEMO_AUTH_ENABLED) !== "true") return c.json({ error: "Demo authentication is disabled" }, 404);
+  if (!isDemoEnvironment(c.env)) return c.json({ error: "Demo authentication is disabled" }, 404);
   const payload = devLoginSchema.parse(await c.req.json());
   return seedSessionForRole(c, payload.role);
 });
@@ -395,11 +426,14 @@ app.post("/api/auth/exchange", async (c) => {
     const organization = await c.env.DB.prepare("SELECT id, name FROM organizations WHERE id = ? AND status = 'active'").bind(organizationId).first<{ id: string; name: string }>();
     if (!organization && String(c.env.AUTH_ALLOW_ORG_PROVISIONING) !== "true") return c.json({ error: "Organization is not provisioned" }, 403);
     const userId = crypto.randomUUID();
+    const role = roleForNewAccount(applicationRoleFromClaims(claims, c.env), requested.accountIntent);
+    const identityEmail = await identityEmailForClaims(claims);
+    const displayName = identityDisplayNameForClaims(claims);
     await c.env.DB.prepare("INSERT INTO users (id, auth_subject, email, display_name, role, email_verified_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)")
-      .bind(userId, claims.sub, claims.email ?? `${claims.sub}@identity.invalid`, claims.name ?? claims.email ?? claims.sub, claims.role ?? "buyer").run();
+      .bind(userId, claims.sub, identityEmail, displayName, role).run();
     if (!organization) await c.env.DB.prepare("INSERT INTO organizations (id, name, slug, created_by) VALUES (?, ?, ?, ?)").bind(organizationId, claims.org_name ?? "New organization", organizationId.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 60), userId).run();
-    await c.env.DB.prepare("INSERT INTO organization_memberships (id, organization_id, user_id, role) VALUES (?, ?, ?, ?)").bind(crypto.randomUUID(), organizationId, userId, claims.role ?? "buyer").run();
-    user = { id: userId, email: claims.email ?? `${claims.sub}@identity.invalid` };
+    await c.env.DB.prepare("INSERT INTO organization_memberships (id, organization_id, user_id, role) VALUES (?, ?, ?, ?)").bind(crypto.randomUUID(), organizationId, userId, role).run();
+    user = { id: userId, email: identityEmail };
   }
   const membership = await c.env.DB.prepare("SELECT organization_id FROM organization_memberships WHERE organization_id = ? AND user_id = ? AND status = 'active'").bind(organizationId, user.id).first<{ organization_id: string }>();
   if (!membership) return c.json({ error: "User is not a member of the requested organization" }, 403);
@@ -722,6 +756,7 @@ const assetRowToDomain = (row: Record<string, unknown>, env?: Pick<SecretBinding
   streamEmbedUrl: streamEmbedUrl(row, env),
   monetizationModel: (row.monetization_model as MonetizationModel | undefined) ?? "membership",
   licensePriceCents: row.license_price_cents == null ? null : Number(row.license_price_cents),
+  freeDownloadEnabled: Number(row.free_download_enabled) === 1,
 });
 
 function previewContentType(row: Record<string, unknown>): string {
@@ -910,7 +945,7 @@ const governanceActionSchema = contractGovernanceActionRequestSchema;
 function governancePayloadEditsMetadata(payload: z.infer<typeof governanceActionSchema>): boolean {
   return [payload.title, payload.caption, payload.subjectTags, payload.culturalTags, payload.aiTags,
     payload.curatorNotes, payload.rightsStatus, payload.modelReleaseStatus, payload.propertyReleaseStatus,
-    payload.monetizationModel, payload.licensePriceCents, payload.visualLocationType,
+    payload.monetizationModel, payload.licensePriceCents, payload.freeDownloadEnabled, payload.visualLocationType,
     payload.sceneContext, payload.primaryCategory, payload.sceneAttributes, payload.visibleText].some((value) => value !== undefined);
 }
 
@@ -935,6 +970,7 @@ app.post("/api/governance/assets/:id/action", async (c) => {
   }
   if (!exists) return c.json({ error: "Asset not found" }, 404);
   if (exists.owner_id !== actor.id && !allowedRole(actor, ["editor", "admin"])) return c.json({ error: "Forbidden" }, 403);
+  if (payload.freeDownloadEnabled && exists.kind === "video") return c.json({ error: "Introductory free downloads are currently available for photos only" }, 422);
   if (payload.action === "run_ai_tagging") {
     return c.json({
       error: "AI enrichment runs once when a new image upload completes. Save a manual metadata correction for later changes.",
@@ -956,6 +992,7 @@ app.post("/api/governance/assets/:id/action", async (c) => {
       rights_status = COALESCE(?, rights_status), model_release_status = COALESCE(?, model_release_status),
       property_release_status = COALESCE(?, property_release_status), monetization_model = COALESCE(?, monetization_model),
       license_price_cents = CASE WHEN ? = 'individual_license' THEN ? WHEN ? IN ('membership', 'custom_quote') THEN NULL ELSE license_price_cents END,
+      free_download_enabled = CASE WHEN ? IS NULL THEN free_download_enabled WHEN ? = 1 AND kind = 'image' THEN 1 ELSE 0 END,
       visual_location_type = COALESCE(?, visual_location_type), scene_context = COALESCE(?, scene_context), primary_category = COALESCE(?, primary_category),
       scene_attributes = COALESCE(?, scene_attributes), ocr_text = COALESCE(?, ocr_text),
       asset_revision = asset_revision + 1, reviewed_revision = asset_revision + 1, approved_revision = NULL,
@@ -968,8 +1005,10 @@ app.post("/api/governance/assets/:id/action", async (c) => {
         payload.culturalTags ? JSON.stringify(payload.culturalTags) : null,
         payload.aiTags ? JSON.stringify(payload.aiTags) : null,
         payload.curatorNotes ?? null, payload.rightsStatus ?? null, payload.modelReleaseStatus ?? null,
-        payload.propertyReleaseStatus ?? null, payload.monetizationModel ?? null,
-        payload.monetizationModel ?? null, payload.licensePriceCents ?? null, payload.monetizationModel ?? null,
+         payload.propertyReleaseStatus ?? null, payload.monetizationModel ?? null,
+         payload.monetizationModel ?? null, payload.licensePriceCents ?? null, payload.monetizationModel ?? null,
+         payload.freeDownloadEnabled === undefined ? null : payload.freeDownloadEnabled ? 1 : 0,
+         payload.freeDownloadEnabled === undefined ? null : payload.freeDownloadEnabled ? 1 : 0,
         payload.visualLocationType ?? null, payload.sceneContext ?? null, payload.primaryCategory ?? null,
         payload.sceneAttributes ? JSON.stringify(payload.sceneAttributes) : null, payload.visibleText ?? null,
         assetId, actor.organizationId,
@@ -1113,11 +1152,14 @@ app.get("/api/onboarding/status", async (c) => {
   const user = await requestUser(c);
   if (!user) return c.json({ error: "Authentication required" }, 401);
   const result = await c.env.DB.prepare(`
-    SELECT p.*, t.id AS tender_id, t.status AS tender_status, t.review_notes,
+    SELECT p.*, sp.seller_type, sp.legal_name, sp.phone_e164, sp.identity_document_type,
+      sp.bank_account_name, sp.cipc_status, sp.didit_status,
+      t.id AS tender_id, t.status AS tender_status, t.review_notes,
       sc.id AS contract_id, sc.version AS contract_version, sc.content_sha256 AS contract_hash,
       sc.signed_at, w.id AS wallet_id, w.provider AS wallet_provider, w.status AS wallet_status,
       vc.id AS verification_case_id, vc.status AS verification_status
     FROM contributor_profiles p
+    LEFT JOIN seller_onboarding_profiles sp ON sp.contributor_id = p.user_id
     LEFT JOIN onboarding_tenders t ON t.contributor_id = p.user_id AND t.organization_id = ? AND t.status IN ('pending', 'corrections_requested', 'approved')
     LEFT JOIN seller_contracts sc ON sc.id = t.contract_id
     LEFT JOIN payout_wallets w ON w.id = t.wallet_id
@@ -1274,6 +1316,9 @@ app.post("/api/assets", async (c) => {
   const user = await requestUser(c);
   if (!user || !allowedRole(user, ["contributor", "editor", "admin"])) return c.json({ error: "Contributor access required" }, 403);
   const payload = assetCreateSchema.parse(await c.req.json());
+  if (payload.freeDownloadEnabled && payload.kind !== "image") {
+    return c.json({ error: "Introductory free downloads are currently available for photos only" }, 422);
+  }
   const safetyIssue = metadataSafetyIssue(payload.culturalTags);
   if (safetyIssue) return c.json({ error: safetyIssue, code: "metadata_context_required" }, 422);
   if (payload.monetizationModel === "individual_license" && (!payload.licensePriceCents || payload.licensePriceCents < 100)) {
@@ -1281,9 +1326,15 @@ app.post("/api/assets", async (c) => {
   }
   const id = crypto.randomUUID();
   const geographicLocationSource = payload.province || payload.city || payload.locality || payload.landmark ? "seller" : "none";
-  await c.env.DB.prepare(`INSERT INTO assets (id, organization_id, owner_id, kind, status, title, description, caption, province, city, locality, landmark, subject_tags, cultural_tags, rights_status, model_release_status, property_release_status, monetization_model, license_price_cents, workflow_stage, geographic_location_source)
-    VALUES (?, ?, ?, ?, 'needs_review', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'curator_correction', ?)`)
-    .bind(id, user.organizationId, user.id, payload.kind, payload.title, payload.description, payload.caption, payload.province ?? null, payload.city ?? null, payload.locality ?? null, payload.landmark ?? null, JSON.stringify(payload.subjectTags), JSON.stringify(payload.culturalTags), payload.rightsStatus, payload.modelReleaseStatus, payload.propertyReleaseStatus, payload.monetizationModel, payload.monetizationModel === "individual_license" ? payload.licensePriceCents : null, geographicLocationSource).run();
+  await c.env.DB.prepare(`INSERT INTO assets (id, organization_id, owner_id, kind, status, title, description, caption, province, city, locality, landmark, subject_tags, cultural_tags, rights_status, model_release_status, property_release_status, monetization_model, license_price_cents, free_download_enabled, workflow_stage, geographic_location_source)
+    VALUES (
+      ?, ?, ?, ?, 'needs_review',
+      ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?,
+      'curator_correction', ?
+    )`)
+    .bind(id, user.organizationId, user.id, payload.kind, payload.title, payload.description, payload.caption, payload.province ?? null, payload.city ?? null, payload.locality ?? null, payload.landmark ?? null, JSON.stringify(payload.subjectTags), JSON.stringify(payload.culturalTags), payload.rightsStatus, payload.modelReleaseStatus, payload.propertyReleaseStatus, payload.monetizationModel, payload.monetizationModel === "individual_license" ? payload.licensePriceCents : null, payload.kind === "image" && payload.freeDownloadEnabled ? 1 : 0, geographicLocationSource).run();
   return c.json(validateContractResponse("POST /api/assets 201", assetCreateResponseSchema, { id, status: "needs_review" }), 201, { Location: `/api/assets/${id}` });
 });
 
@@ -1300,20 +1351,22 @@ app.patch("/api/assets/:id", async (c) => {
     ...payload,
     monetizationModel: payload.monetizationModel ?? (current.monetization_model as MonetizationModel | undefined) ?? "membership",
     licensePriceCents: payload.licensePriceCents !== undefined ? payload.licensePriceCents : (current.license_price_cents == null ? null : Number(current.license_price_cents)),
+    freeDownloadEnabled: payload.freeDownloadEnabled !== undefined ? payload.freeDownloadEnabled : Boolean(current.free_download_enabled),
   };
   if (next.monetizationModel === "individual_license" && (!next.licensePriceCents || next.licensePriceCents < 100)) {
     return c.json({ error: "Individual licences must have a price of at least ZAR 1.00" }, 422);
   }
+  if (next.freeDownloadEnabled && next.kind !== "image") return c.json({ error: "Introductory free downloads are currently available for photos only" }, 422);
   const safetyIssue = metadataSafetyIssue((next.culturalTags ?? []) as string[]);
   if (safetyIssue) return c.json({ error: safetyIssue, code: "metadata_context_required" }, 422);
   const locationWasEdited = payload.province !== undefined || payload.city !== undefined || payload.locality !== undefined || payload.landmark !== undefined;
-  await c.env.DB.prepare(`UPDATE assets SET kind = ?, title = ?, description = ?, caption = ?, province = ?, city = ?, locality = ?, landmark = ?, subject_tags = ?, cultural_tags = ?, rights_status = ?, model_release_status = ?, property_release_status = ?, monetization_model = ?, license_price_cents = ?,
+  await c.env.DB.prepare(`UPDATE assets SET kind = ?, title = ?, description = ?, caption = ?, province = ?, city = ?, locality = ?, landmark = ?, subject_tags = ?, cultural_tags = ?, rights_status = ?, model_release_status = ?, property_release_status = ?, monetization_model = ?, license_price_cents = ?, free_download_enabled = ?,
     geographic_location_source = CASE WHEN ? = 1 THEN 'seller' ELSE geographic_location_source END,
     asset_revision = asset_revision + 1, reviewed_revision = NULL, approved_revision = NULL, human_verified = 0,
     status = 'needs_review', workflow_stage = 'curator_correction', metadata_review_status = 'needs_context',
     metadata_review_note = 'Seller metadata changed; review the current revision before publication.',
     vector_index_status = 'pending', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?`)
-    .bind(next.kind, next.title, next.description ?? "", next.caption ?? "", next.province ?? null, next.city ?? null, next.locality ?? null, next.landmark ?? null, JSON.stringify(next.subjectTags ?? []), JSON.stringify(next.culturalTags ?? []), next.rightsStatus ?? "pending", next.modelReleaseStatus ?? "unknown", next.propertyReleaseStatus ?? "unknown", next.monetizationModel ?? "membership", next.monetizationModel === "individual_license" ? next.licensePriceCents : null, locationWasEdited ? 1 : 0, id, user.organizationId).run();
+    .bind(next.kind, next.title, next.description ?? "", next.caption ?? "", next.province ?? null, next.city ?? null, next.locality ?? null, next.landmark ?? null, JSON.stringify(next.subjectTags ?? []), JSON.stringify(next.culturalTags ?? []), next.rightsStatus ?? "pending", next.modelReleaseStatus ?? "unknown", next.propertyReleaseStatus ?? "unknown", next.monetizationModel ?? "membership", next.monetizationModel === "individual_license" ? next.licensePriceCents : null, next.kind === "image" && next.freeDownloadEnabled ? 1 : 0, locationWasEdited ? 1 : 0, id, user.organizationId).run();
   return c.json({ ok: true, id });
 });
 
@@ -1905,19 +1958,26 @@ app.post("/api/subscriptions/:id/cancel", async (c) => {
 const buyerSubscriptionSessionSchema = z.object({
   successUrl: z.string().url().max(2048),
   cancelUrl: z.string().url().max(2048),
+  plan: z.enum(["monthly", "annual"]).default("monthly"),
 });
 
-function buyerSubscriptionConfiguration(env: Bindings): { configured: boolean; planCode: string; amountCents: number; interval: string } {
-  const planCode = env.PAYSTACK_SUBSCRIPTION_PLAN_CODE?.trim() ?? "";
-  const amountCents = Number(env.BUYER_SUBSCRIPTION_AMOUNT_CENTS ?? 120_000);
-  const interval = env.BUYER_SUBSCRIPTION_INTERVAL?.trim() || "monthly";
-  return { configured: env.PAYMENT_PROVIDER === "paystack" && paymentProviderConfigured(env) && Boolean(planCode) && Number.isSafeInteger(amountCents) && amountCents > 0, planCode, amountCents, interval };
+function buyerSubscriptionConfiguration(env: Bindings): { configured: boolean; plans: Array<{ id: "monthly" | "annual"; planCode: string; amountCents: number; interval: "monthly" | "annually" }>; planCode: string; amountCents: number; interval: string } {
+  const monthlyCode = env.PAYSTACK_SUBSCRIPTION_PLAN_CODE?.trim() ?? "";
+  const monthlyAmount = Number(env.BUYER_SUBSCRIPTION_AMOUNT_CENTS ?? 120_000);
+  const annualCode = env.PAYSTACK_ANNUAL_SUBSCRIPTION_PLAN_CODE?.trim() ?? "";
+  const annualAmount = Number(env.BUYER_ANNUAL_SUBSCRIPTION_AMOUNT_CENTS ?? 1_200_000);
+  const plans = [
+    { id: "monthly" as const, planCode: monthlyCode, amountCents: monthlyAmount, interval: "monthly" as const },
+    { id: "annual" as const, planCode: annualCode, amountCents: annualAmount, interval: "annually" as const },
+  ].filter((plan) => Boolean(plan.planCode) && Number.isSafeInteger(plan.amountCents) && plan.amountCents > 0);
+  const primary = plans[0] ?? { id: "monthly" as const, planCode: monthlyCode, amountCents: monthlyAmount, interval: "monthly" as const };
+  return { configured: env.PAYMENT_PROVIDER === "paystack" && paymentProviderConfigured(env) && plans.length > 0, plans, planCode: primary.planCode, amountCents: primary.amountCents, interval: primary.interval };
 }
 
 const sellerOnboardingSchema = z.object({
   sellerType: z.enum(["individual", "company"]),
   legalName: z.string().trim().min(2).max(180),
-  phone: z.string().trim().regex(/^\+[1-9]\d{7,14}$/, "Phone must be in E.164 format"),
+  phone: z.string().trim().min(1, "South African mobile number is required"),
   ageConfirmed: z.literal(true),
   identityDocumentType: z.enum(["sa_id", "passport"]),
   bankAccountName: z.string().trim().min(2).max(180),
@@ -1941,6 +2001,7 @@ app.put("/api/onboarding/seller", async (c) => {
   const user = await requestUser(c);
   if (!user || !allowedRole(user, ["contributor", "admin"])) return c.json({ error: "Contributor access required" }, 403);
   const payload = sellerOnboardingSchema.parse(await c.req.json());
+  const phone = archiveDomain.normalizeSouthAfricanPhone(payload.phone);
   const now = new Date().toISOString();
   const termsHash = await sha256Hex(agreementText(sellerAgreement));
   await c.env.DB.batch([
@@ -1948,7 +2009,7 @@ app.put("/api/onboarding/seller", async (c) => {
       (contributor_id, seller_type, legal_name, phone_e164, age_confirmed_at, identity_document_type, bank_account_name, copyright_declaration_at, tax_responsibility_declaration_at, contributor_agreement_at, registered_name, cipc_registration_number, representative_name, representative_authority_at, beneficial_owner_required, beneficial_owner_status)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(contributor_id) DO UPDATE SET seller_type = excluded.seller_type, legal_name = excluded.legal_name, phone_e164 = excluded.phone_e164, age_confirmed_at = excluded.age_confirmed_at, identity_document_type = excluded.identity_document_type, bank_account_name = excluded.bank_account_name, copyright_declaration_at = excluded.copyright_declaration_at, tax_responsibility_declaration_at = excluded.tax_responsibility_declaration_at, contributor_agreement_at = excluded.contributor_agreement_at, registered_name = excluded.registered_name, cipc_registration_number = excluded.cipc_registration_number, representative_name = excluded.representative_name, representative_authority_at = excluded.representative_authority_at, beneficial_owner_required = excluded.beneficial_owner_required, beneficial_owner_status = excluded.beneficial_owner_status, cipc_status = CASE WHEN excluded.cipc_registration_number IS seller_onboarding_profiles.cipc_registration_number THEN seller_onboarding_profiles.cipc_status ELSE 'not_checked' END, updated_at = CURRENT_TIMESTAMP`)
-      .bind(user.id, payload.sellerType, payload.legalName, payload.phone, now, payload.identityDocumentType, payload.bankAccountName, now, now, now, payload.registeredName ?? null, payload.cipcRegistrationNumber ?? null, payload.representativeName ?? null, payload.representativeAuthority ? now : null, payload.beneficialOwnerRequired ? 1 : 0, payload.beneficialOwnerRequired ? "pending" : "not_required"),
+      .bind(user.id, payload.sellerType, payload.legalName, phone, now, payload.identityDocumentType, payload.bankAccountName, now, now, now, payload.registeredName ?? null, payload.cipcRegistrationNumber ?? null, payload.representativeName ?? null, payload.representativeAuthority ? now : null, payload.beneficialOwnerRequired ? 1 : 0, payload.beneficialOwnerRequired ? "pending" : "not_required"),
     c.env.DB.prepare("INSERT OR IGNORE INTO marketplace_agreement_acceptances (id, organization_id, user_id, agreement_type, agreement_version, terms_sha256, context_type, context_id, accepted_at) VALUES (?, ?, ?, 'seller', ?, ?, 'onboarding', ?, ?)").bind(crypto.randomUUID(), user.organizationId, user.id, sellerAgreement.version, termsHash, user.id, now),
   ]);
   return c.json({ sellerType: payload.sellerType, status: "saved", sellerAgreementVersion: sellerAgreement.version, agreementPersisted: true });
@@ -2004,7 +2065,7 @@ app.get("/api/subscription", async (c) => {
   const configuration = buyerSubscriptionConfiguration(c.env);
   const subscription = await c.env.DB.prepare("SELECT * FROM buyer_subscriptions WHERE organization_id = ? AND buyer_id = ? ORDER BY created_at DESC LIMIT 1").bind(user.organizationId, user.id).first<Record<string, unknown>>();
   const payments = subscription ? await c.env.DB.prepare("SELECT provider_event_id, provider_reference, invoice_code, event_type, amount_cents, currency, status, period_start, period_end, paid_at, created_at FROM buyer_subscription_payments WHERE subscription_id = ? ORDER BY created_at DESC LIMIT 100").bind(subscription.id).all<Record<string, unknown>>() : { results: [] };
-  return c.json({ configured: configuration.configured, hasAccess: subscription?.status === "active" || subscription?.status === "non-renewing", sourceOfTruth: "signed Paystack webhook events", plan: configuration.configured ? { amountCents: configuration.amountCents, currency: "ZAR", interval: configuration.interval } : null, subscription: subscription ?? null, payments: payments.results });
+  return c.json({ configured: configuration.configured, hasAccess: subscription?.status === "active" || subscription?.status === "non-renewing", sourceOfTruth: "signed Paystack webhook events", plans: configuration.plans.map(({ id, amountCents, interval }) => ({ id, amountCents, currency: "ZAR", interval })), plan: configuration.configured ? { amountCents: configuration.amountCents, currency: "ZAR", interval: configuration.interval } : null, subscription: subscription ?? null, payments: payments.results });
 });
 
 app.post("/api/subscription/session", async (c) => {
@@ -2013,25 +2074,27 @@ app.post("/api/subscription/session", async (c) => {
   const configuration = buyerSubscriptionConfiguration(c.env);
   if (!configuration.configured) return c.json({ error: "The Paystack subscription plan is not fully configured" }, 503);
   const payload = buyerSubscriptionSessionSchema.parse(await c.req.json());
+  const selectedPlan = configuration.plans.find((plan) => plan.id === payload.plan);
+  if (!selectedPlan) return c.json({ error: `The ${payload.plan} subscription plan is not configured` }, 503);
   const current = await c.env.DB.prepare("SELECT id, status FROM buyer_subscriptions WHERE organization_id = ? AND buyer_id = ? ORDER BY created_at DESC LIMIT 1").bind(user.organizationId, user.id).first<{ id: string; status: string }>();
   if (current && ["pending", "active", "non-renewing", "attention"].includes(current.status)) return c.json({ error: "A subscription is already active or awaiting Paystack" }, 409);
   const subscriptionId = crypto.randomUUID();
-  await c.env.DB.prepare("INSERT INTO buyer_subscriptions (id, organization_id, buyer_id, plan_code, email, amount_cents, currency, interval) VALUES (?, ?, ?, ?, ?, ?, 'ZAR', ?)").bind(subscriptionId, user.organizationId, user.id, configuration.planCode, user.email, configuration.amountCents, configuration.interval).run();
+  await c.env.DB.prepare("INSERT INTO buyer_subscriptions (id, organization_id, buyer_id, plan_code, email, amount_cents, currency, interval) VALUES (?, ?, ?, ?, ?, ?, 'ZAR', ?)").bind(subscriptionId, user.organizationId, user.id, selectedPlan.planCode, user.email, selectedPlan.amountCents, selectedPlan.interval).run();
   try {
     const session = await new IntegrationContainer(c.env).payments.get("paystack").createCheckoutSession({
       idempotencyKey: `buyer-subscription:${subscriptionId}`,
       referenceId: subscriptionId,
       productType: "platform_subscription",
-      amountCents: configuration.amountCents,
+      amountCents: selectedPlan.amountCents,
       currency: "ZAR",
       buyer: { id: user.id, email: user.email },
       successUrl: payload.successUrl,
       cancelUrl: payload.cancelUrl,
-      planCode: configuration.planCode,
-      metadata: { organizationId: user.organizationId, userId: user.id, productType: "platform_subscription", subscriptionId },
+      planCode: selectedPlan.planCode,
+      metadata: { organizationId: user.organizationId, userId: user.id, productType: "platform_subscription", subscriptionId, subscriptionInterval: selectedPlan.interval },
     });
     await c.env.DB.prepare("UPDATE buyer_subscriptions SET provider_reference = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(session.providerReference ?? subscriptionId, subscriptionId).run();
-    return c.json({ subscriptionId, provider: "paystack", checkoutUrl: session.checkoutUrl, status: session.status, amountCents: configuration.amountCents, currency: "ZAR", interval: configuration.interval }, 201);
+    return c.json({ subscriptionId, provider: "paystack", checkoutUrl: session.checkoutUrl, status: session.status, amountCents: selectedPlan.amountCents, currency: "ZAR", interval: selectedPlan.interval, plan: payload.plan }, 201);
   } catch (error) {
     await c.env.DB.prepare("UPDATE buyer_subscriptions SET status = 'cancelled', failure_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(error instanceof Error ? error.message : "checkout_failed", subscriptionId).run();
     return c.json({ error: "Paystack could not create the recurring subscription checkout" }, 503);
@@ -3201,11 +3264,12 @@ async function verifyKycWebhook(secret: string, signature: string, body: string)
 }
 
 app.post("/api/webhooks/didit", async (c) => {
-  if (!c.env.DIDIT_WEBHOOK_SECRET) return c.json({ error: "Didit webhook secret is not configured" }, 503);
+  const webhookSecret = diditWebhookSecret(c.env);
+  if (!webhookSecret) return c.json({ error: "Didit webhook secret is not configured" }, 503);
   const rawBody = await c.req.text();
   let payload: Record<string, unknown>;
   try { payload = JSON.parse(rawBody) as Record<string, unknown>; } catch { return c.json({ error: "Invalid Didit webhook JSON" }, 400); }
-  const verified = await verifyDiditWebhook({ secret: c.env.DIDIT_WEBHOOK_SECRET, rawBody, payload, signatureV2: c.req.header("x-signature-v2"), signature: c.req.header("x-signature"), timestamp: c.req.header("x-timestamp") });
+  const verified = await verifyDiditWebhook({ secret: webhookSecret, rawBody, payload, signatureV2: c.req.header("x-signature-v2"), signature: c.req.header("x-signature"), timestamp: c.req.header("x-timestamp") });
   if (!verified) return c.json({ error: "Invalid or stale Didit webhook signature" }, 401);
   const sessionId = typeof payload.session_id === "string" ? payload.session_id : "";
   const status = typeof payload.status === "string" ? payload.status : "";
@@ -3283,8 +3347,9 @@ app.on(["GET", "HEAD"], "/api/assets/:id/preview", async (c) => {
 app.get("/api/assets/:id/preview-access", async (c) => {
   const user = await requestUser(c);
   if (!user) return c.json({ paid: false });
+  const freeLimit = Math.max(0, Math.min(5, Number(c.env.INTRODUCTORY_FREE_DOWNLOAD_LIMIT ?? 3)));
   const row = await c.env.DB.prepare(`
-    SELECT a.organization_id, a.owner_id,
+    SELECT a.organization_id, a.owner_id, a.kind, a.rights_status, a.free_download_enabled,
       EXISTS(
         SELECT 1 FROM licences l
         WHERE l.asset_id = a.id AND l.organization_id = a.organization_id
@@ -3295,15 +3360,35 @@ app.get("/api/assets/:id/preview-access", async (c) => {
         WHERE s.organization_id = a.organization_id AND s.photographer_id = a.owner_id
           AND s.subscriber_id = ? AND s.status = 'active' AND s.paid_at IS NOT NULL
           AND (s.expires_at IS NULL OR s.expires_at > CURRENT_TIMESTAMP)
-      ) AS subscription_entitlement
+      ) AS subscription_entitlement,
+      EXISTS(
+        SELECT 1 FROM buyer_subscriptions bs
+        WHERE bs.organization_id = a.organization_id AND bs.buyer_id = ?
+          AND bs.status IN ('active', 'non-renewing')
+      ) AS platform_subscription_entitlement,
+      EXISTS(
+        SELECT 1 FROM buyer_free_downloads fd
+        WHERE fd.organization_id = a.organization_id AND fd.buyer_id = ? AND fd.asset_id = a.id
+      ) AS introductory_free_entitlement
     FROM assets a
     WHERE a.id = ? AND a.status = 'published'
-  `).bind(user.id, user.id, c.req.param("id")).first<Record<string, unknown>>();
+  `).bind(user.id, user.id, user.id, user.id, c.req.param("id")).first<Record<string, unknown>>();
+  const used = Number((await c.env.DB.prepare("SELECT COUNT(*) AS total FROM buyer_free_downloads WHERE organization_id = ? AND buyer_id = ?").bind(user.organizationId, user.id).first<{ total: number }>())?.total ?? 0);
   const paid = Boolean(row && String(row.organization_id) === user.organizationId && (
     String(row.owner_id) === user.id || allowedRole(user, ["editor", "admin"])
-      || Number(row.paid_entitlement ?? 0) === 1 || Number(row.subscription_entitlement ?? 0) === 1
+      || Number(row.paid_entitlement ?? 0) === 1 || Number(row.subscription_entitlement ?? 0) === 1 || Number(row.platform_subscription_entitlement ?? 0) === 1 || Number(row.introductory_free_entitlement ?? 0) === 1
   ));
-  return c.json({ paid });
+  return c.json({ paid, freeDownload: Boolean(row && row.kind === "image" && row.rights_status === "verified" && Number(row.free_download_enabled) === 1), freeDownloadsUsed: used, freeDownloadsRemaining: archiveDomain.introductoryDownloadsRemaining(used, freeLimit), freeDownloadLimit: freeLimit });
+});
+
+app.get("/api/my/free-downloads", async (c) => {
+  const user = await buyerAccount(c);
+  if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, user ? 403 : 401);
+  const limit = Math.max(0, Math.min(5, Number(c.env.INTRODUCTORY_FREE_DOWNLOAD_LIMIT ?? 3)));
+  const claims = await c.env.DB.prepare(`SELECT fd.id, fd.asset_id, a.title, fd.created_at
+    FROM buyer_free_downloads fd JOIN assets a ON a.id = fd.asset_id
+    WHERE fd.organization_id = ? AND fd.buyer_id = ? ORDER BY fd.created_at DESC LIMIT 100`).bind(user.organizationId, user.id).all<Record<string, unknown>>();
+  return c.json({ limit, used: claims.results.length, remaining: archiveDomain.introductoryDownloadsRemaining(claims.results.length, limit), downloads: claims.results });
 });
 
 app.on(["GET", "HEAD"], "/api/assets/:id/poster", async (c) => {
@@ -3324,7 +3409,7 @@ app.on(["GET", "HEAD"], "/api/assets/:id/original", async (c) => {
   const user = await requestUser(c);
   if (!user) return c.json({ error: "Authentication required" }, 401);
   const row = await c.env.DB.prepare(`
-    SELECT a.id, a.kind, a.status, a.source_file_name, a.original_key, a.owner_id,
+    SELECT a.id, a.organization_id, a.kind, a.status, a.rights_status, a.source_file_name, a.original_key, a.owner_id, a.free_download_enabled,
       EXISTS(
         SELECT 1 FROM licences l
         WHERE l.asset_id = a.id AND l.organization_id = a.organization_id
@@ -3335,28 +3420,71 @@ app.on(["GET", "HEAD"], "/api/assets/:id/original", async (c) => {
         WHERE s.organization_id = a.organization_id AND s.photographer_id = a.owner_id
           AND s.subscriber_id = ? AND s.status = 'active' AND s.paid_at IS NOT NULL
           AND (s.expires_at IS NULL OR s.expires_at > CURRENT_TIMESTAMP)
-      ) AS subscription_entitlement
+      ) AS subscription_entitlement,
+      EXISTS(
+        SELECT 1 FROM buyer_subscriptions bs
+        WHERE bs.organization_id = a.organization_id AND bs.buyer_id = ?
+          AND bs.status IN ('active', 'non-renewing')
+      ) AS platform_subscription_entitlement,
+      EXISTS(
+        SELECT 1 FROM buyer_free_downloads fd
+        WHERE fd.organization_id = a.organization_id AND fd.buyer_id = ? AND fd.asset_id = a.id
+      ) AS introductory_free_entitlement
     FROM assets a
     WHERE a.id = ? AND a.organization_id = ?
-  `).bind(user.id, user.id, c.req.param("id"), user.organizationId).first<Record<string, unknown>>();
+  `).bind(user.id, user.id, user.id, user.id, c.req.param("id"), user.organizationId).first<Record<string, unknown>>();
   if (!row) return c.json({ error: "Original media not found" }, 404);
   const elevated = allowedRole(user, ["editor", "admin"]);
-  const entitled = elevated || String(row.owner_id) === user.id || Number(row.paid_entitlement) === 1 || Number(row.subscription_entitlement) === 1;
-  if (!entitled) return c.json({ error: "A paid licence is required to download the original" }, 403);
+  const platformSubscription = Number(row.platform_subscription_entitlement) === 1;
+  const existingFree = Number(row.introductory_free_entitlement) === 1;
+  let freeClaimed = existingFree;
+  const freeEligible = row.kind === "image" && row.status === "published" && row.rights_status === "verified" && Number(row.free_download_enabled) === 1;
+  const freeLimit = Math.max(0, Math.min(5, Number(c.env.INTRODUCTORY_FREE_DOWNLOAD_LIMIT ?? 3)));
+
+  // Validate storage before claiming an allowance or spending a bundle credit.
+  // This keeps unavailable originals from consuming user entitlements.
   const originalKey = typeof row.original_key === "string" ? row.original_key.trim() : "";
   if (!originalKey) return c.json({ error: "Original media is unavailable" }, 404);
   const object = await c.env.MEDIA_BUCKET.head(originalKey);
   if (!object) return c.json({ error: "Original media is unavailable" }, 404);
-  const entitlementType = elevated ? "staff" : String(row.owner_id) === user.id ? "owner" : Number(row.subscription_entitlement) === 1 ? "subscription" : "licence";
-  await c.env.DB.prepare("INSERT INTO media_download_events (id, organization_id, asset_id, user_id, entitlement_type, object_key) VALUES (?, ?, ?, ?, ?, ?)")
-    .bind(crypto.randomUUID(), user.organizationId, row.id, user.id, entitlementType, originalKey).run();
-  recordMetric(c.env, "asset_download", c.get("trace"), 1, [user.organizationId, String(row.id), entitlementType]);
   const filename = String(row.source_file_name ?? "original").replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 180) || "original";
   const signedUrl = await createPresignedR2Url(c.env, c.env.R2_BUCKET_NAME, originalKey, "GET", 300, {
     contentDisposition: `attachment; filename="${filename}"`,
     contentType: originalContentType(row),
   });
+  // Do not consume a free allowance or bundle credit if the delivery URL
+  // cannot be produced for this deployment.
   if (!signedUrl) return c.json({ error: "Original download signing is unavailable" }, 503);
+
+  if (!elevated && String(row.owner_id) !== user.id && !Number(row.paid_entitlement) && !Number(row.subscription_entitlement) && !platformSubscription && !existingFree && freeEligible && c.req.method === "GET") {
+    const claimId = crypto.randomUUID();
+    const claim = await c.env.DB.prepare(`INSERT OR IGNORE INTO buyer_free_downloads (id, organization_id, buyer_id, asset_id, object_key)
+      SELECT ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM buyer_free_downloads WHERE organization_id = ? AND buyer_id = ?) < ?`)
+      .bind(claimId, user.organizationId, user.id, row.id, originalKey, user.organizationId, user.id, freeLimit).run();
+    freeClaimed = Number(claim.meta.changes ?? 0) === 1 || existingFree;
+  }
+  let creditClaimed = false;
+  if (!elevated && String(row.owner_id) !== user.id && !Number(row.paid_entitlement) && !Number(row.subscription_entitlement) && !platformSubscription && !freeClaimed && c.req.method === "GET") {
+    const idempotencyKey = c.req.header("Idempotency-Key")?.trim().slice(0, 180) || crypto.randomUUID();
+    const spendKey = `download:${user.id}:${row.id}:${idempotencyKey}`;
+    const spend = await c.env.DB.prepare(`INSERT OR IGNORE INTO buyer_credit_transactions (id, organization_id, buyer_id, transaction_type, credits, amount_cents, reference_type, reference_id, idempotency_key)
+      SELECT ?, ?, ?, 'spend', -1, 0, 'asset_download', ?, ?
+      WHERE (SELECT COALESCE(SUM(ct.credits), 0) FROM buyer_credit_transactions ct WHERE ct.organization_id = ? AND ct.buyer_id = ?) > 0`)
+      .bind(crypto.randomUUID(), user.organizationId, user.id, row.id, spendKey, user.organizationId, user.id).run();
+    creditClaimed = Number(spend.meta.changes ?? 0) === 1;
+    if (!creditClaimed) creditClaimed = Boolean(await c.env.DB.prepare("SELECT id FROM buyer_credit_transactions WHERE organization_id = ? AND buyer_id = ? AND idempotency_key = ?").bind(user.organizationId, user.id, spendKey).first<{ id: string }>());
+  }
+  const entitled = elevated || String(row.owner_id) === user.id || Number(row.paid_entitlement) === 1 || Number(row.subscription_entitlement) === 1 || platformSubscription || freeClaimed || creditClaimed;
+  if (!entitled) {
+    const used = Number((await c.env.DB.prepare("SELECT COUNT(*) AS total FROM buyer_free_downloads WHERE organization_id = ? AND buyer_id = ?").bind(user.organizationId, user.id).first<{ total: number }>())?.total ?? 0);
+    return c.json({ error: freeEligible && archiveDomain.introductoryDownloadsRemaining(used, freeLimit) === 0 ? "Your introductory free photo downloads are used. Choose a bundle or unlimited subscription to continue." : "A licence, bundle, or subscription is required to download this original", code: freeEligible ? "free_download_limit_reached" : "download_entitlement_required", freeDownloadsRemaining: archiveDomain.introductoryDownloadsRemaining(used, freeLimit) }, 403);
+  }
+  const entitlementType = elevated ? "staff" : String(row.owner_id) === user.id ? "owner" : platformSubscription || Number(row.subscription_entitlement) === 1 ? "subscription" : "licence";
+  if (!freeClaimed || entitlementType !== "licence") {
+    await c.env.DB.prepare("INSERT INTO media_download_events (id, organization_id, asset_id, user_id, entitlement_type, object_key) VALUES (?, ?, ?, ?, ?, ?)")
+      .bind(crypto.randomUUID(), user.organizationId, row.id, user.id, entitlementType, originalKey).run();
+  }
+  recordMetric(c.env, "asset_download", c.get("trace"), 1, [user.organizationId, String(row.id), entitlementType]);
   return new Response(null, { status: 302, headers: { Location: signedUrl, "Cache-Control": "private, no-store" } });
 });
 
@@ -3489,10 +3617,19 @@ app.get("/api/licence-products", async (c) => {
 });
 
 app.post("/api/search/visual", async (c) => {
+  const requestContentType = c.req.raw.headers.get("content-type")?.toLowerCase() ?? "";
+  if (!requestContentType.startsWith("multipart/form-data")) {
+    return new Response(JSON.stringify({ error: "Upload an image file in the image field" }), { status: 400, headers: { "Content-Type": "application/json" } });
+  }
   if (!c.env.AI || !c.env.PHOTO_INDEX) return c.json({ error: "Visual search is not configured", code: "visual_search_unavailable" }, 503);
   const contentLength = Number(c.req.header("content-length") ?? 0);
   if (contentLength > 12 * 1024 * 1024) return c.json({ error: "Visual search images must be 10 MB or smaller" }, 413);
-  const form = await c.req.raw.formData();
+  let form: FormData;
+  try {
+    form = await c.req.raw.formData();
+  } catch {
+    return c.json({ error: "Upload an image file in the image field" }, 400);
+  }
   const file = form.get("image");
   if (!(file instanceof File) || !file.type.startsWith("image/")) return c.json({ error: "Upload an image file in the image field" }, 400);
   if (file.size > 10 * 1024 * 1024) return c.json({ error: "Visual search images must be 10 MB or smaller" }, 413);
@@ -3644,7 +3781,7 @@ function recentAttestation(value: string | undefined, maxAgeDays = 90): boolean 
 async function launchReadiness(env: Bindings): Promise<Record<string, unknown>> {
   const tableRows = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all<{ name: string }>();
   const tables = new Set(tableRows.results.map((row) => row.name));
-  const requiredTables = ["seller_onboarding_profiles", "didit_webhook_events", "marketplace_agreement_acceptances", "payment_split_allocations", "buyer_subscriptions", "buyer_subscription_payments"];
+  const requiredTables = ["seller_onboarding_profiles", "didit_webhook_events", "marketplace_agreement_acceptances", "payment_split_allocations", "buyer_subscriptions", "buyer_subscription_payments", "buyer_free_downloads"];
   const scalar = async (sql: string, key = "total"): Promise<number> => Number((await env.DB.prepare(sql).first<Record<string, unknown>>())?.[key] ?? 0);
   const productionMembers = tables.has("organization_memberships") ? await scalar("SELECT COUNT(*) AS total FROM organization_memberships WHERE organization_id = 'org-production' AND status = 'active'") : 0;
   const demoAssets = tables.has("assets") ? await scalar("SELECT COUNT(*) AS total FROM assets WHERE COALESCE(demo_seed, 0) = 1 OR id LIKE 'asset-demo-%' OR id LIKE 'asset-test-photo-%'") : 0;
@@ -3663,7 +3800,7 @@ async function launchReadiness(env: Bindings): Promise<Record<string, unknown>> 
     { id: "email_sender", ready: Boolean(env.EMAIL && env.EMAIL_FROM?.trim()), action: "Verify the transactional email sender and binding." },
     { id: "turnstile", ready: Boolean(env.TURNSTILE_SECRET?.trim() && env.TURNSTILE_HOSTNAMES?.trim()), action: "Provision Turnstile and configure its secret and hostname allowlist." },
     { id: "firma", ready: Boolean(env.FIRMA_VERIFY_URL?.trim() && env.FIRMA_API_TOKEN?.trim()), action: "Configure the Firma verification endpoint and API token." },
-    { id: "didit", ready: Boolean(env.DIDIT_API_KEY?.trim() && env.DIDIT_WEBHOOK_SECRET?.trim() && env.DIDIT_KYC_WORKFLOW_ID?.trim() && env.DIDIT_KYB_WORKFLOW_ID?.trim()), action: "Configure Didit API, webhook, KYC, and KYB credentials." },
+    { id: "didit", ready: Boolean(diditApiKey(env) && diditWebhookSecret(env) && env.DIDIT_KYC_WORKFLOW_ID?.trim() && env.DIDIT_KYB_WORKFLOW_ID?.trim()), action: "Configure Didit API, webhook, KYC, and KYB credentials." },
     { id: "cipc", ready: Boolean(env.CIPC_LOOKUP_URL?.trim() && env.CIPC_API_TOKEN?.trim()), action: "Configure the CIPC verification adapter." },
     { id: "payments", ready: paymentProviderConfigured(env) && subscription.configured, action: "Configure Paystack checkout, signed webhooks, and the recurring plan." },
     { id: "marketplace_terms", ready: String(env.MARKETPLACE_TERMS_APPROVED) === "true", action: "Obtain legal approval for the versioned seller, buyer, and split terms, then attest MARKETPLACE_TERMS_APPROVED=true." },
