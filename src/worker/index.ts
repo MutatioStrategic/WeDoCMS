@@ -76,6 +76,8 @@ import { decidePayoutBatch } from "./payout-decision";
 import { AUTO_APPROVAL_SCOPE, AUTO_APPROVAL_TERMS_VERSION, autoApprovalIsActive, licenceApprovalStatus } from "./licence-approval";
 import { discoveryTokens, normalizeSavedQuery, scoreRecommendation } from "./discovery";
 import { parseCampaignBrief, rankCampaignAssets, type BrandKit, type CampaignBrief, type CampaignStage } from "../campaign-intelligence";
+import { enqueueZohoOutbox, dispatchDueZohoOutbox, dispatchZohoOutboxJob, type ZohoOutboxJobMessage } from "./zoho-outbox";
+import type { ZohoSocialDraft } from "../integrations/zoho";
 import { bearerToken, normalizeWordPressSiteUrl, WORDPRESS_SCOPES, wordPressApiBaseUrl } from "../integrations/wordpress";
 import {
   assetCreateRequestSchema as contractAssetCreateRequestSchema,
@@ -205,6 +207,10 @@ type MediaBinding = {
     };
   };
 };
+type MediaReadBindings = {
+  MEDIA_BUCKET: Pick<R2Bucket, "get" | "head">;
+  MEDIA_LIBRARY_BUCKET?: Pick<R2Bucket, "get" | "head">;
+};
 type Bindings = Omit<Cloudflare.Env, "AI" | "PAYMENT_PROVIDER"> & AuditBindings & SecretBindings & {
   // These bindings are required by every deployed Worker environment. The
   // generated Wrangler base type is optional when a lightweight environment
@@ -212,6 +218,7 @@ type Bindings = Omit<Cloudflare.Env, "AI" | "PAYMENT_PROVIDER"> & AuditBindings 
   // at the application seam.
   DB: D1Database;
   MEDIA_BUCKET: R2Bucket;
+  MEDIA_LIBRARY_BUCKET?: Pick<R2Bucket, "get" | "head">;
   MEDIA_DR_BUCKET: R2Bucket;
   BACKUP_BUCKET: R2Bucket;
   KYC_BUCKET_ZA: R2Bucket;
@@ -804,6 +811,18 @@ export function createMediaResponse(request: Request, object: R2ObjectBody, fall
   }
 
   return new Response(request.method === "HEAD" ? null : object.body, { status, headers });
+}
+
+export async function headReadableMedia(env: MediaReadBindings, key: string): Promise<R2Object | null> {
+  const primary = await env.MEDIA_BUCKET.head(key);
+  if (primary || !env.MEDIA_LIBRARY_BUCKET) return primary;
+  return env.MEDIA_LIBRARY_BUCKET.head(key);
+}
+
+export async function getReadableMedia(env: MediaReadBindings, key: string, options?: R2GetOptions): Promise<R2ObjectBody | null> {
+  const primary = await env.MEDIA_BUCKET.get(key, options);
+  if (primary || !env.MEDIA_LIBRARY_BUCKET) return primary;
+  return env.MEDIA_LIBRARY_BUCKET.get(key, options);
 }
 
 function addReleaseDocuments(asset: Asset, rows: Record<string, unknown>[]): Asset {
@@ -3336,8 +3355,8 @@ app.on(["GET", "HEAD"], "/api/assets/:id/preview", async (c) => {
   }
 
   const object = c.req.method === "HEAD"
-    ? await c.env.MEDIA_BUCKET.head(mediaKey)
-    : await c.env.MEDIA_BUCKET.get(mediaKey, c.req.header("Range") ? { range: c.req.raw.headers } : undefined);
+    ? await headReadableMedia(c.env, mediaKey)
+    : await getReadableMedia(c.env, mediaKey, c.req.header("Range") ? { range: c.req.raw.headers } : undefined);
   if (!object) return c.json({ error: "Media preview is unavailable" }, 404);
   const response = createMediaResponse(c.req.raw, object as R2ObjectBody, previewContentType(row));
   response.headers.set("Cache-Control", row.status === "published" && row.kind === "image" ? "public, max-age=3600, stale-while-revalidate=86400" : "private, no-store, max-age=0");
@@ -3398,7 +3417,7 @@ app.on(["GET", "HEAD"], "/api/assets/:id/poster", async (c) => {
   const canInspectPrivate = Boolean(user && row && String(row.organization_id) === user.organizationId && (String(row.owner_id) === user.id || allowedRole(user, ["editor", "admin"])));
   const key = typeof row?.video_poster_key === "string" ? row.video_poster_key.trim() : "";
   if (!row || row.kind !== "video" || !key || (row.status !== "published" && !canInspectPrivate)) return c.json({ error: "Video poster not found" }, 404);
-  const object = c.req.method === "HEAD" ? await c.env.MEDIA_BUCKET.head(key) : await c.env.MEDIA_BUCKET.get(key);
+  const object = c.req.method === "HEAD" ? await headReadableMedia(c.env, key) : await getReadableMedia(c.env, key);
   if (!object) return c.json({ error: "Video poster unavailable" }, 404);
   const response = createMediaResponse(c.req.raw, object as R2ObjectBody, "image/webp");
   response.headers.set("Cache-Control", "public, max-age=3600, stale-while-revalidate=86400");
@@ -4564,13 +4583,33 @@ function safeJsonObject<T>(value: unknown, fallback: T): T {
 function campaignBriefFromPayload(payload: z.infer<typeof campaignInputSchema>): { briefText: string; briefFields: CampaignBrief } {
   const briefText = payload.briefText ?? (typeof payload.brief === "string" ? payload.brief : "");
   const parsed = parseCampaignBrief(briefText, payload.platforms);
-  const briefFields = typeof payload.brief === "string" ? parsed : { ...parsed, ...payload.brief } as CampaignBrief;
+  const supplied = typeof payload.brief === "string" ? {} : payload.brief;
+  const briefFields = mergeCampaignBrief(parsed, { ...supplied, ...(payload.platforms.length ? { platforms: payload.platforms } : {}) });
   return { briefText, briefFields };
+}
+
+function mergeCampaignBrief(base: CampaignBrief, value: Record<string, unknown>): CampaignBrief {
+  const arrayValue = (key: string, fallback: string[]) => Array.isArray(value[key]) && value[key].length ? value[key].filter((item): item is string => typeof item === "string" && item.trim().length > 0) : fallback;
+  const stringValue = (key: string, fallback: string) => typeof value[key] === "string" && value[key].trim() ? value[key].trim() : fallback;
+  return {
+    ...base,
+    audience: stringValue("audience", base.audience),
+    platforms: arrayValue("platforms", base.platforms) as CampaignBrief["platforms"],
+    locations: Array.isArray(value.locations) ? arrayValue("locations", []) : base.locations,
+    tone: arrayValue("tone", base.tone),
+    industry: stringValue("industry", base.industry),
+    productService: stringValue("productService", base.productService),
+    usageRights: ["editorial", "commercial", "advertising", "social", "broadcast", "exclusive"].includes(String(value.usageRights)) ? value.usageRights as CampaignBrief["usageRights"] : base.usageRights,
+    licenceType: stringValue("licenceType", base.licenceType),
+    modelReleaseRequired: typeof value.modelReleaseRequired === "boolean" ? value.modelReleaseRequired : base.modelReleaseRequired,
+    formatNeeded: arrayValue("formatNeeded", base.formatNeeded),
+    keywords: arrayValue("keywords", base.keywords),
+  };
 }
 
 function campaignSummaryFromRow(row: Record<string, unknown>) {
   const briefText = String(row.brief_text ?? "");
-  const briefFields = safeJsonObject<CampaignBrief>(row.brief_json, parseCampaignBrief(briefText));
+  const briefFields = mergeCampaignBrief(parseCampaignBrief(briefText), safeJsonObject<Record<string, unknown>>(row.brief_json, {}));
   const brandKit = safeJsonObject<BrandKit>(row.brand_kit_json, { colours: [], logoNotes: "", tone: "", industry: "", forbiddenStyles: [], preferredVisuals: "" });
   return {
     id: String(row.id),
@@ -4635,8 +4674,9 @@ app.get("/api/campaigns/:id", async (c) => {
     WHERE ca.campaign_id = ? AND a.organization_id = ? ORDER BY ca.updated_at DESC`).bind(campaignId, user.organizationId).all<Record<string, unknown>>();
   const stagedByAsset = new Map(stagedRows.results.map((row) => [String(row.id), { stage: String(row.stage) as CampaignStage, note: String(row.note ?? "") }]));
   const assets = stagedRows.results.map((row) => ({ ...assetRowToDomain(row, c.env), campaignStage: String(row.stage) as CampaignStage, campaignNote: String(row.note ?? ""), activeLicenceId: null }));
-  const candidateRows = await c.env.DB.prepare("SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.organization_id = ? AND a.status = 'published' ORDER BY a.human_verified DESC, a.created_at DESC LIMIT 80").bind(user.organizationId).all<Record<string, unknown>>();
-  const recommendations = rankCampaignAssets(candidateRows.results.map((row) => assetRowToDomain(row, c.env)), summary.briefFields, summary.brandKit).slice(0, 12).map((item) => {
+  const candidateRows = await c.env.DB.prepare("SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.organization_id = ? AND a.status = 'published' ORDER BY a.human_verified DESC, a.created_at DESC LIMIT 200").bind(user.organizationId).all<Record<string, unknown>>();
+  const rankedCandidates = rankCampaignAssets(candidateRows.results.map((row) => assetRowToDomain(row, c.env)), summary.briefFields, summary.brandKit);
+  const recommendations = [...rankedCandidates.slice(0, 12), ...rankedCandidates.slice(12).filter((item) => stagedByAsset.has(item.asset.id))].map((item) => {
     const staged = stagedByAsset.get(item.asset.id);
     return { ...item, stage: staged?.stage ?? null, note: staged?.note ?? "" };
   });
@@ -4665,7 +4705,7 @@ app.get("/api/campaigns/:id/manifest", async (c) => {
   if (!user) return c.json({ error: "Authentication required" }, 401);
   const campaign = await c.env.DB.prepare("SELECT * FROM campaigns WHERE id = ? AND organization_id = ?").bind(c.req.param("id"), user.organizationId).first<Record<string, unknown>>();
   if (!campaign) return c.json({ error: "Campaign not found" }, 404);
-  const briefFields = safeJsonObject<CampaignBrief>(campaign.brief_json, parseCampaignBrief(String(campaign.brief_text ?? "")));
+  const briefFields = mergeCampaignBrief(parseCampaignBrief(String(campaign.brief_text ?? "")), safeJsonObject<Record<string, unknown>>(campaign.brief_json, {}));
   const approvedRows = await c.env.DB.prepare(`SELECT ca.stage, ca.note, a.*, u.display_name AS contributor
     FROM campaign_assets ca JOIN assets a ON a.id = ca.asset_id JOIN users u ON u.id = a.owner_id
     WHERE ca.campaign_id = ? AND a.organization_id = ? AND ca.stage = 'approved' ORDER BY ca.updated_at DESC`).bind(campaign.id, user.organizationId).all<Record<string, unknown>>();
@@ -4682,6 +4722,42 @@ app.get("/api/campaigns/:id/manifest", async (c) => {
     },
     assets: approvedAssets.map((asset) => ({ id: asset.id, title: asset.title, rightsStatus: asset.rightsStatus, humanVerified: asset.humanVerified, sourceAttribution: asset.sourceAttribution })),
   });
+});
+
+const zohoSocialExportSchema = z.object({
+  copy: z.string().trim().max(5000).optional(),
+  channels: z.array(z.string().trim().max(40)).max(12).optional(),
+  scheduleAt: z.string().datetime({ offset: true }).optional(),
+}).default({});
+
+app.post("/api/campaigns/:id/integrations/zoho/social", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Campaign workspace access required" }, 403);
+  const input = zohoSocialExportSchema.parse(await c.req.json().catch(() => ({})));
+  const campaign = await c.env.DB.prepare("SELECT * FROM campaigns WHERE id = ? AND organization_id = ?").bind(c.req.param("id"), user.organizationId).first<Record<string, unknown>>();
+  if (!campaign) return c.json({ error: "Campaign not found" }, 404);
+  const brief = mergeCampaignBrief(parseCampaignBrief(String(campaign.brief_text ?? "")), safeJsonObject<Record<string, unknown>>(campaign.brief_json, {}));
+  const requestedChannels = input.channels?.length ? input.channels : brief.platforms;
+  const socialChannels = ["instagram", "facebook", "tiktok", "linkedin"];
+  const channels = [...new Set(requestedChannels.filter((channel) => socialChannels.includes(channel)))];
+  if (!channels.length) return c.json({ error: "Select at least one Zoho Social channel: Instagram, Facebook, TikTok, or LinkedIn" }, 422);
+  const approvedRows = await c.env.DB.prepare(`SELECT a.*, u.display_name AS contributor
+    FROM campaign_assets ca JOIN assets a ON a.id = ca.asset_id JOIN users u ON u.id = a.owner_id
+    WHERE ca.campaign_id = ? AND a.organization_id = ? AND ca.stage = 'approved' ORDER BY ca.updated_at DESC`).bind(campaign.id, user.organizationId).all<Record<string, unknown>>();
+  const approvedAssets = approvedRows.results.map((row) => assetRowToDomain(row, c.env));
+  if (!approvedAssets.length) return c.json({ error: "Approve at least one asset before sending to Zoho Social" }, 422);
+  const blocked = approvedAssets.filter((asset) => asset.rightsStatus !== "verified" || !asset.humanVerified || !asset.previewUrl);
+  if (blocked.length) return c.json({ error: "Every approved asset must have verified rights, human review, and an available preview", blockedAssetIds: blocked.map((asset) => asset.id) }, 422);
+  const origin = (c.env.APP_PUBLIC_URL ?? new URL(c.req.url).origin).replace(/\/$/, "");
+  const media = approvedAssets.map((asset) => ({ assetId: asset.id, title: asset.title, url: `${origin}${asset.previewUrl}`, attribution: asset.sourceAttribution }));
+  const payload: ZohoSocialDraft = {
+    id: String(campaign.id), name: String(campaign.name), brief: String(campaign.brief_text ?? "").slice(0, 5000), status: String(campaign.status),
+    approvedAssetCount: approvedAssets.length, platforms: brief.platforms, usageRights: brief.usageRights, channels,
+    copy: input.copy ?? String(campaign.name), ...(input.scheduleAt ? { scheduleAt: input.scheduleAt } : {}), media,
+  };
+  const idempotencyKey = `campaign-social-${campaign.id}-${await sha256Hex(JSON.stringify({ channels, media: media.map((item) => item.assetId), copy: payload.copy, scheduleAt: payload.scheduleAt ?? null }))}`;
+  const job = await enqueueZohoOutbox(c.env, { organizationId: user.organizationId, actorId: user.id, app: "social", action: "create_reviewable_social_draft", entityType: "campaign", entityId: String(campaign.id), idempotencyKey, payload });
+  return c.json({ jobId: job.id, status: job.status, created: job.created, channels, approvedAssetCount: approvedAssets.length }, job.created ? 202 : 200);
 });
 
 const savedSearchSchema = z.object({
@@ -5233,7 +5309,7 @@ app.onError((error, c) => {
   return c.json(validateContractResponse("error response", errorResponseSchema, body), validation ? 400 : 500);
 });
 
-type QueueMessage = R2EventMessage | PhotoEnrichmentJob;
+type QueueMessage = R2EventMessage | PhotoEnrichmentJob | ZohoOutboxJobMessage;
 
 function isPhotoEnrichmentJob(message: QueueMessage): message is PhotoEnrichmentJob {
   if (!("type" in message)) return false;
@@ -5264,6 +5340,11 @@ async function normalizePhotoEnrichmentJob(env: Bindings, message: QueueMessage)
 function isR2EventMessage(message: QueueMessage): message is R2EventMessage {
   const candidate = message as { action?: unknown; bucket?: unknown; object?: { key?: unknown } };
   return typeof candidate.action === "string" && typeof candidate.bucket === "string" && typeof candidate.object?.key === "string";
+}
+
+function isZohoOutboxMessage(message: QueueMessage): message is ZohoOutboxJobMessage {
+  const candidate = message as { type?: unknown; jobId?: unknown };
+  return candidate.type === "zoho.outbox" && typeof candidate.jobId === "string";
 }
 
 async function dispatchSavedSearchAlerts(env: Bindings): Promise<number> {
@@ -5298,9 +5379,11 @@ const worker: ExportedHandler<Bindings, QueueMessage> = {
       const repaired = await repairPendingPhotoPipeline(photoPipeline(env), 40);
       await runMaintenance(env);
       const alerted = await dispatchSavedSearchAlerts(env);
+      const zohoDispatched = await dispatchDueZohoOutbox(env);
       recordMetric(env, "photo_jobs_requeued", trace, requeued, ["cron"]);
       recordMetric(env, "photo_pipeline_repairs", trace, repaired.queued + repaired.recovered + repaired.stale + repaired.resolvedReviews + repaired.reconciledIndexes, ["cron"]);
       recordMetric(env, "saved_search_alerts_sent", trace, alerted, ["cron"]);
+      recordMetric(env, "zoho_outbox_dispatched", trace, zohoDispatched, ["cron"]);
     } catch (error) {
       logEvent("error", "r2.replication.failed", trace, {
         error: error instanceof Error ? error.message : "unknown-error",
@@ -5316,6 +5399,8 @@ const worker: ExportedHandler<Bindings, QueueMessage> = {
         const photoJob = await normalizePhotoEnrichmentJob(env, message.body);
         if (photoJob) {
           await processPhotoJob(photoPipeline(env), photoJob, trace);
+        } else if (isZohoOutboxMessage(message.body)) {
+          await dispatchZohoOutboxJob(env, message.body.jobId);
         } else if (isR2EventMessage(message.body)) {
           await replicateR2Event(env, message.body, trace);
         } else {

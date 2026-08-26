@@ -752,9 +752,11 @@ function CampaignWorkspace({ api, onNotice, onOpen }: { api: (path: string, init
   const [campaigns, setCampaigns] = useState<CampaignSummary[]>([]);
   const [activeId, setActiveId] = useState("");
   const [activeCampaign, setActiveCampaign] = useState<CampaignSummary | null>(null);
+  const [campaignAssets, setCampaignAssets] = useState<CmsCampaignAsset[]>([]);
   const [recommendations, setRecommendations] = useState<CampaignRecommendationRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [zohoSending, setZohoSending] = useState(false);
   const [name, setName] = useState("");
   const [brief, setBrief] = useState("");
   const [selectedPlatforms, setSelectedPlatforms] = useState<CampaignPlatform[]>(["instagram", "linkedin", "web", "email"]);
@@ -788,8 +790,9 @@ function CampaignWorkspace({ api, onNotice, onOpen }: { api: (path: string, init
     try {
       const response = await api(`/api/campaigns/${id}`);
       if (!response.ok) throw new Error();
-      const data = await response.json() as { campaign: CampaignSummary; recommendations: CampaignRecommendationRow[] };
+      const data = await response.json() as { campaign: CampaignSummary; assets?: CmsCampaignAsset[]; recommendations: CampaignRecommendationRow[] };
       setActiveCampaign(data.campaign);
+      setCampaignAssets(data.assets ?? []);
       setRecommendations(data.recommendations);
       setSelectedAssetId((current) => current && data.recommendations.some((item) => item.asset.id === current) ? current : data.recommendations[0]?.asset.id || "");
     } catch {
@@ -835,7 +838,12 @@ function CampaignWorkspace({ api, onNotice, onOpen }: { api: (path: string, init
       const response = await api(`/api/campaigns/${activeCampaign.id}/assets`, { method: "POST", body: JSON.stringify({ assetId: item.asset.id, stage, note: stage === "approved" ? "Approved after rights and creative review." : "" }) });
       if (!response.ok) throw new Error();
       setRecommendations((current) => current.map((recommendation) => recommendation.asset.id === item.asset.id ? { ...recommendation, stage } : recommendation));
-      onNotice(`${item.asset.title} moved to ${stage.replaceAll("_", " ")}.`);
+      setCampaignAssets((current) => {
+        const existing = current.find((asset) => asset.id === item.asset.id);
+        const nextAsset = { ...item.asset, campaignStage: stage, campaignNote: stage === "approved" ? "Approved after rights and creative review." : existing?.campaignNote ?? "", activeLicenceId: existing?.activeLicenceId ?? null };
+        return existing ? current.map((asset) => asset.id === item.asset.id ? nextAsset : asset) : [nextAsset, ...current];
+      });
+      onNotice(stage === "shortlisted" ? `${item.asset.title} added to this campaign.` : `${item.asset.title} moved to ${stage.replaceAll("_", " ")}.`);
     } catch {
       onNotice("That campaign decision was not saved. No local decision was applied.");
     }
@@ -859,6 +867,21 @@ function CampaignWorkspace({ api, onNotice, onOpen }: { api: (path: string, init
     }
   }
 
+  async function sendToZohoSocial() {
+    if (!activeCampaign) return;
+    setZohoSending(true);
+    try {
+      const response = await api(`/api/campaigns/${activeCampaign.id}/integrations/zoho/social`, { method: "POST", body: JSON.stringify({ copy: copyDraft, channels: activeCampaign.briefFields.platforms.filter((platform) => ["instagram", "facebook", "tiktok", "linkedin"].includes(platform)) }) });
+      const data = await response.json().catch(() => ({})) as { error?: string; channels?: string[]; approvedAssetCount?: number };
+      if (!response.ok) throw new Error(data.error ?? "Zoho Social export failed");
+      onNotice(`Zoho Social handoff queued for ${data.channels?.join(", ") ?? "selected channels"} with ${data.approvedAssetCount ?? 0} approved asset(s).`);
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : "Zoho Social export failed. No handoff was queued.");
+    } finally {
+      setZohoSending(false);
+    }
+  }
+
   const selectedRecommendation = recommendations.find((item) => item.asset.id === selectedAssetId) ?? recommendations[0] ?? null;
   const selectedAsset = selectedRecommendation?.asset ?? null;
   const similar = selectedAsset ? recommendations.filter((item) => item.asset.id !== selectedAsset.id).sort((left, right) => sharedAssetSignals(selectedAsset, right.asset) - sharedAssetSignals(selectedAsset, left.asset) || right.score - left.score).slice(0, 4) : [];
@@ -872,7 +895,8 @@ function CampaignWorkspace({ api, onNotice, onOpen }: { api: (path: string, init
 
   if (loading) return <main className="campaign-page"><div className="empty-state">Loading campaign intelligence…</div></main>;
 
-  return <main className="campaign-page">
+  const zohoSocialAction = activeCampaign ? <button type="button" className="outline-button" disabled={zohoSending} onClick={() => void sendToZohoSocial()}>{zohoSending ? "Queueing Zoho Social..." : "Send to Zoho Social"}</button> : null;
+  return <main className="campaign-page">{zohoSocialAction}
     <section className="campaign-hero"><div><span className="section-kicker">PHASE 5 · AI CREATIVE ASSISTANT</span><h1>Make the brief<br /><em>work harder.</em></h1><p>Rank, reformat, caption, and check a campaign while every licensed source stays visible and under your control.</p></div><div className="assistant-boundary"><strong>Rights-aware by default</strong><span>AI suggestions are labelled. Licensed contributor media is never silently replaced with generated media.</span></div></section>
 
     <section className="campaign-setup">
@@ -964,6 +988,7 @@ function BuyerSubscriptionPanel({ api, onNotice }: { api: (path: string, init?: 
     if (!response.ok || !body.checkoutUrl) { onNotice(body.error ?? "Paystack could not start the subscription checkout."); return; }
     window.location.assign(body.checkoutUrl);
   }
+
   async function buyBundle(credits: number): Promise<void> {
     const response = await api("/api/buyer/credits/checkout", { method: "POST", body: JSON.stringify({ credits, successUrl: `${window.location.origin}/account?bundle=complete`, cancelUrl: `${window.location.origin}/account?bundle=cancelled` }) });
     const body = await response.json().catch(() => ({})) as { checkoutUrl?: string; error?: string };
