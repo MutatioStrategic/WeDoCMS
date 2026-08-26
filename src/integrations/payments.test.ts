@@ -1,5 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { JsonPaymentAdapter, PaystackPaymentAdapter } from "./payments";
+import { DemoPaymentAdapter, JsonPaymentAdapter, PaystackPaymentAdapter } from "./payments";
+
+describe("DemoPaymentAdapter", () => {
+  it("returns the Worker-owned completion path without contacting a PSP", async () => {
+    const result = await new DemoPaymentAdapter().createCheckoutSession({
+      idempotencyKey: "licence:12345678",
+      licenceId: "licence-1",
+      amountCents: 12500,
+      currency: "ZAR",
+      buyer: { id: "buyer-1", email: "buyer@example.com" },
+      successUrl: "https://app.example/account?payment=complete",
+      cancelUrl: "https://app.example/account?payment=cancelled",
+    });
+    expect(result).toMatchObject({
+      provider: "demo",
+      status: "created",
+      checkoutUrl: "/api/demo/payments/licence-1/complete",
+      providerReference: "demo:licence-1",
+    });
+  });
+});
 
 describe("JsonPaymentAdapter", () => {
   it("creates a hosted checkout session with an idempotency key", async () => {

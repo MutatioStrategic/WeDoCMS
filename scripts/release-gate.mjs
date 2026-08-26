@@ -33,20 +33,34 @@ for (const file of files.filter((candidate) => textExtensions.has(extname(candid
 
 const mainSource = await readFile(new URL("../src/main.tsx", import.meta.url), "utf8");
 const sharedSource = await readFile(new URL("../src/shared.ts", import.meta.url), "utf8");
+const workerSource = await readFile(new URL("../src/worker/index.ts", import.meta.url), "utf8");
+const demoSmokeSource = await readFile(new URL("../scripts/demo-screen-smoke.mjs", import.meta.url), "utf8");
+const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 if (!sharedSource.includes('export type AssetKind = "image" | "video"')) failures.push("The declared product boundary must remain photo/video only.");
 if (!mainSource.includes("No substitute image is shown.")) failures.push("Missing the explicit unavailable-preview state; visual cards must not fabricate substitute media.");
 const hasDemoFallback = /filterDemoAssets|demoAssets/.test(mainSource);
 if (hasDemoFallback && !mainSource.includes("import.meta.env.DEV")) failures.push("Demo fallback is not restricted to development builds.");
+if (/MEDIA_LIBRARY_BUCKET\s*\.\s*(?:put|delete|createMultipartUpload|resumeMultipartUpload)\s*\(/.test(workerSource)) failures.push("The production media library fallback must remain read-only in Worker code.");
+if (!demoSmokeSource.includes("expectedMediaMinimum") || !demoSmokeSource.includes("previewUrl") || !demoSmokeSource.includes("page.request.fetch")) failures.push("The live demo smoke must verify catalogue media counts and real preview responses.");
+if (!packageJson.scripts?.["worker:deploy"]?.includes("wrangler deploy --env production")) failures.push("Production deployment must target the explicit production Wrangler environment.");
+if (!packageJson.scripts?.["worker:deploy:demo"]?.includes("wrangler deploy --env demo")) failures.push("Demo deployment must target the explicit demo Wrangler environment.");
+
+const wrangler = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
+const demoStart = wrangler.search(/"demo"\s*:\s*\{/);
+const productionStart = wrangler.search(/"production"\s*:\s*\{/);
+const demoConfig = demoStart >= 0 ? wrangler.slice(demoStart, productionStart > demoStart ? productionStart : wrangler.length) : "";
+if (demoStart >= 0 && !/"binding"\s*:\s*"MEDIA_LIBRARY_BUCKET"\s*,\s*"bucket_name"\s*:\s*"veld-archive-media"/.test(demoConfig)) failures.push("The demo Worker must retain its read-only production media library binding.");
+if (demoStart >= 0 && /"binding"\s*:\s*"MEDIA_BUCKET"\s*,\s*"bucket_name"\s*:\s*"veld-archive-media"/.test(demoConfig)) failures.push("The demo primary media bucket must remain isolated from the production bucket.");
 
 if (process.argv.includes("--production")) {
-  const wrangler = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
-  const productionStart = wrangler.search(/"production"\s*:\s*\{/);
-  const productionConfig = productionStart >= 0 ? wrangler.slice(productionStart, productionStart + 20_000) : "";
+  const productionConfig = productionStart >= 0 ? wrangler.slice(productionStart) : "";
   if (productionStart < 0) failures.push("wrangler.jsonc has no dedicated production environment; root development bindings cannot be promoted.");
   if (!/"APP_ENV"\s*:\s*"production"/.test(productionConfig)) failures.push("The production Wrangler environment must set APP_ENV to production.");
   if (/"cache"\s*:\s*\{\s*"enabled"\s*:\s*true/s.test(productionConfig)) failures.push("Worker-wide production caching must remain disabled for cookie-authenticated API responses.");
   if (/"AUTH_PROVIDER"\s*:\s*"(?:auth0|both)"/.test(productionConfig) && !/"AUTH_AUDIENCE"\s*:\s*"[^"]+"/.test(productionConfig)) failures.push("Auth0 is selected in production but AUTH_AUDIENCE is missing.");
   if (!/"PAYSTACK_SUBSCRIPTION_PLAN_CODE"\s*:\s*"PLN_[^"]+"/.test(productionConfig)) failures.push("The canonical Paystack subscription plan code is missing.");
+  if (!/"binding"\s*:\s*"MEDIA_BUCKET"\s*,\s*"bucket_name"\s*:\s*"veld-archive-media"/.test(productionConfig)) failures.push("The production Worker must remain bound to the production media bucket.");
+  if (!/"R2_BUCKET_NAME"\s*:\s*"veld-archive-media"/.test(productionConfig)) failures.push("Production R2 signing must target the production media bucket.");
   if (/replace-with-|org-demo|localhost|127\.0\.0\.1/i.test(productionConfig)) failures.push("The production Wrangler environment contains demo, localhost, or placeholder configuration.");
 }
 

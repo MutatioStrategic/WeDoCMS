@@ -90,7 +90,7 @@ export function mobileSessionHeaders(session: MobileApiSession): Record<string, 
   };
 }
 
-type AccountIntent = "seller";
+type AccountIntent = "buyer" | "seller";
 
 function normalizedPhone(phone: string): string {
   return normalizeSouthAfricanPhone(phone);
@@ -110,7 +110,7 @@ async function readAccountIntent(): Promise<AccountIntent | undefined> {
   const value = Platform.OS === "web"
     ? globalThis.localStorage?.getItem(ACCOUNT_INTENT_STORAGE_KEY)
     : await AsyncStorage.getItem(ACCOUNT_INTENT_STORAGE_KEY);
-  return value === "seller" ? value : undefined;
+  return value === "seller" || value === "buyer" ? value : undefined;
 }
 
 async function exchangeSupabaseSession(apiBaseUrl: string, identitySession: Session, accountIntent?: AccountIntent): Promise<MobileApiSession> {
@@ -121,7 +121,7 @@ async function exchangeSupabaseSession(apiBaseUrl: string, identitySession: Sess
       Authorization: `Bearer ${identitySession.access_token}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ sessionTransport: "bearer", ...(accountIntent ? { accountIntent } : {}) }),
+    body: JSON.stringify({ sessionTransport: "bearer", ...(accountIntent === "seller" ? { accountIntent: "seller" } : {}) }),
   });
   const body = await response.json().catch(() => null) as ExchangeResponse | null;
   if (!response.ok || !body?.authenticated || !body.sessionToken || !body.csrfToken || !body.expiresAt || !body.user) {
@@ -276,7 +276,7 @@ export function useMobileAuth(apiBaseUrl: string) {
     }
   }, [adoptIdentitySession]);
 
-  const signUp = useCallback(async (email: string, password: string, displayName: string, accountIntent: AccountIntent = "seller") => {
+  const signUp = useCallback(async (email: string, password: string, displayName: string, accountIntent: AccountIntent = "buyer") => {
     if (!supabase) throw new Error("Supabase authentication is not configured for this build.");
     setLoading(true);
     setError(null);
@@ -287,7 +287,7 @@ export function useMobileAuth(apiBaseUrl: string) {
         password,
         options: {
           emailRedirectTo: "veldarchive://auth/confirmed",
-          data: { display_name: displayName.trim() || email.trim().split("@")[0] },
+          data: { display_name: displayName.trim() || email.trim().split("@")[0], account_intent: accountIntent },
         },
       });
       if (result.error) throw result.error;

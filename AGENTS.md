@@ -40,6 +40,34 @@ Read the relevant README and docs before editing. For changes involving
 authentication, tenancy, uploads, payments, rights, external providers, or
 production behavior, also read the relevant security and launch documentation.
 
+## Cloudflare build and deployment safeguards
+
+Read `docs/agent-deployment-safeguards.md` before changing `wrangler.jsonc`,
+media bindings, migrations, build modes, or deployment scripts. These rules
+are mandatory for agents:
+
+- Treat the catalogue as a two-source contract: every D1 `preview_key` and
+  `original_key` that is exposed by an API must resolve to the intended R2
+  bucket. A successful D1 query alone is not a successful media deployment.
+- Keep environment bindings explicit. Wrangler environments do not inherit
+  bindings or variables from the root configuration. Inspect the selected
+  environment in `wrangler.jsonc` and run `npx wrangler deploy --env <env>
+  --dry-run` before any remote deployment.
+- Never point a catalogue containing production media keys at a newly-created
+  or demo-only R2 bucket. A demo may share the production D1 only when that is
+  explicitly authorized and it must use the read-only
+  `MEDIA_LIBRARY_BUCKET` fallback or a verified complete media copy.
+- Production must use `npm run build` and `npm run worker:deploy`; demo must
+  use `npm run build:demo` and `npm run worker:deploy:demo`. Do not deploy a
+  demo bundle or root development bindings as production.
+- Stop before deployment if the live catalogue count and usable preview count
+  diverge, or if any sampled preview returns 404/403/5xx. Do not “fix” this by
+  deleting D1 rows or R2 objects; investigate the binding and key mapping,
+  then rollback to the last known-good Worker version if necessary.
+- A deployment handoff must include the exact environment, Worker URL and
+  version ID, D1 database, media bucket bindings, catalogue/media counts,
+  sampled preview results, and any Cloudflare quota or cron warnings.
+
 ## UX guardrails
 
 ### Forms and content

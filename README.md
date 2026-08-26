@@ -51,6 +51,12 @@ npm run worker:dev
 
 `npm run worker:deploy` is production-only and refuses to deploy the root development bindings. It runs the production bundle gate and requires a dedicated `env.production` block with `APP_ENV=production` and no demo, localhost, or placeholder values. Use `npm run worker:deploy:development` only for an intentional non-production Worker.
 
+Agents changing bindings or deploying to Cloudflare must follow
+[`docs/agent-deployment-safeguards.md`](docs/agent-deployment-safeguards.md).
+The short version: validate D1 records and R2 objects together, dry-run the
+selected Wrangler environment, and run the live media-and-screen smoke before
+reporting a deployment as healthy.
+
 ### Buyer access demo environment
 
 The demo build includes the complete buyer access choice: three introductory

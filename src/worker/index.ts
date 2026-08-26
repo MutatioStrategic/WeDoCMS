@@ -1749,7 +1749,7 @@ const paymentSessionSchema = z.object({
 app.post("/api/payments/:licenceId/session", async (c) => {
   const user = await requestUser(c);
   if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, 401);
-  if (!paymentProviderConfigured(c.env)) return c.json({ error: "Payment provider is not configured" }, 503);
+  if (!licencePaymentProviderConfigured(c.env)) return c.json({ error: "Payment provider is not configured" }, 503);
   const payload = paymentSessionSchema.parse(await c.req.json());
   const licence = await c.env.DB.prepare(`
     SELECT l.id, l.price_cents, l.status, l.payment_reference, u.email, a.owner_id,
@@ -1834,6 +1834,56 @@ async function postSaleSettlement(env: Bindings, licenceId: string, payload: z.i
   ]);
   return { transactionId, idempotent: false };
 }
+
+/**
+ * Complete a licence in the explicitly non-production demo environment.
+ * This is a server-side simulation of the same settlement path used by a
+ * signed provider webhook; no browser redirect is treated as payment proof.
+ */
+app.get("/api/demo/payments/:licenceId/complete", async (c) => {
+  if (!demoPaymentEnabled(c.env)) return c.json({ error: "Demo checkout is disabled" }, 404);
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, user ? 403 : 401);
+  const licenceId = c.req.param("licenceId");
+  const licence = await c.env.DB.prepare(`
+    SELECT l.id, l.organization_id, l.buyer_id, l.price_cents, l.status, l.payment_provider, l.payment_reference,
+      a.title AS asset_title
+    FROM licences l JOIN assets a ON a.id = l.asset_id
+    WHERE l.id = ? AND l.organization_id = ? AND l.buyer_id = ?
+  `).bind(licenceId, user.organizationId, user.id).first<{ id: string; organization_id: string; buyer_id: string; price_cents: number; status: string; payment_provider: string | null; payment_reference: string | null; asset_title: string }>();
+  if (!licence) return c.json({ error: "Licence not found" }, 404);
+  if (licence.status !== "paid" && (licence.payment_provider !== "demo" || licence.payment_reference !== `demo:${licence.id}`)) {
+    return c.json({ error: "Start the demo checkout before completing this licence" }, 409);
+  }
+  if (licence.status === "pending") {
+    const eventId = `demo:licence:${licence.id}`;
+    try {
+      await postSaleSettlement(c.env, licence.id, {
+        amountCents: Number(licence.price_cents),
+        currency: "ZAR",
+        taxCents: 0,
+        idempotencyKey: eventId,
+      });
+      await c.env.DB.batch([
+        c.env.DB.prepare("UPDATE licences SET payment_provider = 'demo', payment_reference = ?, paid_at = CURRENT_TIMESTAMP, status = 'paid' WHERE id = ? AND organization_id = ? AND buyer_id = ? AND status = 'pending'").bind(eventId, licence.id, user.organizationId, user.id),
+        c.env.DB.prepare(`INSERT OR IGNORE INTO payment_webhook_events
+          (id, provider, provider_event_id, event_type, licence_id, amount_cents, currency, payload_json, status, processed_at)
+          VALUES (?, 'demo', ?, 'payment_succeeded', ?, ?, 'ZAR', ?, 'processed', CURRENT_TIMESTAMP)`)
+          .bind(eventId, eventId, licence.id, Number(licence.price_cents), JSON.stringify({ provider: "demo", eventId, type: "payment_succeeded", productType: "licence", licenceId: licence.id, amountCents: Number(licence.price_cents), currency: "ZAR" })),
+      ]);
+      recordMetric(c.env, "licence_purchase", c.get("trace"), 1, [user.organizationId]);
+      c.executionCtx.waitUntil(dispatchWebhookEvent(c.env, user.organizationId, "licence.paid", { licenceId: licence.id, amountCents: Number(licence.price_cents), currency: "ZAR", demo: true }));
+    } catch (error) {
+      logEvent("error", "demo.payment_completion_failed", c.get("trace"), { licenceId: licence.id, error: error instanceof Error ? error.message : "unknown" });
+      return c.json({ error: "Demo payment could not be completed" }, 422);
+    }
+  }
+  const destination = new URL("/account", c.req.url);
+  destination.searchParams.set("licence", licence.id);
+  destination.searchParams.set("payment", "complete");
+  destination.searchParams.set("demo", "1");
+  return c.redirect(destination.toString(), 303);
+});
 
 app.post("/api/payments/:licenceId/settled", async (c) => {
   const user = await requestUser(c);
@@ -2119,7 +2169,16 @@ function buyerAccount(c: { env: Bindings; req: { raw: Request } }): Promise<Requ
   return getRequestUser(c.env, c.req.raw);
 }
 
+function demoPaymentEnabled(env: Pick<Bindings, "APP_ENV" | "PAYMENT_PROVIDER">): boolean {
+  return String(env.APP_ENV) === "demo" && env.PAYMENT_PROVIDER === "demo";
+}
+
+function licencePaymentProviderConfigured(env: Pick<Bindings, "APP_ENV" | "PAYMENT_PROVIDER" | "PAYMENT_ENDPOINT" | "PAYMENT_TOKEN" | "PAYMENT_WEBHOOK_SECRET" | "PAYFAST_MERCHANT_ID" | "PAYFAST_MERCHANT_KEY" | "PAYFAST_NOTIFY_URL">): boolean {
+  return demoPaymentEnabled(env) || paymentProviderConfigured(env);
+}
+
 function paymentProviderConfigured(env: Pick<Bindings, "PAYMENT_PROVIDER" | "PAYMENT_ENDPOINT" | "PAYMENT_TOKEN" | "PAYMENT_WEBHOOK_SECRET" | "PAYFAST_MERCHANT_ID" | "PAYFAST_MERCHANT_KEY" | "PAYFAST_NOTIFY_URL">): boolean {
+  if (env.PAYMENT_PROVIDER === "demo") return false;
   if (env.PAYMENT_PROVIDER === "payfast") return Boolean(env.PAYFAST_MERCHANT_ID && env.PAYFAST_MERCHANT_KEY && env.PAYFAST_NOTIFY_URL && env.PAYMENT_WEBHOOK_SECRET);
   return Boolean(env.PAYMENT_PROVIDER && env.PAYMENT_ENDPOINT && env.PAYMENT_TOKEN && env.PAYMENT_WEBHOOK_SECRET);
 }
@@ -2201,7 +2260,7 @@ app.get("/api/my/purchases", async (c) => {
     c.env.DB.prepare("SELECT id, credits, amount_cents, currency, status, created_at, paid_at FROM buyer_credit_purchases WHERE organization_id = ? AND buyer_id = ?").bind(user.organizationId, user.id),
   ]);
   const results = [
-    ...(licences.results as Record<string, unknown>[]).map((row) => ({ id: String(row.id), kind: "licence", title: String(row.asset_title), status: String(row.status), amountCents: Number(row.price_cents), currency: "ZAR", createdAt: String(row.created_at), details: `${row.licence_type} - ${row.territory} - ${row.duration_days} days`, referenceId: String(row.asset_id) })),
+    ...(licences.results as Record<string, unknown>[]).map((row) => ({ id: String(row.id), kind: "licence", title: String(row.asset_title), status: String(row.status), amountCents: Number(row.price_cents), currency: "ZAR", createdAt: String(row.created_at), details: `${row.licence_type} - ${row.territory} - ${row.duration_days} days`, referenceId: String(row.id), assetId: String(row.asset_id) })),
     ...(photographerSubscriptions.results as Record<string, unknown>[]).map((row) => ({ id: String(row.id), kind: "photographer_subscription", title: `Subscription to ${String(row.photographer_name)}`, status: String(row.status), amountCents: Number(row.price_cents), currency: String(row.currency), createdAt: String(row.created_at), details: `${row.duration_days} days`, referenceId: String(row.id) })),
     ...(platformSubscriptions.results as Record<string, unknown>[]).map((row) => ({ id: String(row.id), kind: "platform_subscription", title: "Veld Archive membership", status: String(row.status), amountCents: Number(row.price_cents), currency: String(row.currency), createdAt: String(row.created_at), details: `${String(row.interval)} Paystack plan`, referenceId: String(row.id) })),
     ...(platformPayments.results as Record<string, unknown>[]).map((row) => ({ id: String(row.event_id), kind: "platform_subscription_payment", title: "Veld Archive membership payment", status: String(row.status), amountCents: Number(row.amount_cents ?? 0), currency: String(row.currency ?? "ZAR"), createdAt: String(row.received_at), details: String(row.event_type), referenceId: String(row.subscription_id) })),
