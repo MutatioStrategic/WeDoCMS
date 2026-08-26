@@ -653,6 +653,38 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/checkout:
+    post:
+      operationId: createLicenceCheckout
+      summary: Create or reuse a licence contract and accepted terms
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CheckoutRequest' }
+      responses:
+        '200':
+          description: Existing pending licence contract reused
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LicenceCheckoutResponse' }
+        '201':
+          description: Pending licence contract created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LicenceCheckoutResponse' }
+        '401':
+          description: Authenticated buyer required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422':
+          description: Rights, release, or terms validation failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
   /api/payments/{licenceId}/session:
     post:
       operationId: createPaymentSession
@@ -664,6 +696,11 @@ paths:
           in: path
           required: true
           schema: { type: string, minLength: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CheckoutSessionRequest' }
       responses:
         '201':
           description: Hosted checkout URL returned
@@ -677,6 +714,41 @@ paths:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
         '503':
           description: Payment provider is unavailable or unconfigured
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/demo/payments/{licenceId}/complete:
+    get:
+      operationId: completeDemoLicencePayment
+      summary: Complete a licence through the explicitly non-production demo checkout
+      description: Demo-only server-side payment simulation. Production payment state is established by a verified provider webhook.
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: licenceId
+          in: path
+          required: true
+          schema: { type: string, minLength: 1 }
+      responses:
+        '303':
+          description: Licence marked paid in demo and redirected to the buyer account
+        '401':
+          description: Authenticated buyer required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: Demo checkout disabled or licence not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: Licence has not been initialized for demo checkout
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422':
+          description: Demo settlement failed
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
@@ -1015,6 +1087,39 @@ components:
         territory: { type: string, minLength: 1, maxLength: 80 }
         durationDays: { type: integer, minimum: 1, maximum: 3650 }
       additionalProperties: false
+    CheckoutRequest:
+      type: object
+      required: [assetId, licenceType, territory, durationDays, buyerAgreementVersion, paymentAgreementVersion, acceptBuyerTerms]
+      properties:
+        assetId: { type: string, minLength: 1 }
+        licenceType: { type: string, enum: [editorial, commercial, advertising, social, broadcast, exclusive] }
+        territory: { type: string, minLength: 1, maxLength: 80 }
+        durationDays: { type: integer, minimum: 1, maximum: 3650 }
+        buyerAgreementVersion: { type: string, enum: [buyer-marketplace-v1] }
+        paymentAgreementVersion: { type: string, enum: [payment-split-v1] }
+        acceptBuyerTerms: { type: boolean, enum: [true] }
+      additionalProperties: false
+    CheckoutSessionRequest:
+      type: object
+      required: [successUrl, cancelUrl]
+      properties:
+        successUrl: { type: string, format: uri, maxLength: 2048 }
+        cancelUrl: { type: string, format: uri, maxLength: 2048 }
+      additionalProperties: false
+    LicenceCheckoutResponse:
+      type: object
+      required: [licenceId, priceCents, currency, paymentRequired, purchaseStatus]
+      properties:
+        licenceId: { type: string }
+        licenceType: { type: string, enum: [editorial, commercial, advertising, social, broadcast, exclusive] }
+        priceCents: { type: integer, minimum: 0 }
+        currency: { type: string, enum: [ZAR] }
+        paymentRequired: { type: boolean, enum: [true] }
+        purchaseStatus: { type: string, enum: [not_charged_until_verified_checkout] }
+        existing: { type: boolean }
+        agreementsPersisted: { type: boolean, enum: [true] }
+        approvalStatus: { type: string, enum: [pending, auto_approved] }
+      additionalProperties: true
     CheckoutValidationResponse:
       type: object
       required: [assetId, priceCents, currency, monetizationModel, allowed, checks, blockingReasons]

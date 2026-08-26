@@ -15,6 +15,7 @@ import {
   LogIn,
   LogOut,
   MapPin,
+  Plus,
   RefreshCw,
   Search,
   ShieldCheck,
@@ -72,6 +73,9 @@ type Asset = {
   humanVerified?: boolean;
   authenticityConfidence?: number;
   contributor?: string | null;
+  monetizationModel?: string | null;
+  licensePriceCents?: number | null;
+  freeDownloadEnabled?: boolean;
 };
 
 type SearchResponse = {
@@ -100,6 +104,9 @@ type CreatorProfile = { id: string; slug: string; name: string; headline: string
 type AccountLifecycle = { emailVerified: boolean; mfaEnrolled: boolean; emailNotifications: boolean; productNotifications: boolean; exportStatus: string; deletionStatus: string; accountPortalUrl?: string | null };
 type AppNotification = { id: string; title: string; body: string; read_at?: string | null; created_at: string };
 type UserLightbox = { id: string; name: string; visibility: string; assetIds: string[]; assetCount: number };
+type BuyerLicenceRecord = { id: string; assetId: string; assetTitle: string; licenceType: string; territory: string; durationDays: number; priceCents: number; status: string; approvalStatus: string; createdAt: string; originalUrl: string | null };
+type CheckoutValidation = { allowed: boolean; blockingReasons: string[]; checks: Array<{ label: string; passed: boolean; detail: string }>; priceCents: number | null; currency: string; monetizationModel: string };
+type MarketplaceAgreementDocument = { type: "seller" | "buyer" | "payment"; version: string; title: string; sections: Array<{ heading: string; body: string }> };
 
 type HealthResponse = { ok?: boolean; status?: string; service?: string; version?: string; environment?: string };
 type MobileAuth = ReturnType<typeof useMobileAuth>;
@@ -119,14 +126,16 @@ const COLORS = {
   blueSoft: "#E5F0F4",
 };
 
-const tabs: Array<{ key: TabKey; label: string; icon: Icon }> = [
-  { key: "explore", label: "Explore", icon: Home },
-  { key: "search", label: "Search", icon: Search },
-  { key: "create", label: "Create", icon: FilePlus2 },
-  { key: "more", label: "More", icon: Activity },
-];
-
 type TabKey = "explore" | "search" | "create" | "more";
+
+function tabsForRole(role?: string): Array<{ key: TabKey; label: string; icon: Icon }> {
+  return [
+    { key: "explore", label: "Explore", icon: Home },
+    { key: "search", label: "Search", icon: Search },
+    { key: "create", label: role === "buyer" ? "Buyer" : role === "contributor" ? "Upload" : role === "editor" || role === "admin" ? "Upload" : "Sell", icon: role === "buyer" ? Layers3 : Plus },
+    { key: "more", label: "More", icon: Activity },
+  ];
+}
 
 function queryString(values: Record<string, string | undefined>) {
   return Object.entries(values)
@@ -367,6 +376,14 @@ type OnboardingWorkflow = Record<string, unknown> & {
 
 function messageFrom(body: { error?: unknown } | null, fallback: string) {
   return typeof body?.error === "string" ? body.error : fallback;
+}
+
+function formatZar(cents: number | null | undefined) {
+  return cents == null ? "Custom quote" : new Intl.NumberFormat("en-ZA", { style: "currency", currency: "ZAR", maximumFractionDigits: 0 }).format(cents / 100);
+}
+
+function newUploadIdempotencyKey() {
+  return `mobile-upload-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 function CheckField({ checked, label, onPress }: { checked: boolean; label: string; onPress: () => void }) {
@@ -646,17 +663,30 @@ function SellerLibrary({ session }: { session: MobileApiSession }) {
   return <View><View style={styles.progressCard}><Text style={styles.cardKind}>YOUR PHOTO LIBRARY</Text><Text style={styles.cardTitle}>{assets.length} owned record{assets.length === 1 ? "" : "s"}</Text><Text style={styles.cardMeta}>{assets.filter((asset) => asset.status === "published").length} published · {assets.filter((asset) => asset.status === "needs_review").length} held for review</Text></View>{message ? <View style={styles.notice}><ShieldCheck color={message.includes("saved") ? COLORS.green : COLORS.amber} size={18} /><Text style={styles.noticeText}>{message}</Text></View> : null}{!assets.length ? <EmptyState label="No uploaded records yet. Use Upload to submit your first photo." /> : <><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.libraryRow}>{assets.map((asset) => <Pressable key={asset.id} style={[styles.libraryItem, selected?.id === asset.id && styles.libraryItemActive]} onPress={() => choose(asset)}><Image source={{ uri: imageFor(asset) }} style={styles.libraryThumb} /><Text style={styles.cardTitle} numberOfLines={1}>{asset.title}</Text><Text style={styles.cardMeta}>{asset.status.replaceAll("_", " ")}</Text></Pressable>)}</ScrollView>{selected ? <View style={styles.formCard}><Text style={styles.cardKind}>SELLER-OWNED RECORD · {selected.status.replaceAll("_", " ")}</Text><Text style={styles.sectionTitle}>Update metadata</Text><Text style={styles.screenIntro}>Changes stay auditable and return to editorial review when required.</Text><Field label="Title" value={title} onChangeText={setTitle} placeholder="Asset title" /><Field label="Description" value={description} onChangeText={setDescription} placeholder="What is visible and what you can verify" multiline /><Field label="Caption (optional)" value={caption} onChangeText={setCaption} placeholder="Concise buyer-facing context" multiline /><Field label="City (optional)" value={city} onChangeText={setCity} placeholder="Evidence-backed location" /><Field label="Subject tags" value={tags} onChangeText={setTags} placeholder="Comma separated" /><Text style={styles.fieldLabel}>Rights status</Text><View style={styles.segmentRow}>{["pending", "editorial_only", "verified", "restricted"].map((value) => <Pressable key={value} style={[styles.compactSegment, rights === value && styles.segmentActive]} onPress={() => setRights(value)}><Text style={[styles.segmentText, rights === value && styles.segmentTextActive]}>{value.replaceAll("_", " ")}</Text></Pressable>)}</View><Pressable style={[styles.primaryButton, saving && styles.disabledButton]} disabled={saving} onPress={() => void save()}>{saving ? <ActivityIndicator color={COLORS.surface} /> : <Text style={styles.primaryButtonText}>Save metadata</Text>}</Pressable></View> : null}</>}</View>;
 }
 
+function MobileBuyerHome({ session }: { session: MobileApiSession }) {
+  const [licences, setLicences] = useState<BuyerLicenceRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [message, setMessage] = useState("");
+  const load = useCallback(async () => { setLoading(true); const response = await apiRequest<{ results: BuyerLicenceRecord[]; error?: string }>("/api/my/licences", session); setLoading(false); if (response.status === 200) { setLicences(response.body?.results ?? []); setMessage(""); } else { setLicences([]); setMessage(response.body?.error ?? "Your licences are temporarily unavailable."); } }, [session]);
+  useEffect(() => { void load(); }, [load]);
+  const continuePayment = async (licence: BuyerLicenceRecord) => { const response = await apiRequest<{ checkoutUrl?: string; error?: string }>(`/api/payments/${encodeURIComponent(licence.id)}/session`, session, { method: "POST", body: { successUrl: `${API_BASE_URL}/buyer?licence=${encodeURIComponent(licence.id)}&payment=complete`, cancelUrl: `${API_BASE_URL}/buyer?licence=${encodeURIComponent(licence.id)}&payment=cancelled` } }); if (response.status === 201 && response.body?.checkoutUrl) await Linking.openURL(response.body.checkoutUrl); else setMessage(`The pending licence is safe. ${response.body?.error ?? "Paystack checkout could not be opened."}`); };
+  const openOriginal = async (licence: BuyerLicenceRecord) => { if (!licence.originalUrl) { setMessage("The original is still being prepared."); return; } const response = await fetch(`${API_BASE_URL}${licence.originalUrl}`, { headers: mobileSessionHeaders(session), redirect: "follow" }); if (!response.ok) { setMessage("The licensed original is not available yet."); return; } await Linking.openURL(response.url); };
+  return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}><Text style={styles.eyebrow}>BUYER WORKSPACE</Text><Text style={styles.screenTitle}>From search to controlled delivery</Text><Text style={styles.screenIntro}>Use Search to inspect an asset, then validate rights, accept the current terms, and pay without losing your place.</Text><View style={styles.mobileFlowSteps}>{[["1", "Search"], ["2", "Inspect"], ["3", "Validate"], ["4", "Pay"], ["5", "Deliver"]].map(([number, label]) => <View key={number} style={styles.mobileFlowStep}><Text style={styles.stepNumber}>{number}</Text><Text style={styles.cardTitle}>{label}</Text></View>)}</View><View style={styles.inlineNote}><ShieldCheck color={COLORS.blue} size={17} /><Text style={styles.inlineNoteText}>A Paystack redirect is not proof of payment. Original access appears only after the signed webhook updates the licence.</Text></View><SectionHeader title="Licences & delivery" action="Refresh" onPress={() => void load()} />{loading ? <LoadingState label="Loading licence requests" /> : message && !licences.length ? <ErrorState message={message} onRetry={load} /> : licences.length ? <View style={styles.stack}>{licences.map((licence) => <View key={licence.id} style={styles.listCard}><View style={styles.cardLabelRow}><Text style={styles.cardKind}>{licence.status.toUpperCase()}</Text><Text style={styles.cardKind}>{formatZar(licence.priceCents)}</Text></View><Text style={styles.cardTitle}>{licence.assetTitle}</Text><Text style={styles.cardMeta}>{licence.licenceType} · {licence.territory} · {licence.durationDays} days</Text>{licence.status === "pending" ? <Pressable style={styles.secondaryButton} onPress={() => void continuePayment(licence)}><Text style={styles.secondaryButtonText}>Continue payment</Text></Pressable> : licence.status === "paid" ? <Pressable style={styles.secondaryButton} onPress={() => void openOriginal(licence)}><Text style={styles.secondaryButtonText}>Open licensed original</Text></Pressable> : null}</View>)}</View> : <EmptyState label="No licence requests yet. Open Search, choose an asset, then tap Licence media." />}{message && licences.length ? <View style={styles.notice}><ShieldCheck color={COLORS.amber} size={18} /><Text style={styles.noticeText}>{message}</Text></View> : null}</ScrollView>;
+}
+
 function CreateScreen({ auth, initialAuthMode = "signup" }: { auth: MobileAuth; initialAuthMode?: "signin" | "signup" }) {
-  const [section, setSection] = useState<"onboarding" | "upload" | "library">("onboarding");
+  const [section, setSection] = useState<"onboarding" | "upload" | "library">("upload");
   const [title, setTitle] = useState("");
   const [caption, setCaption] = useState("");
   const [city, setCity] = useState("");
   const [tags, setTags] = useState("");
   const [kind, setKind] = useState<"image" | "video">("image");
-  const [rights, setRights] = useState("verified");
+  const [rights, setRights] = useState("pending");
   const [selectedMedia, setSelectedMedia] = useState<ImagePicker.ImagePickerAsset | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [draftId, setDraftId] = useState("");
+  const [uploadIdempotencyKey, setUploadIdempotencyKey] = useState(() => newUploadIdempotencyKey());
 
   const pickMedia = async () => {
     if (kind === "video") {
@@ -679,10 +709,11 @@ function CreateScreen({ auth, initialAuthMode = "signup" }: { auth: MobileAuth; 
   const submit = async () => {
     if (!auth.session) { setMessage("Sign in with a contributor account before submitting."); return; }
     if (!title.trim()) { setMessage("A title is required."); return; }
+    if (kind === "video") { setMessage("Video uploads are not available in the native picker yet. Submit video from the web media studio."); return; }
     if (!selectedMedia) { setMessage("Choose an image before submitting."); return; }
     setSaving(true);
     setMessage(null);
-    const response = await apiPost<{ id?: string; error?: string }>("/api/assets", {
+    const payload = {
       kind,
       title: title.trim(),
       description: caption.trim(),
@@ -693,23 +724,44 @@ function CreateScreen({ auth, initialAuthMode = "signup" }: { auth: MobileAuth; 
       rightsStatus: rights,
       modelReleaseStatus: "unknown",
       propertyReleaseStatus: "unknown",
-      monetizationModel: "free_editorial",
+      monetizationModel: "membership",
       artistLicenseKey: "cc_by_4_0",
       artistLicenseVersion: "4.0",
       artistLicenseUrl: "https://creativecommons.org/licenses/by/4.0/",
-    }, auth.session);
-    setSaving(false);
-    if (response.status === 201 && response.body && "id" in response.body) {
+    };
+    let currentDraftId = draftId;
+    const creating = !currentDraftId;
+    let response = currentDraftId
+      ? await apiRequest<{ error?: string }>(`/api/assets/${encodeURIComponent(currentDraftId)}`, auth.session, { method: "PATCH", body: payload })
+      : await apiPost<{ id?: string; error?: string }>("/api/assets", payload, auth.session);
+    if (!currentDraftId && response.status === 201 && response.body && "id" in response.body && response.body.id) {
+      currentDraftId = response.body.id;
+      setDraftId(currentDraftId);
+    }
+    if ((creating && response.status === 201) || (!creating && response.status === 200)) {
       const mediaType = selectedMedia.mimeType ?? "image/jpeg";
       const fileResponse = await fetch(selectedMedia.uri);
       const mediaBlob = await fileResponse.blob();
-      const upload = await apiPost<{ uploadId?: string; uploadUrl?: string; error?: string }>("/api/uploads", {
+      let currentUploadKey = uploadIdempotencyKey;
+      let upload = await apiPost<{ uploadId?: string; uploadUrl?: string; error?: string }>("/api/uploads", {
         filename: selectedMedia.fileName ?? `veld-${Date.now()}.jpg`,
         contentType: mediaType,
         sizeBytes: selectedMedia.fileSize ?? mediaBlob.size,
-        assetId: response.body.id,
+        assetId: currentDraftId,
+        idempotencyKey: currentUploadKey,
       }, auth.session);
-      if (upload.status !== 201 || !upload.body?.uploadId || !upload.body.uploadUrl) {
+      if (upload.status === 409 && upload.body?.error?.includes("failed or expired")) {
+        currentUploadKey = newUploadIdempotencyKey();
+        setUploadIdempotencyKey(currentUploadKey);
+        upload = await apiPost<{ uploadId?: string; uploadUrl?: string; error?: string }>("/api/uploads", {
+          filename: selectedMedia.fileName ?? `veld-${Date.now()}.jpg`,
+          contentType: mediaType,
+          sizeBytes: selectedMedia.fileSize ?? mediaBlob.size,
+          assetId: currentDraftId,
+          idempotencyKey: currentUploadKey,
+        }, auth.session);
+      }
+      if (![200, 201].includes(upload.status) || !upload.body?.uploadId || !upload.body.uploadUrl) {
         setMessage(upload.body?.error ?? "The media upload session could not be created.");
         setSaving(false);
         return;
@@ -720,16 +772,23 @@ function CreateScreen({ auth, initialAuthMode = "signup" }: { auth: MobileAuth; 
       if (completion.status >= 300) { setMessage(completion.body?.error ?? "The media upload could not be completed."); setSaving(false); return; }
       setMessage("Draft submitted for editorial review.");
       setTitle(""); setCaption(""); setCity(""); setTags(""); setSelectedMedia(null);
+      setDraftId("");
+      setUploadIdempotencyKey(newUploadIdempotencyKey());
+      setSaving(false);
     } else if (response.status === 401 || response.status === 403) {
       setMessage("Sign in with a contributor account to submit assets.");
+      setSaving(false);
     } else {
       setMessage(response.body?.error ?? "The draft could not be submitted.");
+      setSaving(false);
     }
   };
 
   if (auth.loading && !auth.session) return <ScrollView contentContainerStyle={styles.scrollContent}><Text style={styles.eyebrow}>CONTRIBUTE</Text><Text style={styles.screenTitle}>Add to the archive</Text><LoadingState label="Restoring contributor access" /></ScrollView>;
 
   if (!auth.session) return <SellerAccess auth={auth} initialMode={initialAuthMode} />;
+
+  if (auth.session.user.role === "buyer") return <MobileBuyerHome session={auth.session} />;
 
   if (!["contributor", "editor", "admin"].includes(auth.session.user.role)) return (
     <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
@@ -809,7 +868,7 @@ function AnalyticsScreen({ session, onBack }: { session: MobileApiSession; onBac
 function AccountScreen({ auth, onBack, onSell, onSignIn }: { auth: MobileAuth; onBack: () => void; onSell: () => void; onSignIn: () => void }) {
   const [account, setAccount] = useState<AccountLifecycle | null>(null);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
-  const [licences, setLicences] = useState<Array<Record<string, unknown>>>([]);
+  const [licences, setLicences] = useState<BuyerLicenceRecord[]>([]);
   const [subscription, setSubscription] = useState<Record<string, any> | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const session = auth.session;
@@ -818,7 +877,7 @@ function AccountScreen({ auth, onBack, onSell, onSignIn }: { auth: MobileAuth; o
     const [accountResponse, notificationResponse, licenceResponse, subscriptionResponse] = await Promise.all([
       apiRequest<AccountLifecycle>("/api/account/lifecycle", session),
       apiRequest<{ results: AppNotification[] }>("/api/notifications", session),
-      apiRequest<{ results: Array<Record<string, unknown>> }>("/api/licences/history", session),
+      apiRequest<{ results: BuyerLicenceRecord[] }>("/api/my/licences", session),
       ["buyer", "admin"].includes(session.user.role) ? apiRequest<Record<string, any>>("/api/subscription", session) : Promise.resolve({ status: 403, body: null }),
     ]);
     setAccount(accountResponse.status === 200 ? accountResponse.body : null);
@@ -834,6 +893,8 @@ function AccountScreen({ auth, onBack, onSell, onSignIn }: { auth: MobileAuth; o
   const markRead = async (id: string) => { await apiRequest(`/api/notifications/${encodeURIComponent(id)}/read`, session, { method: "POST", body: {} }); await load(); };
   const startSubscription = async () => { const response = await apiRequest<{ checkoutUrl?: string; error?: string }>("/api/subscription/session", session, { method: "POST", body: { successUrl: `${API_BASE_URL}/account?subscription=success`, cancelUrl: `${API_BASE_URL}/account?subscription=cancelled` } }); if (response.status === 201 && response.body?.checkoutUrl) await Linking.openURL(response.body.checkoutUrl); else setMessage(messageFrom(response.body, "Paystack checkout could not be started.")); };
   const manageSubscription = async () => { const response = await apiRequest<{ manageUrl?: string; error?: string }>("/api/subscription/manage-link", session, { method: "POST", body: {} }); if (response.status === 200 && response.body?.manageUrl) await Linking.openURL(response.body.manageUrl); else setMessage(messageFrom(response.body, "Subscription management is unavailable.")); };
+  const continueLicencePayment = async (licence: BuyerLicenceRecord) => { const response = await apiRequest<{ checkoutUrl?: string; error?: string }>(`/api/payments/${encodeURIComponent(licence.id)}/session`, session, { method: "POST", body: { successUrl: `${API_BASE_URL}/buyer?licence=${encodeURIComponent(licence.id)}&payment=complete`, cancelUrl: `${API_BASE_URL}/buyer?licence=${encodeURIComponent(licence.id)}&payment=cancelled` } }); if (response.status === 201 && response.body?.checkoutUrl) await Linking.openURL(response.body.checkoutUrl); else setMessage(`The pending licence is safe. ${response.body?.error ?? "Paystack checkout could not be opened."}`); };
+  const openLicensedOriginal = async (licence: BuyerLicenceRecord) => { if (!licence.originalUrl) { setMessage("The paid original is still being prepared."); return; } const response = await fetch(`${API_BASE_URL}${licence.originalUrl}`, { headers: mobileSessionHeaders(session), redirect: "follow" }); if (!response.ok) { const body = await response.json().catch(() => null) as { error?: string } | null; setMessage(body?.error ?? "The licensed original is unavailable."); return; } await Linking.openURL(response.url); };
   return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}><Pressable onPress={onBack}><Text style={styles.sectionAction}>← More</Text></Pressable><Text style={styles.eyebrow}>ACCOUNT & ORGANISATION</Text><Text style={styles.screenTitle}>Control your account</Text><View style={styles.accountCard}><View style={{ flex: 1 }}><Text style={styles.cardTitle}>{session.user.displayName}</Text><Text style={styles.cardMeta}>{session.user.email} · {session.user.organizationName} · {session.user.role}</Text></View><Pressable accessibilityLabel="Sign out" onPress={() => void auth.signOut()}><LogOut color={COLORS.muted} size={19} /></Pressable></View>{message ? <View style={styles.notice}><CheckCircle2 color={COLORS.green} size={18} /><Text style={styles.noticeText}>{message}</Text></View> : null}{!account ? <LoadingState label="Loading account controls" /> : <>
     <View style={styles.formCard}><Text style={styles.cardKind}>IDENTITY SECURITY</Text><Text style={styles.cardTitle}>Email, password and MFA</Text><Text style={styles.cardMeta}>{account.emailVerified ? "Email verified." : "Email verification required."} {account.mfaEnrolled ? "MFA enrolled." : "MFA not enrolled."}</Text>{account.accountPortalUrl ? <Pressable style={styles.secondaryButton} onPress={() => void Linking.openURL(account.accountPortalUrl ?? "")}><Text style={styles.secondaryButtonText}>Manage identity security</Text></Pressable> : null}</View>
     <View style={styles.formCard}><Text style={styles.cardKind}>NOTIFICATIONS</Text><Text style={styles.cardTitle}>Keep only useful alerts</Text><CheckField checked={account.emailNotifications} onPress={() => void updatePreferences({ emailNotifications: !account.emailNotifications, productNotifications: account.productNotifications })} label="Essential email notifications" /><CheckField checked={account.productNotifications} onPress={() => void updatePreferences({ emailNotifications: account.emailNotifications, productNotifications: !account.productNotifications })} label="Product and marketplace updates" /></View>
@@ -841,7 +902,7 @@ function AccountScreen({ auth, onBack, onSell, onSignIn }: { auth: MobileAuth; o
   </>}
   {subscription ? <View style={styles.formCard}><Text style={styles.cardKind}>BUYER SUBSCRIPTION</Text><Text style={styles.cardTitle}>Archive access · {String(subscription.subscription?.status ?? "not started").replaceAll("_", " ")}</Text><Text style={styles.cardMeta}>{subscription.plan ? `R${Math.round(Number(subscription.plan.amountCents ?? 0) / 100).toLocaleString("en-ZA")} / ${String(subscription.plan.interval)}. Paystack webhook events are the source of truth.` : "The Paystack plan is not configured."}</Text>{subscription.configured && !subscription.subscription ? <Pressable style={styles.primaryButton} onPress={() => void startSubscription()}><Text style={styles.primaryButtonText}>Continue with Paystack</Text></Pressable> : null}{subscription.subscription?.provider_subscription_code ? <Pressable style={styles.secondaryButton} onPress={() => void manageSubscription()}><Text style={styles.secondaryButtonText}>Manage billing</Text></Pressable> : null}</View> : null}
   <SectionHeader title="Alerts" action={`${notifications.filter((item) => !item.read_at).length} unread`} onPress={() => undefined} /><View style={styles.stack}>{notifications.length ? notifications.slice(0, 10).map((item) => <View key={item.id} style={styles.listCard}><Text style={styles.cardTitle}>{item.title}</Text><Text style={styles.cardMeta}>{item.body}</Text><Text style={styles.cardMeta}>{new Date(item.created_at).toLocaleDateString("en-ZA")}</Text>{!item.read_at ? <Pressable onPress={() => void markRead(item.id)}><Text style={styles.sectionAction}>Mark read</Text></Pressable> : null}</View>) : <Text style={styles.stateText}>No alerts yet.</Text>}</View>
-  <SectionHeader title="Licence history" action={`${licences.length}`} onPress={() => undefined} /><View style={styles.stack}>{licences.length ? licences.slice(0, 20).map((licence) => <View key={String(licence.id)} style={styles.listCard}><Text style={styles.cardTitle}>{String(licence.asset_title)}</Text><Text style={styles.cardMeta}>{String(licence.product_code ?? licence.licence_type)} · {String(licence.territory)} · {String(licence.duration_days)} days</Text></View>) : <Text style={styles.stateText}>No licences recorded for this workspace.</Text>}</View>
+  <SectionHeader title="Licences & delivery" action={`${licences.length}`} onPress={() => void load()} /><View style={styles.stack}>{licences.length ? licences.slice(0, 20).map((licence) => <View key={licence.id} style={styles.listCard}><View style={styles.cardLabelRow}><Text style={styles.cardKind}>{licence.status.toUpperCase()}</Text><Text style={styles.cardKind}>{formatZar(licence.priceCents)}</Text></View><Text style={styles.cardTitle}>{licence.assetTitle}</Text><Text style={styles.cardMeta}>{licence.licenceType} · {licence.territory} · {licence.durationDays} days · approval {licence.approvalStatus}</Text>{licence.status === "pending" ? <Pressable style={styles.secondaryButton} onPress={() => void continueLicencePayment(licence)}><Text style={styles.secondaryButtonText}>Continue payment</Text></Pressable> : licence.status === "paid" ? <Pressable style={styles.secondaryButton} onPress={() => void openLicensedOriginal(licence)}><Text style={styles.secondaryButtonText}>Open licensed original</Text></Pressable> : null}</View>) : <Text style={styles.stateText}>No licences yet. Open an asset and choose Licence media.</Text>}</View>
   </ScrollView>;
 }
 
@@ -916,7 +977,117 @@ function SearchResult({ asset, onPress }: { asset: Asset; onPress: () => void })
   return <Pressable style={styles.searchResult} onPress={onPress}><Image source={{ uri: imageFor(asset) }} style={styles.resultImage} /><View style={styles.resultCopy}><View style={styles.cardLabelRow}><Text style={styles.cardKind}>{asset.kind === "video" ? "VIDEO" : "IMAGE"}</Text>{asset.humanVerified ? <CheckCircle2 color={COLORS.green} size={15} /> : null}</View><Text style={styles.cardTitle} numberOfLines={2}>{asset.title}</Text><Text style={styles.cardMeta} numberOfLines={1}>{locationFor(asset)}</Text></View><ChevronRight color={COLORS.muted} size={18} /></Pressable>;
 }
 
+function BuyerAccessCard({ auth }: { auth: MobileAuth }) {
+  const [mode, setMode] = useState<"signup" | "signin">("signup");
+  const [displayName, setDisplayName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [message, setMessage] = useState("");
+  const submit = async () => {
+    setMessage("");
+    try {
+      if (mode === "signup") {
+        const result = await auth.signUp(email, password, displayName, "buyer");
+        setPassword("");
+        setMessage(result.confirmationRequired ? "Buyer account created. Confirm the email on this device, then return to this asset." : "Buyer account ready. Continue with licence validation below.");
+      } else {
+        await auth.signIn(email, password, "buyer");
+        setPassword("");
+      }
+    } catch (caught) {
+      setMessage(caught instanceof Error ? caught.message : "Buyer access could not be completed.");
+    }
+  };
+  const disabled = auth.loading || !email.trim() || password.length < 8 || mode === "signup" && !displayName.trim();
+  return <View style={styles.buyerAccessCard}><Text style={styles.cardKind}>BUYER ACCESS · RETURN TO THIS ASSET</Text><Text style={styles.sectionTitle}>{mode === "signup" ? "Create your buyer account" : "Sign in to continue"}</Text><Text style={styles.cardMeta}>Your selected media stays open. Rights, price, and terms are checked after identity verification.</Text>{mode === "signup" ? <Field label="Display name" value={displayName} onChangeText={setDisplayName} placeholder="How your name should appear" autoCapitalize="words" /> : null}<Field label="Email" value={email} onChangeText={setEmail} placeholder="you@example.com" autoCapitalize="none" keyboardType="email-address" /><Field label="Password" value={password} onChangeText={setPassword} placeholder="At least 8 characters" secureTextEntry autoCapitalize="none" />{(message || auth.error) ? <View style={styles.notice}><ShieldCheck color={COLORS.amber} size={18} /><Text style={styles.noticeText}>{message || auth.error}</Text></View> : null}<Pressable style={[styles.primaryButton, disabled && styles.disabledButton]} disabled={disabled} onPress={() => void submit()}>{auth.loading ? <ActivityIndicator color={COLORS.surface} /> : <><LogIn color={COLORS.surface} size={17} /><Text style={styles.primaryButtonText}>{mode === "signup" ? "Create buyer account" : "Sign in and continue"}</Text></>}</Pressable><Pressable style={styles.secondaryButton} onPress={() => { setMode((current) => current === "signup" ? "signin" : "signup"); setMessage(""); setPassword(""); }}><Text style={styles.secondaryButtonText}>{mode === "signup" ? "I already have an account" : "Create a buyer account"}</Text></Pressable></View>;
+}
+
 function AssetDetail({ asset, onClose, auth }: { asset: Asset | null; onClose: () => void; auth: MobileAuth }) {
+  const [lightboxes, setLightboxes] = useState<UserLightbox[]>([]);
+  const [saveOpen, setSaveOpen] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [message, setMessage] = useState<string | null>(null);
+  const [checkoutOpen, setCheckoutOpen] = useState(false);
+  const [licenceType, setLicenceType] = useState("commercial");
+  const [territory, setTerritory] = useState("Worldwide");
+  const [durationDays, setDurationDays] = useState(365);
+  const [validation, setValidation] = useState<CheckoutValidation | null>(null);
+  const [agreements, setAgreements] = useState<MarketplaceAgreementDocument[]>([]);
+  const [termsOpen, setTermsOpen] = useState(false);
+  const [termsAccepted, setTermsAccepted] = useState(false);
+  const [pendingLicenceId, setPendingLicenceId] = useState("");
+  const [checkoutBusy, setCheckoutBusy] = useState(false);
+  const session = auth.session;
+  const loadLightboxes = useCallback(async () => { if (!session) return; const response = await apiRequest<{ results?: UserLightbox[] }>("/api/lightboxes", session); setLightboxes(response.body?.results ?? []); }, [session]);
+  useEffect(() => { if (asset && session) void loadLightboxes(); }, [asset, loadLightboxes, session]);
+
+  const loadAgreements = useCallback(async () => {
+    try {
+      const response = await apiGet<{ documents: MarketplaceAgreementDocument[] }>("/api/legal/agreements");
+      setAgreements(response.documents.filter((document) => document.type === "buyer" || document.type === "payment"));
+    } catch {
+      setAgreements([]); setMessage("The current buyer and payment terms are unavailable. Checkout remains blocked.");
+    }
+  }, []);
+
+  const validate = useCallback(async () => {
+    if (!asset) return;
+    setCheckoutBusy(true); setValidation(null); setTermsAccepted(false); setMessage("Checking rights, releases, scope, and price…");
+    const response = await apiPost<CheckoutValidation & { error?: string }>("/api/checkout/validate", { assetId: asset.id, licenceType, territory: territory.trim(), durationDays }, session);
+    setCheckoutBusy(false);
+    if (response.status !== 200 || !response.body) { setMessage(response.body?.error ?? "Licence validation is unavailable. No request or payment was created."); return; }
+    setValidation(response.body); setMessage(response.body.allowed ? "Server validation passed. Read and accept both current agreements to continue." : response.body.blockingReasons[0] ?? "This licence is blocked.");
+  }, [asset, durationDays, licenceType, session, territory]);
+
+  useEffect(() => { if (checkoutOpen && session) { void validate(); void loadAgreements(); } }, [checkoutOpen, loadAgreements, session, validate]);
+
+  const save = async (lightboxId: string) => { if (!asset || !session) return; const response = await apiRequest<{ error?: string }>(`/api/lightboxes/${encodeURIComponent(lightboxId)}/assets`, session, { method: "POST", body: { assetId: asset.id } }); setMessage(response.status === 201 ? "Saved to your lightbox." : messageFrom(response.body, "The asset could not be saved.")); await loadLightboxes(); };
+  const createAndSave = async () => { if (!asset || !session || !newName.trim()) return; const created = await apiRequest<{ id?: string; error?: string }>("/api/lightboxes", session, { method: "POST", body: { name: newName.trim(), visibility: "private" } }); if (created.status !== 201 || !created.body?.id) { setMessage(messageFrom(created.body, "The lightbox could not be created.")); return; } setNewName(""); await save(created.body.id); };
+
+  async function openPayment(licenceId: string) {
+    if (!session) return;
+    setCheckoutBusy(true); setMessage("Opening Paystack’s hosted checkout…");
+    const response = await apiRequest<{ checkoutUrl?: string; error?: string }>(`/api/payments/${encodeURIComponent(licenceId)}/session`, session, { method: "POST", body: { successUrl: `${API_BASE_URL}/buyer?licence=${encodeURIComponent(licenceId)}&payment=complete`, cancelUrl: `${API_BASE_URL}/buyer?licence=${encodeURIComponent(licenceId)}&payment=cancelled` } });
+    setCheckoutBusy(false);
+    if (response.status !== 201 || !response.body?.checkoutUrl) { setMessage(`Licence request saved. ${response.body?.error ?? "Paystack checkout could not be opened."} Tap Continue payment to retry without creating a duplicate.`); return; }
+    await Linking.openURL(response.body.checkoutUrl);
+  }
+
+  async function createLicence() {
+    if (!asset || !session) return;
+    if (pendingLicenceId) { await openPayment(pendingLicenceId); return; }
+    const buyerTerms = agreements.find((document) => document.type === "buyer");
+    const paymentTerms = agreements.find((document) => document.type === "payment");
+    if (!validation?.allowed || !termsAccepted || !buyerTerms || !paymentTerms) { setMessage("Complete validation, read both current agreements, and accept the terms before continuing."); return; }
+    setCheckoutBusy(true); setMessage("Saving your licence request and agreement versions…");
+    const response = await apiRequest<{ licenceId?: string; error?: string; blockingReasons?: string[] }>("/api/checkout", session, { method: "POST", body: { assetId: asset.id, licenceType, territory: territory.trim(), durationDays, buyerAgreementVersion: buyerTerms.version, paymentAgreementVersion: paymentTerms.version, acceptBuyerTerms: true } });
+    setCheckoutBusy(false);
+    if (![200, 201].includes(response.status) || !response.body?.licenceId) { setMessage(response.body?.blockingReasons?.[0] ?? response.body?.error ?? "The licence request could not be saved. No payment was created."); return; }
+    setPendingLicenceId(response.body.licenceId);
+    await openPayment(response.body.licenceId);
+  }
+
+  async function openFreeDownload() {
+    if (!asset) return;
+    if (!session) { setCheckoutOpen(true); return; }
+    setCheckoutBusy(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/assets/${encodeURIComponent(asset.id)}/original`, { headers: mobileSessionHeaders(session), redirect: "follow" });
+      if (!response.ok) { const body = await response.json().catch(() => null) as { error?: string } | null; setMessage(body?.error ?? "This original is not available for this account."); return; }
+      await Linking.openURL(response.url);
+    } finally { setCheckoutBusy(false); }
+  }
+
+  if (!asset) return null;
+  const model = asset.monetizationModel ?? "membership";
+  const requestLabel = asset.freeDownloadEnabled ? session ? "Download free photo" : "Create buyer account for free download" : model === "custom_quote" ? "Request custom quote" : "Licence media";
+  const licenceTypes = ["editorial", "commercial", "advertising", "social", "broadcast", "exclusive"];
+  const buyerTerms = agreements.find((document) => document.type === "buyer");
+  const paymentTerms = agreements.find((document) => document.type === "payment");
+  return <Modal animationType="slide" transparent visible onRequestClose={onClose}><View style={styles.modalBackdrop}><View style={styles.modalSheet}><View style={styles.modalHeader}><Text style={styles.modalTitle}>Asset detail</Text><Pressable accessibilityLabel="Close asset details" onPress={onClose} style={styles.closeButton}><X color={COLORS.ink} size={20} /></Pressable></View><ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}><Image source={{ uri: imageFor(asset) }} style={styles.detailImage} /><Text style={styles.eyebrow}>{asset.kind === "video" ? "VIDEO" : "IMAGE"}</Text><Text style={styles.detailTitle}>{asset.title}</Text><Text style={styles.detailMeta}><MapPin color={COLORS.muted} size={14} /> {locationFor(asset)}</Text>{asset.caption || asset.description ? <Text style={styles.detailDescription}>{asset.caption || asset.description}</Text> : null}<View style={styles.detailFacts}><Fact label="Rights" value={asset.rightsStatus ?? "Pending"} /><Fact label="Model release" value={asset.modelReleaseStatus ?? "Unknown"} /><Fact label="Confidence" value={`${confidenceFor(asset)}%`} /></View>{[...(asset.subjectTags ?? []), ...(asset.culturalTags ?? [])].length ? <View style={styles.tagWrap}>{[...(asset.subjectTags ?? []), ...(asset.culturalTags ?? [])].map((tag) => <Text key={tag} style={styles.tag}>{tag}</Text>)}</View> : null}<Pressable style={styles.primaryButton} disabled={checkoutBusy} onPress={() => asset.freeDownloadEnabled ? void openFreeDownload() : model === "custom_quote" ? (setCheckoutOpen(true), setMessage("This seller requires a custom quote. No payment or licence request has been created.")) : setCheckoutOpen(true)}><ShieldCheck color={COLORS.surface} size={17} /><Text style={styles.primaryButtonText}>{requestLabel}</Text></Pressable>{checkoutOpen ? <View style={styles.mobileCheckout}><Text style={styles.cardKind}>LICENCE REQUEST</Text><Text style={styles.sectionTitle}>{session ? "Validate before money moves" : "Keep this asset while you sign up"}</Text><Text style={styles.cardMeta}>{session ? "The Worker is authoritative for rights, price, agreements, and payment state. Only a signed Paystack webhook releases the original." : "Create a buyer account here. This asset remains selected when verification completes."}</Text>{!session ? <BuyerAccessCard auth={auth} /> : model === "custom_quote" ? null : <><Text style={styles.fieldLabel}>Licence type</Text><View style={styles.choiceWrap}>{licenceTypes.map((value) => <Pressable accessibilityRole="radio" accessibilityState={{ checked: licenceType === value }} key={value} style={[styles.choiceChip, licenceType === value && styles.choiceChipActive]} onPress={() => { setLicenceType(value); setValidation(null); setTermsAccepted(false); }}><Text style={[styles.choiceChipText, licenceType === value && styles.choiceChipTextActive]}>{value}</Text></Pressable>)}</View><Field label="Territory" value={territory} onChangeText={(value) => { setTerritory(value); setValidation(null); setTermsAccepted(false); }} placeholder="Worldwide or named territory" /><Text style={styles.fieldLabel}>Duration</Text><View style={styles.segmentRow}>{[[30, "30 days"], [90, "90 days"], [365, "1 year"], [730, "2 years"]].map(([value, label]) => <Pressable accessibilityRole="radio" accessibilityState={{ checked: durationDays === value }} key={value} style={[styles.compactSegment, durationDays === value && styles.segmentActive]} onPress={() => { setDurationDays(Number(value)); setValidation(null); setTermsAccepted(false); }}><Text style={[styles.segmentText, durationDays === value && styles.segmentTextActive]}>{label}</Text></Pressable>)}</View><Pressable style={styles.secondaryButton} disabled={checkoutBusy || !territory.trim()} onPress={() => void validate()}>{checkoutBusy && !validation ? <ActivityIndicator color={COLORS.green} /> : <Text style={styles.secondaryButtonText}>{validation ? "Recheck licence" : "Check licence"}</Text>}</Pressable>{validation ? <View style={[styles.validationCard, validation.allowed ? styles.validationClear : styles.validationBlocked]}><View style={styles.validationHeading}><View><Text style={styles.cardKind}>SERVER VALIDATION</Text><Text style={styles.cardTitle}>{validation.allowed ? "Eligible to request" : "Licence blocked"}</Text></View><Text style={styles.validationPrice}>{formatZar(validation.priceCents)}</Text></View>{validation.checks.map((check) => <View style={styles.validationRow} key={check.label}>{check.passed ? <CheckCircle2 color={COLORS.green} size={18} /> : <X color="#9A4834" size={18} />}<View style={{ flex: 1 }}><Text style={styles.cardTitle}>{check.label}</Text><Text style={styles.cardMeta}>{check.detail}</Text></View></View>)}{validation.blockingReasons[0] ? <Text style={styles.blockingText}>{validation.blockingReasons[0]}</Text> : null}</View> : null}{validation?.allowed ? <View style={styles.termsCard}><Pressable style={styles.termsToggle} onPress={() => setTermsOpen((value) => !value)}><View style={{ flex: 1 }}><Text style={styles.cardKind}>CURRENT AGREEMENTS</Text><Text style={styles.cardTitle}>{buyerTerms?.version ?? "Buyer terms unavailable"} · {paymentTerms?.version ?? "Payment terms unavailable"}</Text></View><ChevronRight color={COLORS.muted} size={18} /></Pressable>{termsOpen ? agreements.map((document) => <View key={document.type} style={styles.termsDocument}><Text style={styles.sectionTitle}>{document.title}</Text>{document.sections.map((section) => <View key={section.heading}><Text style={styles.cardTitle}>{section.heading}</Text><Text style={styles.cardMeta}>{section.body}</Text></View>)}</View>) : null}<CheckField checked={termsAccepted} onPress={() => agreements.length === 2 && setTermsAccepted((value) => !value)} label="I have read and accept the selected licence, Buyer Licence Terms, and Paystack Payment Disclosure shown here." /><Pressable style={[styles.primaryButton, (checkoutBusy || !termsAccepted || agreements.length !== 2) && styles.disabledButton]} disabled={checkoutBusy || !termsAccepted || agreements.length !== 2} onPress={() => void createLicence()}>{checkoutBusy ? <ActivityIndicator color={COLORS.surface} /> : <Text style={styles.primaryButtonText}>{pendingLicenceId ? "Continue payment" : "Accept terms & continue to Paystack"}</Text>}</Pressable></View> : null}</>}{message ? <View style={styles.notice}><ShieldCheck color={message.includes("passed") || message.includes("Saved") ? COLORS.green : COLORS.amber} size={18} /><Text style={styles.noticeText}>{message}</Text></View> : null}</View> : null}<Pressable style={styles.secondaryButton} onPress={() => session ? setSaveOpen((value) => !value) : setCheckoutOpen(true)}><Heart color={COLORS.ink} size={16} /><Text style={styles.secondaryButtonText}>{saveOpen ? "Close lightboxes" : "Save to lightbox"}</Text></Pressable>{saveOpen && session ? <View style={styles.lightboxPanel}><Text style={styles.cardKind}>YOUR LIGHTBOXES</Text>{lightboxes.map((lightbox) => <Pressable key={lightbox.id} style={styles.lightboxRow} disabled={lightbox.assetIds.includes(asset.id)} onPress={() => void save(lightbox.id)}><View style={{ flex: 1 }}><Text style={styles.cardTitle}>{lightbox.name}</Text><Text style={styles.cardMeta}>{lightbox.assetCount} assets · {lightbox.visibility}</Text></View><Text style={styles.sectionAction}>{lightbox.assetIds.includes(asset.id) ? "Saved" : "Add"}</Text></Pressable>)}<Field label="New lightbox" value={newName} onChangeText={setNewName} placeholder="Brief, mood, or client" /><Pressable style={styles.secondaryButton} disabled={!newName.trim()} onPress={() => void createAndSave()}><Text style={styles.secondaryButtonText}>Create and save</Text></Pressable></View> : null}{asset.sourceUrl ? <Pressable style={styles.secondaryButton} onPress={() => void Linking.openURL(asset.sourceUrl ?? "")}><ArrowUpRight color={COLORS.ink} size={16} /><Text style={styles.secondaryButtonText}>Open source</Text></Pressable> : null}</ScrollView></View></View></Modal>;
+}
+
+function AssetDetailLegacy({ asset, onClose, auth }: { asset: Asset | null; onClose: () => void; auth: MobileAuth }) {
   const [lightboxes, setLightboxes] = useState<UserLightbox[]>([]);
   const [saveOpen, setSaveOpen] = useState(false);
   const [newName, setNewName] = useState("");
@@ -949,6 +1120,7 @@ export default function App() {
   const openSearch = (query: string) => { setSearchQuery(query); changeTab("search"); };
   const openAccount = () => { setMoreInitialView("account"); changeTab("more"); };
   const openCreate = (mode: "signin" | "signup") => { setCreateAuthMode(mode); changeTab("create"); };
+  const tabs = tabsForRole(auth.session?.user.role);
   return <SafeAreaView style={styles.app}><StatusBar style="dark" /><View style={styles.content}>{tab === "explore" ? <ExploreScreen onOpenAsset={setSelectedAsset} onSearch={openSearch} onAccount={openAccount} /> : tab === "search" ? <SearchScreen initialQuery={searchQuery} onOpenAsset={setSelectedAsset} auth={auth} /> : tab === "create" ? <CreateScreen auth={auth} initialAuthMode={createAuthMode} /> : <MoreScreen initialView={moreInitialView} auth={auth} onOpenAsset={setSelectedAsset} onSell={() => openCreate("signup")} onSignIn={() => { setMoreInitialView("menu"); openCreate("signin"); }} />}</View><View style={styles.tabBar}>{tabs.map(({ key, label, icon: TabIcon }) => { const active = tab === key; return <Pressable key={key} style={styles.tabItem} onPress={() => { if (key === "more") setMoreInitialView("menu"); if (key === "create") setCreateAuthMode("signup"); changeTab(key); }} accessibilityRole="tab" accessibilityState={{ selected: active }}><TabIcon color={active ? COLORS.green : COLORS.muted} size={21} strokeWidth={active ? 2.4 : 1.8} /><Text style={[styles.tabLabel, active && styles.tabLabelActive]}>{label}</Text></Pressable>; })}</View><AssetDetail asset={selectedAsset} onClose={() => setSelectedAsset(null)} auth={auth} /></SafeAreaView>;
 }
 
@@ -1100,4 +1272,23 @@ const styles = StyleSheet.create({
   tag: { color: COLORS.green, backgroundColor: COLORS.greenSoft, borderRadius: 15, paddingHorizontal: 10, paddingVertical: 7, fontSize: 11, fontWeight: "700" },
   secondaryButton: { minHeight: 46, borderWidth: 1, borderColor: COLORS.line, borderRadius: 12, backgroundColor: COLORS.surface, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 7, marginBottom: 10 },
   secondaryButtonText: { color: COLORS.ink, fontSize: 13, fontWeight: "800" },
+  buyerAccessCard: { backgroundColor: COLORS.surface, borderWidth: 1, borderColor: COLORS.line, borderRadius: 16, padding: 15, marginTop: 14, marginBottom: 14 },
+  mobileCheckout: { backgroundColor: COLORS.surface, borderWidth: 1, borderColor: COLORS.line, borderRadius: 16, padding: 15, marginBottom: 14 },
+  choiceWrap: { flexDirection: "row", flexWrap: "wrap", gap: 7, marginBottom: 16 },
+  choiceChip: { minHeight: 38, borderWidth: 1, borderColor: COLORS.line, borderRadius: 19, paddingHorizontal: 12, alignItems: "center", justifyContent: "center", backgroundColor: COLORS.paper },
+  choiceChipActive: { borderColor: COLORS.ink, backgroundColor: COLORS.ink },
+  choiceChipText: { color: COLORS.ink, fontSize: 11, fontWeight: "800", textTransform: "capitalize" },
+  choiceChipTextActive: { color: COLORS.surface },
+  validationCard: { borderWidth: 1, borderColor: COLORS.line, borderRadius: 14, padding: 13, marginBottom: 13 },
+  validationClear: { borderColor: "#9DB89F", backgroundColor: COLORS.greenSoft },
+  validationBlocked: { borderColor: "#D5A18F", backgroundColor: "#FFF0EA" },
+  validationHeading: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 12, marginBottom: 10 },
+  validationPrice: { color: COLORS.green, fontSize: 15, fontWeight: "900" },
+  validationRow: { flexDirection: "row", alignItems: "flex-start", gap: 9, borderTopWidth: 1, borderTopColor: COLORS.line, paddingVertical: 10 },
+  blockingText: { color: "#8A3D2B", fontSize: 12, lineHeight: 18, fontWeight: "800" },
+  termsCard: { borderWidth: 1, borderColor: COLORS.line, borderRadius: 14, padding: 13, marginBottom: 13, backgroundColor: COLORS.paper },
+  termsToggle: { minHeight: 52, flexDirection: "row", alignItems: "center", gap: 10 },
+  termsDocument: { gap: 12, borderTopWidth: 1, borderTopColor: COLORS.line, paddingTop: 13, marginTop: 8, marginBottom: 13 },
+  mobileFlowSteps: { flexDirection: "row", flexWrap: "wrap", gap: 7, marginBottom: 15 },
+  mobileFlowStep: { minWidth: "30%", flexGrow: 1, minHeight: 58, backgroundColor: COLORS.surface, borderWidth: 1, borderColor: COLORS.line, borderRadius: 12, padding: 10, justifyContent: "center", gap: 3 },
 });

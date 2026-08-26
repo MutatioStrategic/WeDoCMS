@@ -22,6 +22,13 @@ describe("provider abstraction layer", () => {
     expect(() => container.payouts.get("za_bank")).toThrow("No payout provider registered");
   });
 
+  it("registers the simulated payment provider only for the demo environment", () => {
+    const demo = new IntegrationContainer({ APP_ENV: "demo", PAYMENT_PROVIDER: "demo" });
+    expect(demo.payments.get("demo")).toBeDefined();
+    expect(() => new IntegrationContainer({ APP_ENV: "development", PAYMENT_PROVIDER: "demo" }).payments.get("demo")).toThrow("No payment provider registered");
+    expect(() => new IntegrationContainer({ APP_ENV: "production", PAYMENT_PROVIDER: "demo", PAYMENT_ENDPOINT: "https://example.invalid", PAYMENT_TOKEN: "configured", PAYMENT_WEBHOOK_SECRET: "configured" }).payments.get("demo")).toThrow("No payment provider registered");
+  });
+
   it("scopes Stripe payouts to the connected account and preserves idempotency", async () => {
     const fetcher = vi.fn().mockResolvedValue(jsonResponse({ id: "po_123", status: "paid", amount: 12500, currency: "zar" }));
     const adapter = new StripeConnectPayoutAdapter({ secretKey: "sk_test", fetcher });

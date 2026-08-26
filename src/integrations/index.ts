@@ -11,7 +11,7 @@ export * from "./cipc";
 export * from "./zoho";
 
 import { PayFastPayoutAdapter, PayoutProviderRegistry, SouthAfricanBankPayoutAdapter, StripeConnectPayoutAdapter } from "./payouts";
-import { JsonPaymentAdapter, PaymentProviderRegistry, PaystackPaymentAdapter } from "./payments";
+import { DemoPaymentAdapter, JsonPaymentAdapter, PaymentProviderRegistry, PaystackPaymentAdapter } from "./payments";
 import { PayFastPaymentAdapter } from "./payfast";
 import { ZohoIntegration, type ZohoIntegrationEnvironment } from "./zoho";
 import { CloudflareEmailAdapter, EmailProviderRegistry, JsonEmailAdapter } from "./email";
@@ -20,9 +20,11 @@ import { CipcLookupAdapter } from "./cipc";
 
 /** The environment values needed to compose the available integrations. */
 export type IntegrationEnvironment = {
+  APP_ENV?: string;
   PAYMENT_PROVIDER?: string;
   PAYMENT_ENDPOINT?: string;
   PAYMENT_TOKEN?: string;
+  PAYMENT_WEBHOOK_SECRET?: string;
   PAYFAST_MERCHANT_ID?: string;
   PAYFAST_MERCHANT_KEY?: string;
   PAYFAST_PASSPHRASE?: string;
@@ -82,6 +84,10 @@ export class IntegrationContainer {
         notifyUrl: environment.PAYFAST_NOTIFY_URL,
         endpoint: environment.PAYFAST_PAYMENT_ENDPOINT,
       }));
+    } else if (environment.APP_ENV === "demo" && environment.PAYMENT_PROVIDER === "demo") {
+      this.payments.register(new DemoPaymentAdapter());
+    } else if (environment.PAYMENT_PROVIDER === "demo") {
+      // The simulated checkout is intentionally unavailable outside APP_ENV=demo.
     } else if (environment.PAYMENT_PROVIDER && environment.PAYMENT_ENDPOINT && environment.PAYMENT_TOKEN) {
       if (environment.PAYMENT_PROVIDER.toLowerCase() === "paystack") {
         this.payments.register(new PaystackPaymentAdapter({ endpoint: environment.PAYMENT_ENDPOINT, secretKey: environment.PAYMENT_TOKEN }));

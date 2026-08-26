@@ -2,6 +2,22 @@
 
 These flows define the minimum product journeys covered by browser QA. The solid path must work in the live read-only demo; authenticated write steps require the Worker and D1 resources.
 
+## App shell and role handoff
+
+The native Expo client on `better-2` and the Cloudflare web client on `main`
+share actor intent and Worker contracts but use platform-appropriate shells.
+Anonymous users can explore approved media, then choose **Create buyer account**
+or **Sell your media**. Protected actions open authentication in context, retain
+the selected asset or upload destination, and resume after the verified session
+exchange.
+
+The web sidebar is role-aware: buyers see Buyer home and Media studio, sellers
+see Seller home with **+ Upload media**, and editors/admins see authorized review
+and governance surfaces. Expo maps the same intent to native tabs: buyers get
+Buyer, sellers get Upload with a central plus action, and editors/admins get a
+review-capable upload entry point. Neither client presents a role-gated
+destination as a dead-end page.
+
 ## Explore and search
 
 ```mermaid
@@ -15,7 +31,7 @@ flowchart LR
   F --> G
   G --> H[Open asset evidence]
   H --> I[Inspect rights, provenance, match signals]
-  I --> J[Request access or save lightbox]
+  I --> J[Buy/licence media or save lightbox]
 ```
 
 Video previews show a distinct `VELD ARCHIVE · PREVIEW / NOT LICENSED FOR USE`
@@ -28,13 +44,15 @@ licensed workspace.
 
 ```mermaid
 flowchart TD
-  A[Workspace navigation] --> B{Authenticated?}
-  B -->|no| C[Explain sign-in requirement]
-  B -->|yes| D[Load role workspace]
-  D --> E{Role}
-  E -->|contributor| F[Insights and submit record]
-  E -->|buyer| G[ROI and licensed campaigns]
-  E -->|editor/admin| H[Review and governance queue]
+  A[Shared app shell] --> B{Authenticated?}
+  B -->|no| C[Public explore/search + Buy or Sell CTA]
+  C --> D[Inline auth retains intent and destination]
+  B -->|yes| E[Role-aware workspace navigation]
+  D --> E
+  E --> F{Role}
+  F -->|contributor| G[Seller home + Upload]
+  F -->|buyer| H[Buyer home + direct licence checkout]
+  F -->|editor/admin| I[Review and governance queue]
 ```
 
 ### Password recovery
@@ -67,21 +85,23 @@ flowchart TD
 
 ## Buyer licence validation
 
-1. A signed-in buyer opens the Buyer ROI workspace and selects a published asset.
+1. A signed-in buyer opens any published asset from Explore, Search, or the Buyer ROI workspace.
 2. The buyer chooses a licence type, territory, and duration, then runs the
    server-side validation check.
 3. The Worker returns approval, rights-scope, model-release, and property-release
    checks plus the current price. The UI shows every check before any request
    is created.
 4. If a check fails, the buyer can change the intended use or open the
-   resolution desk. If all checks pass, creating a licence request records a
-   pending request but does not charge payment.
+   resolution desk. If all checks pass, the buyer reads and explicitly accepts
+   the versioned Buyer Licence and Payment Terms. The purchase action then
+   creates or reuses the pending licence contract and immediately opens hosted
+   payment; this is not a manual access request.
 
-5. The Buyer workspace shows pending requests with a clear “Continue to
-   payment” action. Retrying the same request reuses the existing pending
-   request rather than creating a duplicate. If the payment provider is
-   unavailable, the request remains pending and the UI explains that no charge
-   was made.
+5. The account purchase history shows pending contracts with a clear “Continue
+   to payment” action. Retrying the same purchase reuses the existing pending
+   contract rather than creating a duplicate. If the payment provider is
+   unavailable, the pending contract remains visible and the UI explains that
+   no charge was made.
 
 6. The buyer may enable Auto-approval for their own new requests by checking
    the sign-off acknowledgement and saving it. Auto-approval applies only
@@ -95,9 +115,9 @@ flowchart TD
    The CEO/admin ledger shows the buyer sign-off, terms version, revocation,
    auto-approved requests, and paid versus unpaid status for the organisation.
 
-The unavailable-backend state explains that no licence or payment was created
-and offers a retry. A missing published-asset state sends the buyer back to
-approved archive search.
+The unavailable-backend state explains whether a pending licence was already
+created, confirms that no charge was made, and offers a retry. A missing
+published-asset state sends the buyer back to approved archive search.
 
 ## Buyer campaign-pack approval
 
@@ -131,6 +151,9 @@ approved archive search.
 The unavailable-backend state does not show cached money or credit balances and
 offers a retry. Checkout routes fail closed when the payment provider is not
 configured, and payment success is never inferred from the browser redirect.
+The explicitly marked demo environment uses a server-side simulated provider
+for licence walkthroughs only; production licences still require a signed
+provider webhook before they become paid.
 
 ## Signup, introductory photos, and access choice
 
@@ -214,6 +237,8 @@ flowchart LR
 - Search submits on Enter and button click; suggestion chips never submit the form accidentally.
 - Search results remain useful when the read-only API is unavailable.
 - Asset cards open a detail/evidence modal and the modal closes by close button, backdrop, and Escape.
+- Buyer checkout stays in the asset evidence flow: validation, versioned terms, hosted payment, pending retry, and webhook-confirmed delivery are all explicit.
+- Seller surfaces expose one primary upload action, preserve media/metadata on recoverable errors, and report that approval is required before search visibility.
 - Protected workflows explain sign-in and backend requirements rather than silently failing.
 - Form validation prevents incomplete submissions and successful actions show confirmation state.
 - AI may classify a visible setting such as `market_scene`; only seller, EXIF, or editor evidence may populate geographic location fields.

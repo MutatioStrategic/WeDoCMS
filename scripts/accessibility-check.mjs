@@ -63,6 +63,12 @@ try {
   await page.locator(".search-status-dot.complete").waitFor();
   const searchResults = await scan();
   const searchPassed = report("archive search results", searchResults);
+  await page.locator(".asset-card").first().click();
+  await page.getByRole("dialog").waitFor();
+  await page.getByRole("button", { name: /purchase licence|sign in to purchase licence/i }).waitFor();
+  const assetDialog = await scan();
+  const assetDialogPassed = report("asset purchase dialog", assetDialog);
+  await page.getByRole("button", { name: "Close" }).click();
   await page.locator(".better-nav-item").filter({ hasText: "System overview" }).click();
   const stakeholderOverview = await scan();
   const stakeholderOverviewPassed = report("stakeholder system overview", stakeholderOverview);
@@ -75,7 +81,7 @@ try {
   const resolutionPassed = report("community and resolution workspace", resolution);
   await context.close();
   await browser.close();
-  if (!initialPassed || !searchPassed || !stakeholderOverviewPassed || !studioPassed || !resolutionPassed) process.exitCode = 1;
+  if (!initialPassed || !searchPassed || !assetDialogPassed || !stakeholderOverviewPassed || !studioPassed || !resolutionPassed) process.exitCode = 1;
 } finally {
   server.kill();
 }

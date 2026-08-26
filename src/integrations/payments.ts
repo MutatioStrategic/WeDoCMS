@@ -180,6 +180,27 @@ export class PaystackPaymentAdapter implements PaymentProvider {
   }
 }
 
+/**
+ * Demo-only hosted checkout seam.
+ *
+ * The demo Worker owns the completion route and marks the licence paid only
+ * after that server-side simulation. Production never registers this adapter.
+ */
+export class DemoPaymentAdapter implements PaymentProvider {
+  readonly provider = "demo";
+
+  async createCheckoutSession(request: PaymentSessionRequest): Promise<PaymentSession> {
+    const reference = request.reference ?? request.referenceId ?? request.licenceId ?? request.idempotencyKey;
+    return {
+      id: `demo:${reference}`,
+      provider: this.provider,
+      status: "created",
+      checkoutUrl: `/api/demo/payments/${encodeURIComponent(reference)}/complete`,
+      providerReference: `demo:${reference}`,
+    };
+  }
+}
+
 export class PaymentProviderRegistry {
   private readonly providers = new Map<string, PaymentProvider>();
   register(provider: PaymentProvider): this { this.providers.set(provider.provider, provider); return this; }

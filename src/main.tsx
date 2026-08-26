@@ -81,6 +81,9 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
   const [lightboxes, setLightboxes] = useState<UserLightbox[]>([]);
   const [discovery, setDiscovery] = useState<DiscoveryResponse>(emptyDiscovery);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [pendingAssetId, setPendingAssetId] = useState(() => new URLSearchParams(window.location.search).get("asset"));
+  const [pendingAssetPurchase, setPendingAssetPurchase] = useState(() => new URLSearchParams(window.location.search).get("purchase") === "1");
+  const assetRestoreAttempted = React.useRef(false);
   const [devRole, setDevRole] = useState<DemoRole>("buyer");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -314,6 +317,35 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
     return () => { controller.abort(); if (loadingTimer) clearTimeout(loadingTimer); };
   }, [activeQuery, filter, sort, orientation, searchRequestId]);
 
+  useEffect(() => {
+    if (!pendingAssetId || selectedAsset || assetsLoading || assetRestoreAttempted.current) return;
+    assetRestoreAttempted.current = true;
+    const clearAssetIntent = () => {
+      const params = new URLSearchParams(window.location.search);
+      params.delete("asset");
+      params.delete("purchase");
+      const query = params.toString();
+      window.history.replaceState({}, document.title, `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`);
+    };
+    const listedAsset = assets.find((candidate) => candidate.id === pendingAssetId);
+    if (listedAsset) {
+      setSelectedAsset(listedAsset);
+      clearAssetIntent();
+      return;
+    }
+    void api(`/api/assets/${encodeURIComponent(pendingAssetId)}`).then(async (response) => {
+      if (!response.ok) throw new Error("The selected asset is no longer available.");
+      const restored = await response.json() as Asset;
+      setSelectedAsset(archiveDomain.withMatchExplanation(restored, activeQuery));
+      clearAssetIntent();
+    }).catch((error) => {
+      setPendingAssetPurchase(false);
+      setPendingAssetId(null);
+      clearAssetIntent();
+      setNotice(error instanceof Error ? error.message : "The selected asset could not be restored.");
+    });
+  }, [activeQuery, api, assets, assetsLoading, pendingAssetId, selectedAsset]);
+
   async function loadReviewQueue() {
     try {
       const response = await api("/api/admin/review");
@@ -417,6 +449,26 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
 
   const verifiedCount = useMemo(() => assets.filter((asset) => asset.humanVerified).length, [assets]);
   function openAsset(asset: Asset) { setSelectedAsset(asset); trackEvent({ type: "asset_view", assetId: asset.id }); }
+  function openBuyerSignIn(assetId?: string): void {
+    const returnPath = assetId
+      ? `${window.location.pathname}?asset=${encodeURIComponent(assetId)}&purchase=1`
+      : window.location.pathname;
+    if (auth0) {
+      void auth0.loginWithRedirect({ authorizationParams: { ...(auth0Audience ? { audience: auth0Audience } : {}), ...(auth0Organization ? { organization: auth0Organization } : {}) }, appState: { returnTo: returnPath } });
+      return;
+    }
+    if (supabase) {
+      setSupabaseAuthMode("signin");
+      setSupabaseAuthOpen(true);
+      setNotice("Sign in to purchase this licence. Your selected asset will remain open.");
+      return;
+    }
+    if (demoMode || import.meta.env.DEV) {
+      void devSignIn("buyer");
+      return;
+    }
+    setNotice("An external identity provider is not configured for this deployment.");
+  }
   async function downloadFreePhoto(asset: Asset): Promise<void> {
     if (!sessionUser) { setNotice("Create an account to claim your introductory free photo downloads."); setSupabaseAuthMode("signup"); setSupabaseAuthOpen(Boolean(supabase)); return; }
     const response = await fetch(`/api/assets/${encodeURIComponent(asset.id)}/original`, { credentials: "include", redirect: "manual" });
@@ -428,6 +480,11 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
     window.scrollTo(0, 0);
     setMobileSidebarOpen(false);
   }, [view]);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("payment") !== "complete") return;
+    setNotice(params.get("demo") === "1" ? "Demo licence purchased. No real transaction was made; the simulated contract is now in your purchase history." : "Payment checkout returned. Original access is available only after the provider payment webhook is verified.");
+  }, []);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key.toLowerCase() !== "k" || (!event.metaKey && !event.ctrlKey)) return;
@@ -472,14 +529,14 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
     {view === "review" && <ReviewWorkspace items={reviewItems} api={api} onNotice={setNotice} onReload={loadReviewQueue} />}
     {view === "governance" && <><MarketplaceLegalDocuments api={api} /><GovernanceWorkspace api={api} onNotice={setNotice} /></>}
     {view === "community" && <CommunityWorkspace api={api} onNotice={setNotice} sessionUser={sessionUser} />}
-    {view === "account" && <><BuyerSubscriptionPanel api={api} onNotice={setNotice} /><AccountWorkspace api={api} auth0={auth0} onNotice={setNotice} /></>}
+    {view === "account" && <><BuyerSubscriptionPanel api={api} onNotice={setNotice} /><AccountWorkspace api={api} auth0={auth0} onNotice={setNotice} buyer={sessionUser?.role === "buyer" || sessionUser?.role === "admin"} /></>}
     {view === "studio" && <StudioWorkspace assets={assets} onNotice={setNotice} />}
     {view === "rights" && <RightsGuide />}
     {view === "stakeholders" && <StakeholderDiagrams />}
     {view === "wordpress" && <WordPressIntegrationPanel api={api} onNotice={setNotice} />}
 
     <footer><button className="wordmark wordmark-button" onClick={() => navigate("explore")}><span className="mark">V</span><span>veld<span className="muted">archive</span></span></button><button className="footer-guide-link" onClick={() => navigate("rights")}>Rights guide ↗</button><button className="footer-guide-link" onClick={() => navigate("stakeholders")}>System overview ↗</button><span>© 2026 Veld Archive · South Africa</span><span>Context before category.</span></footer>
-    {selectedAsset && <AssetModal asset={selectedAsset} onClose={() => setSelectedAsset(null)} onNotice={setNotice} authenticated={Boolean(sessionUser)} lightboxes={lightboxes} onCreateLightbox={createLightbox} onSaveToLightbox={saveToLightbox} onDownload={downloadFreePhoto} />}
+    {selectedAsset && <AssetModal asset={selectedAsset} api={api} autoOpenPurchase={pendingAssetPurchase} onClose={() => { setSelectedAsset(null); setPendingAssetPurchase(false); }} onNotice={setNotice} onRequireSignIn={openBuyerSignIn} authenticated={Boolean(sessionUser)} lightboxes={lightboxes} onCreateLightbox={createLightbox} onSaveToLightbox={saveToLightbox} onDownload={downloadFreePhoto} />}
   </div>;
 }
 
@@ -1046,13 +1103,85 @@ function BuyerSubscriptionPanel({ api, onNotice }: { api: (path: string, init?: 
   return <article className="buyer-subscription-card"><div className="card-heading"><div><span className="section-kicker">BUYER ACCESS</span><h2>Try the archive before you subscribe</h2></div><span className={`status-pill ${status === "active" ? "cool" : ""}`}>{status.replaceAll("-", " ")}</span></div>{data.free && <div className="free-download-offer"><strong>{data.free.remaining} free photo download{data.free.remaining === 1 ? "" : "s"} remaining</strong><span>Registered buyers get {data.free.limit} artist-approved photos once, before any payment. No card is needed to claim the allowance.</span></div>}<div className="subscription-plan-choices"><div><span className="section-kicker">UNLIMITED ACCESS</span><h3>Choose monthly or annual</h3><small>Unlimited downloads from artists who participate in membership access.</small></div>{data.plans.map((plan) => <label key={plan.id} className={`subscription-plan-option ${selectedPlan === plan.id ? "selected" : ""}`}><input type="radio" name="buyer-plan" value={plan.id} checked={selectedPlan === plan.id} onChange={() => setSelectedPlan(plan.id)} /><span><strong>{plan.id === "annual" ? "Annual" : "Monthly"}</strong><b>{formatZar(plan.amountCents)}</b><small>{plan.id === "annual" ? "per year" : "per month"}</small></span></label>)}</div>{data.plans.length === 0 && <p>The recurring Paystack plans are not configured for this deployment.</p>}{canStart && data.plans.length > 0 && <button className="dark-button" onClick={() => void startSubscription()}>Start {selectedPlan} unlimited access ↗</button>}{Boolean(subscription?.provider_subscription_code) && ["active", "non-renewing", "attention"].includes(status) && <button className="ghost-button" onClick={() => void manageSubscription()}>Manage billing with Paystack</button>}{status === "pending" && <small>Checkout was started. This account becomes active only after Paystack confirms payment by webhook.</small>}{status === "attention" && <small>Paystack reported a billing issue. Update the card through Paystack before access is changed.</small>}<div className="download-bundle-offer"><div><span className="section-kicker">ON-DEMAND BUNDLES</span><h3>Buy downloads once-off</h3><small>Use credits when you do not need a recurring plan. One credit unlocks one original photo or video licence.</small></div><div className="bundle-options">{[1, 5, 10].map((credits) => <button key={credits} className="outline-button" onClick={() => void buyBundle(credits)}>{credits} download{credits === 1 ? "" : "s"} · {formatZar(credits * 10000)}</button>)}</div></div>{Boolean(data.free && data.free.remaining === 0) && <small>Your introductory allowance is used. A bundle or unlimited plan is the next access step.</small>}{Boolean(subscription?.next_payment_date) && <small>Next payment: {new Date(String(subscription?.next_payment_date)).toLocaleDateString("en-ZA")}</small>}{data.payments.length > 0 && <div className="subscription-payment-list"><strong>Paystack transaction history</strong>{data.payments.slice(0, 5).map((payment) => <div key={String(payment.provider_event_id)}><span>{String(payment.event_type)}</span><small>{String(payment.status)} · {String(payment.provider_reference ?? payment.invoice_code ?? "Paystack event")}</small><b>{payment.amount_cents ? formatZar(Number(payment.amount_cents)) : "—"}</b></div>)}</div>}<small className="privacy-note">Source of truth: {data.sourceOfTruth}. We only mirror signed Paystack webhook events and references.</small></article>;
 }
 
-function AccountWorkspace({ api, auth0, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; auth0?: Auth0Bridge; onNotice: (notice: string) => void }) {
-  const [account, setAccount] = useState<(AccountLifecycle & { accountPortalUrl?: string | null }) | null>(null); const [licences, setLicences] = useState<Array<Record<string, unknown>>>([]);
-  const reload = useCallback(() => { void Promise.all([api("/api/account/lifecycle").then(async (response) => response.ok ? response.json() as Promise<AccountLifecycle & { accountPortalUrl?: string | null }> : null), api("/api/licences/history").then(async (response) => response.ok ? response.json() as Promise<{ results: Array<Record<string, unknown>> }> : { results: [] })]).then(([lifecycle, history]) => { setAccount(lifecycle); setLicences(history.results); }); }, [api]);
-  useEffect(reload, [reload]);
+function AccountWorkspace({ api, auth0, onNotice, buyer }: { api: (path: string, init?: RequestInit) => Promise<Response>; auth0?: Auth0Bridge; onNotice: (notice: string) => void; buyer: boolean }) {
+  const [account, setAccount] = useState<(AccountLifecycle & { accountPortalUrl?: string | null }) | null>(null);
+  const [purchases, setPurchases] = useState<Array<Record<string, unknown>>>([]);
+  const [paymentBusyId, setPaymentBusyId] = useState("");
+
+  const reload = useCallback(() => {
+    const purchaseRequest = buyer
+      ? api("/api/my/purchases").then(async (response) => response.ok ? response.json() as Promise<{ results: Array<Record<string, unknown>> }> : { results: [] })
+      : Promise.resolve({ results: [] as Array<Record<string, unknown>> });
+    void Promise.all([
+      api("/api/account/lifecycle").then(async (response) => response.ok ? response.json() as Promise<AccountLifecycle & { accountPortalUrl?: string | null }> : null),
+      purchaseRequest,
+    ]).then(([lifecycle, history]) => {
+      setAccount(lifecycle);
+      setPurchases(history.results);
+    });
+  }, [api, buyer]);
+
+  useEffect(() => { reload(); }, [reload]);
+
+  async function continueToPayment(licenceId: string): Promise<void> {
+    setPaymentBusyId(licenceId);
+    try {
+      const response = await api(`/api/payments/${encodeURIComponent(licenceId)}/session`, {
+        method: "POST",
+        body: JSON.stringify({
+          successUrl: `${window.location.origin}/account?licence=${encodeURIComponent(licenceId)}&payment=complete`,
+          cancelUrl: `${window.location.origin}/account?licence=${encodeURIComponent(licenceId)}&payment=cancelled`,
+        }),
+      });
+      const body = await response.json().catch(() => ({})) as { checkoutUrl?: string; error?: string };
+      if (!response.ok || !body.checkoutUrl) {
+        onNotice(body.error ?? "Secure payment checkout could not be opened. Try again.");
+        return;
+      }
+      window.location.assign(body.checkoutUrl);
+    } catch {
+      onNotice("Secure payment checkout is unavailable. Your pending licence remains unchanged; try again.");
+    } finally {
+      setPaymentBusyId("");
+    }
+  }
+
+  async function downloadLicence(assetId: string): Promise<void> {
+    const response = await fetch(`/api/assets/${encodeURIComponent(assetId)}/original`, { credentials: "include", redirect: "manual" });
+    if (response.status === 302) {
+      window.location.assign(response.headers.get("Location") ?? `/api/assets/${encodeURIComponent(assetId)}/original`);
+      return;
+    }
+    const body = await response.json().catch(() => ({})) as { error?: string };
+    onNotice(body.error ?? "Licensed delivery could not be opened. Try again.");
+  }
+
   if (!account) return <main className="account-page"><div className="empty-state">Loading your account controls…</div></main>;
-  const openIdentity = () => { if (account.accountPortalUrl) { window.location.assign(account.accountPortalUrl); return; } if (auth0) { void auth0.loginWithRedirect({ authorizationParams: { prompt: "login" } }); return; } onNotice("Configure AUTH_ACCOUNT_PORTAL_URL for production identity management."); };
-  return <main className="account-page"><div className="workspace-intro"><span className="section-kicker">ACCOUNT & ORGANIZATION</span><h1>Control your <em>account.</em></h1><p>Identity security stays with the configured authentication provider; data rights, preferences, receipts, and deletion requests remain visible here.</p></div><section className="account-grid"><article><span className="section-kicker">IDENTITY SECURITY</span><h2>Email, password & MFA</h2><p>{account.emailVerified ? "Email is verified." : "Email verification is still required."} {account.mfaEnrolled ? "MFA is enrolled." : "Set up MFA before granting team administration."}</p><button className="dark-button" onClick={openIdentity}>Manage verification, password & MFA →</button></article><article><span className="section-kicker">NOTIFICATIONS</span><h2>Keep only useful alerts</h2><label className="checkbox-row"><input type="checkbox" checked={account.emailNotifications} onChange={(event) => void api("/api/account/preferences", { method: "PUT", body: JSON.stringify({ emailNotifications: event.target.checked, productNotifications: account.productNotifications }) }).then(reload)} /> Essential email notifications</label><label className="checkbox-row"><input type="checkbox" checked={account.productNotifications} onChange={(event) => void api("/api/account/preferences", { method: "PUT", body: JSON.stringify({ emailNotifications: account.emailNotifications, productNotifications: event.target.checked }) }).then(reload)} /> Product and marketplace updates</label></article><article><span className="section-kicker">YOUR DATA</span><h2>Export or delete</h2><p>Exports are signed, time-limited deliveries. Deletion requests have a 30-day recovery window.</p><button className="outline-button" onClick={() => void api("/api/account/exports", { method: "POST", body: "{}" }).then(reload)}>Request account export</button><button className="ghost-button danger-button" onClick={() => { if (window.confirm("Schedule this account for deletion in 30 days?")) void api("/api/account/deletion", { method: "POST", body: "{}" }).then(reload); }}>Schedule deletion</button><small>Export: {account.exportStatus} · deletion: {account.deletionStatus}</small></article></section><section className="licence-history"><span className="section-kicker">LICENCE HISTORY & RECEIPTS</span><h2>Proof of what your team can use</h2>{licences.length ? licences.map((licence) => <article key={String(licence.id)}><div><strong>{String(licence.asset_title)}</strong><small>{String(licence.product_code ?? licence.licence_type)} · {String(licence.territory)} · {String(licence.duration_days)} days</small></div><span>{formatZar(Number(licence.price_cents))}</span><button className="outline-button" onClick={() => void api(`/api/licences/${String(licence.id)}/download`, { method: "POST", body: "{}" }).then(() => onNotice("Licensed delivery was recorded. Stream video uses the configured signed playback service."))}>Download</button></article>) : <p>No licences are recorded for this workspace yet.</p>}</section></main>;
+  const openIdentity = () => {
+    if (account.accountPortalUrl) { window.location.assign(account.accountPortalUrl); return; }
+    if (auth0) { void auth0.loginWithRedirect({ authorizationParams: { prompt: "login" } }); return; }
+    onNotice("Configure AUTH_ACCOUNT_PORTAL_URL for production identity management.");
+  };
+
+  return <main className="account-page">
+    <div className="workspace-intro"><span className="section-kicker">ACCOUNT & ORGANIZATION</span><h1>Control your <em>account.</em></h1><p>Identity security stays with the configured authentication provider; data rights, preferences, receipts, and deletion requests remain visible here.</p></div>
+    <section className="account-grid">
+      <article><span className="section-kicker">IDENTITY SECURITY</span><h2>Email, password & MFA</h2><p>{account.emailVerified ? "Email is verified." : "Email verification is still required."} {account.mfaEnrolled ? "MFA is enrolled." : "Set up MFA before granting team administration."}</p><button className="dark-button" onClick={openIdentity}>Manage verification, password & MFA →</button></article>
+      <article><span className="section-kicker">NOTIFICATIONS</span><h2>Keep only useful alerts</h2><label className="checkbox-row"><input type="checkbox" checked={account.emailNotifications} onChange={(event) => void api("/api/account/preferences", { method: "PUT", body: JSON.stringify({ emailNotifications: event.target.checked, productNotifications: account.productNotifications }) }).then(reload)} /> Essential email notifications</label><label className="checkbox-row"><input type="checkbox" checked={account.productNotifications} onChange={(event) => void api("/api/account/preferences", { method: "PUT", body: JSON.stringify({ emailNotifications: account.emailNotifications, productNotifications: event.target.checked }) }).then(reload)} /> Product and marketplace updates</label></article>
+      <article><span className="section-kicker">YOUR DATA</span><h2>Export or delete</h2><p>Exports are signed, time-limited deliveries. Deletion requests have a 30-day recovery window.</p><button className="outline-button" onClick={() => void api("/api/account/exports", { method: "POST", body: "{}" }).then(reload)}>Request account export</button><button className="ghost-button danger-button" onClick={() => { if (window.confirm("Schedule this account for deletion in 30 days?")) void api("/api/account/deletion", { method: "POST", body: "{}" }).then(reload); }}>Schedule deletion</button><small>Export: {account.exportStatus} · deletion: {account.deletionStatus}</small></article>
+    </section>
+    <section className="licence-history">
+      <span className="section-kicker">PURCHASE HISTORY & RECEIPTS</span>
+      <h2>Proof of what your team can use</h2>
+      {purchases.length ? purchases.map((purchase) => {
+        const kind = String(purchase.kind);
+        const status = String(purchase.status);
+        const licenceId = String(purchase.referenceId ?? purchase.id);
+        const assetId = typeof purchase.assetId === "string" ? purchase.assetId : "";
+        return <article key={String(purchase.id)}><div><strong>{String(purchase.title)}</strong><small>{String(purchase.details)} · {status.replaceAll("_", " ")}</small></div><span>{formatZar(Number(purchase.amountCents))}</span>{kind === "licence" && status === "paid" && assetId ? <button type="button" className="outline-button" onClick={() => void downloadLicence(assetId)}>Download</button> : kind === "licence" && status === "pending" ? <button type="button" className="dark-button" disabled={paymentBusyId === licenceId} onClick={() => void continueToPayment(licenceId)}>{paymentBusyId === licenceId ? "Opening checkout…" : "Continue to payment"}</button> : <small className="purchase-state">{status.replaceAll("_", " ")}</small>}</article>;
+      }) : <p>{buyer ? "No purchases yet. Open an approved archive asset to start an automatic licence purchase." : "No licence receipts are recorded for this workspace yet."}</p>}
+    </section>
+  </main>;
 }
 
 /* Duplicate lightweight campaign prototype retained in the worktree before Phase 3A's richer editor. */
@@ -1466,7 +1595,7 @@ function AssetPreview({ asset, className }: { asset: Asset; className: string })
 
 function AssetCard({ asset, index, onOpen }: { asset: Asset; index: number; onOpen: (asset: Asset) => void }) {
   const explanation = asset.matchExplanation ?? archiveDomain.buildMatchExplanation(asset);
-  return <article className={`asset-card card-${index + 1}`} onClick={() => onOpen(asset)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") onOpen(asset); }}><AssetPreview asset={asset} className={`asset-visual visual-${index + 1} ${asset.kind}`} /><div className="asset-info"><div><h3>{asset.title}</h3><p>{asset.city}, {asset.province}</p><small className="asset-contributor">By {asset.contributor}</small><span className={`confidence-chip ${archiveDomain.confidenceLabel(explanation.matchConfidence)}`}>{archiveDomain.percent(explanation.matchConfidence)}% match</span><small className="asset-pricing-label">{assetPricingLabel(asset)}</small></div><span className={`status-dot ${asset.humanVerified ? "verified" : "review"}`} title={asset.humanVerified ? "Human verified" : "Needs editor review"} /></div></article>;
+  return <article className={`asset-card card-${index + 1}`} role="button" aria-label={`Open ${asset.title}`} onClick={() => onOpen(asset)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onOpen(asset); } }}><AssetPreview asset={asset} className={`asset-visual visual-${index + 1} ${asset.kind}`} /><div className="asset-info"><div><h3>{asset.title}</h3><p>{asset.city}, {asset.province}</p><small className="asset-contributor">By {asset.contributor}</small><span className={`confidence-chip ${archiveDomain.confidenceLabel(explanation.matchConfidence)}`}>{archiveDomain.percent(explanation.matchConfidence)}% match</span><small className="asset-pricing-label">{assetPricingLabel(asset)}</small></div><span className={`status-dot ${asset.humanVerified ? "verified" : "review"}`} title={asset.humanVerified ? "Human verified" : "Needs editor review"} /></div></article>;
 }
 
 function AssetModalLegacy({ asset, onClose, onNotice }: { asset: Asset; onClose: () => void; onNotice: (notice: string) => void }) { /*
@@ -1479,21 +1608,91 @@ function AssetModalLegacy({ asset, onClose, onNotice }: { asset: Asset; onClose:
   return <div className="modal-backdrop" role="presentation" onClick={onClose}><div className="asset-modal" role="dialog" aria-modal="true" aria-labelledby="asset-title" onClick={(event) => event.stopPropagation()}><button className="close-button" onClick={onClose} aria-label="Close">×</button><div className={`modal-visual ${asset.kind}`}><span>{asset.kind === "video" ? "▶" : "V"}</span></div><div className="modal-copy"><span className="section-kicker">{asset.kind === "video" ? "FILM & VIDEO" : "PHOTOGRAPHY"} · {asset.city}</span><h2 id="asset-title">{asset.title}</h2><p>{asset.caption || asset.description}</p><div className="tag-list">{asset.culturalTags.map((tag) => <span key={tag}>{tag}</span>)}</div><div className="match-box"><div className="card-heading"><span className="section-kicker">WHY THIS MATCHED</span><strong>{archiveDomain.percent(explanation.matchConfidence)}% {archiveDomain.confidenceLabel(explanation.matchConfidence)}</strong></div>{explanation.signals.slice(0, 3).map((signal) => <p key={signal.label}><b>{signal.label}:</b> {signal.detail}</p>)}<small>{explanation.metadataReviewNote}</small></div><div className="rights-summary"><span>Rights: <b>{asset.rightsStatus}</b></span><span>Authenticity: <b>{archiveDomain.percent(asset.authenticityConfidence)}%</b></span><span>Access: <b>{assetPricingLabel(asset)}</b></span></div><div className="modal-actions"><button className="dark-button" onClick={() => onNotice("Sign in and open the governance workspace to request a licence.")}>{requestLabel} <span>↗</span></button><button className="ghost-button" onClick={() => onNotice("Lightbox saving is not available until an authenticated workspace is connected.")}>Save to lightbox</button></div></div></div></div>;
 */ }
 
-function AssetModal({ asset, onClose, onNotice: notify, authenticated, lightboxes, onCreateLightbox, onSaveToLightbox, onDownload }: { asset: Asset; onClose: () => void; onNotice: (notice: string) => void; authenticated: boolean; lightboxes: UserLightbox[]; onCreateLightbox: (name: string) => Promise<UserLightbox | null>; onSaveToLightbox: (lightboxId: string, assetId: string) => Promise<boolean>; onDownload: (asset: Asset) => Promise<void> }) {
+
+type AssetCheckoutValidation = {
+  allowed: boolean;
+  checks: Array<{ label: string; passed: boolean; detail: string }>;
+  blockingReasons: string[];
+  priceCents: number | null;
+  currency: string;
+  licence: { label: string; summary: string; usage: string; releaseNote: string };
+  monetizationModel: MonetizationModel;
+  purchase: { paymentRequired: boolean; paymentStatus: string; originalAccess: string };
+};
+
+function AssetModal({ asset, api, autoOpenPurchase = false, onClose, onNotice: notify, onRequireSignIn, authenticated, lightboxes, onCreateLightbox, onSaveToLightbox, onDownload }: {
+  asset: Asset;
+  api: (path: string, init?: RequestInit) => Promise<Response>;
+  autoOpenPurchase?: boolean;
+  onClose: () => void;
+  onNotice: (notice: string) => void;
+  onRequireSignIn: (assetId?: string) => void;
+  authenticated: boolean;
+  lightboxes: UserLightbox[];
+  onCreateLightbox: (name: string) => Promise<UserLightbox | null>;
+  onSaveToLightbox: (lightboxId: string, assetId: string) => Promise<boolean>;
+  onDownload: (asset: Asset) => Promise<void>;
+}) {
   const explanation = asset.matchExplanation ?? archiveDomain.buildMatchExplanation(asset);
   const model = asset.monetizationModel ?? "membership";
-  const requestLabel = asset.freeDownloadEnabled ? authenticated ? "Download free photo" : "Create an account for free downloads" : model === "custom_quote" ? "Request custom quote" : model === "individual_license" ? "Request individual licence" : "Request membership access";
-  const onNotice = (notice: string) => {
-    if (asset.freeDownloadEnabled && notice.startsWith("Sign in and open")) {
-      void onDownload(asset);
-      return;
-    }
-    notify(notice);
-  };
+  const defaultLicenceType: LicenceType = asset.rightsStatus === "editorial_only" || asset.mediaUsageType === "editorial" ? "editorial" : "commercial";
+  const [purchaseOpen, setPurchaseOpen] = useState(autoOpenPurchase && authenticated);
+  const [licenceType, setLicenceType] = useState<LicenceType>(defaultLicenceType);
+  const [territory, setTerritory] = useState("Worldwide");
+  const [durationDays, setDurationDays] = useState(365);
+  const [validation, setValidation] = useState<AssetCheckoutValidation | null>(null);
+  const [validationState, setValidationState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [termsViewed, setTermsViewed] = useState(false);
+  const [termsAccepted, setTermsAccepted] = useState(false);
+  const [purchaseBusy, setPurchaseBusy] = useState(false);
+  const [purchaseError, setPurchaseError] = useState("");
   const [saveOpen, setSaveOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [savingId, setSavingId] = useState("");
-  useEffect(() => { const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); }; window.addEventListener("keydown", onKeyDown); return () => window.removeEventListener("keydown", onKeyDown); }, [onClose]);
+  const closeButtonRef = React.useRef<HTMLButtonElement>(null);
+  const previousFocusRef = React.useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKeyDown);
+    closeButtonRef.current?.focus();
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      previousFocusRef.current?.focus();
+    };
+  }, [onClose]);
+
+  useEffect(() => {
+    if (autoOpenPurchase && authenticated) setPurchaseOpen(true);
+  }, [autoOpenPurchase, authenticated]);
+
+  const validateLicence = useCallback(async (): Promise<AssetCheckoutValidation | null> => {
+    setValidationState("loading");
+    setPurchaseError("");
+    try {
+      const response = await api("/api/checkout/validate", {
+        method: "POST",
+        body: JSON.stringify({ assetId: asset.id, licenceType, territory, durationDays }),
+      });
+      const body = await response.json().catch(() => ({})) as Partial<AssetCheckoutValidation> & { error?: string };
+      if (!response.ok || !body.checks || !body.licence) throw new Error(body.error ?? "Licence validation is unavailable.");
+      const checked = body as AssetCheckoutValidation;
+      setValidation(checked);
+      setValidationState("ready");
+      return checked;
+    } catch (error) {
+      setValidation(null);
+      setValidationState("error");
+      setPurchaseError(error instanceof Error ? error.message : "Licence validation is unavailable.");
+      return null;
+    }
+  }, [api, asset.id, durationDays, licenceType, territory]);
+
+  useEffect(() => {
+    if (!purchaseOpen || !authenticated || model === "custom_quote") return;
+    void validateLicence();
+  }, [authenticated, model, purchaseOpen, validateLicence]);
+
   async function createAndSave(event: React.FormEvent) {
     event.preventDefault();
     const created = await onCreateLightbox(newName);
@@ -1501,12 +1700,111 @@ function AssetModal({ asset, onClose, onNotice: notify, authenticated, lightboxe
     setNewName("");
     await onSaveToLightbox(created.id, asset.id);
   }
+
   async function save(lightboxId: string) {
     setSavingId(lightboxId);
     await onSaveToLightbox(lightboxId, asset.id);
     setSavingId("");
   }
-  return <div className="modal-backdrop" role="presentation" onClick={onClose}><div className="asset-modal" role="dialog" aria-modal="true" aria-labelledby="asset-title" onClick={(event) => event.stopPropagation()}><button className="close-button" onClick={onClose} aria-label="Close">×</button><div className={`modal-visual ${asset.kind}`}><span>{asset.kind === "video" ? "▶" : "V"}</span></div><div className="modal-copy"><span className="section-kicker">{asset.kind === "video" ? "FILM & VIDEO" : "PHOTOGRAPHY"} · {asset.city}</span><h2 id="asset-title">{asset.title}</h2><p>{asset.caption || asset.description}</p><div className="tag-list">{asset.culturalTags.map((tag) => <span key={tag}>{tag}</span>)}</div><div className="match-box"><div className="card-heading"><span className="section-kicker">WHY THIS MATCHED</span><strong>{archiveDomain.percent(explanation.matchConfidence)}% {archiveDomain.confidenceLabel(explanation.matchConfidence)}</strong></div>{explanation.signals.slice(0, 3).map((signal) => <p key={signal.label}><b>{signal.label}:</b> {signal.detail}</p>)}<small>{explanation.metadataReviewNote}</small></div><div className="rights-summary"><span>Rights: <b>{asset.rightsStatus}</b></span><span>Authenticity: <b>{archiveDomain.percent(asset.authenticityConfidence)}%</b></span><span>Access: <b>{assetPricingLabel(asset)}</b></span></div><div className="modal-actions"><button className="dark-button" onClick={() => onNotice("Sign in and open the governance workspace to request a licence.")}>{requestLabel} <span>↗</span></button><button className="ghost-button" onClick={() => authenticated ? setSaveOpen((open) => !open) : onNotice("Sign in to save assets to a private lightbox.")}>{saveOpen ? "Close lightbox" : "Save to lightbox"}</button></div>{saveOpen && authenticated && <section className="lightbox-panel" aria-label="Save to lightbox"><div className="card-heading"><div><span className="section-kicker">YOUR LIGHTBOXES</span><h3>Keep this asset in reach.</h3></div><span>{lightboxes.reduce((total, box) => total + box.assetCount, 0)} saved</span></div>{lightboxes.length ? <div className="lightbox-list">{lightboxes.map((box) => <button type="button" key={box.id} disabled={savingId === box.id || box.assetIds.includes(asset.id)} onClick={() => void save(box.id)}><span><strong>{box.name}</strong><small>{box.assetCount} asset{box.assetCount === 1 ? "" : "s"} · {box.visibility}</small></span><b>{box.assetIds.includes(asset.id) ? "Saved" : savingId === box.id ? "Saving…" : "Add ↗"}</b></button>)}</div> : <p className="lightbox-empty">Create your first private collection for a brief, mood, or client.</p>}<form className="lightbox-create" onSubmit={createAndSave}><input required maxLength={120} value={newName} onChange={(event) => setNewName(event.target.value)} placeholder="New lightbox name" aria-label="New lightbox name" /><button type="submit" className="outline-button">Create & save</button></form></section>}</div></div></div>;
+
+  function openPurchase(): void {
+    if (asset.freeDownloadEnabled) { void onDownload(asset); return; }
+    if (!authenticated) { onRequireSignIn(asset.id); return; }
+    if (model === "custom_quote") { notify("This asset uses a custom quote and cannot be purchased automatically. Contact the contributor for pricing."); return; }
+    setPurchaseOpen((open) => !open);
+  }
+
+  async function purchaseLicence(): Promise<void> {
+    if (!authenticated) { onRequireSignIn(asset.id); return; }
+    if (!termsViewed || !termsAccepted) {
+      setPurchaseError("Open the terms and accept them before continuing to payment.");
+      return;
+    }
+    setPurchaseBusy(true);
+    setPurchaseError("");
+    let licenceId = "";
+    try {
+      const checked = await validateLicence();
+      if (!checked?.allowed) return;
+      const response = await api("/api/checkout", {
+        method: "POST",
+        body: JSON.stringify({
+          assetId: asset.id,
+          licenceType,
+          territory,
+          durationDays,
+          buyerAgreementVersion: buyerAgreement.version,
+          paymentAgreementVersion: paymentDisclosure.version,
+          acceptBuyerTerms: true,
+        }),
+      });
+      const created = await response.json().catch(() => ({})) as { licenceId?: string; error?: string; blockingReasons?: string[] };
+      if (!response.ok || !created.licenceId) throw new Error(created.blockingReasons?.[0] ?? created.error ?? "The licence could not be created.");
+      licenceId = created.licenceId;
+      const payment = await api(`/api/payments/${encodeURIComponent(licenceId)}/session`, {
+        method: "POST",
+        body: JSON.stringify({
+          successUrl: `${window.location.origin}/account?licence=${encodeURIComponent(licenceId)}&payment=complete`,
+          cancelUrl: `${window.location.origin}/account?licence=${encodeURIComponent(licenceId)}&payment=cancelled`,
+        }),
+      });
+      const session = await payment.json().catch(() => ({})) as { checkoutUrl?: string; provider?: string; error?: string };
+      if (!payment.ok || !session.checkoutUrl) throw new Error(session.error ?? "Secure payment checkout could not be opened.");
+      notify(session.provider === "demo" ? "Demo licence created. Opening the simulated checkout; no real transaction will be made." : "Licence created. Opening secure payment checkout.");
+      window.location.assign(session.checkoutUrl);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "Secure checkout could not be opened.";
+      setPurchaseError(reason);
+      notify(licenceId ? "The licence was created, but payment could not start. Open Account to continue payment; retrying will not create a duplicate." : reason);
+    } finally {
+      setPurchaseBusy(false);
+    }
+  }
+
+  const purchaseLabel = asset.freeDownloadEnabled
+    ? authenticated ? "Download free photo" : "Create an account for free downloads"
+    : model === "custom_quote" ? "Request custom quote"
+    : authenticated ? "Purchase licence"
+    : "Sign in to purchase licence";
+  const licenceOptions: LicenceType[] = ["editorial", "commercial", "advertising", "social", "broadcast", "exclusive"];
+  const statusLabel = validationState === "loading" ? "Checking…" : validationState === "error" ? "Unavailable" : validation?.allowed ? "Ready" : validation ? "Blocked" : "Not checked";
+
+  return <div className="modal-backdrop" role="presentation" onClick={onClose}>
+    <div className="asset-modal" role="dialog" aria-modal="true" aria-labelledby="asset-title" onClick={(event) => event.stopPropagation()}>
+      <button ref={closeButtonRef} className="close-button" onClick={onClose} aria-label="Close">×</button>
+      <div className={`modal-visual ${asset.kind}`}><span>{asset.kind === "video" ? "▶" : "V"}</span></div>
+      <div className="modal-copy">
+        <span className="section-kicker">{asset.kind === "video" ? "FILM & VIDEO" : "PHOTOGRAPHY"} · {asset.city}</span>
+        <h2 id="asset-title">{asset.title}</h2>
+        <p>{asset.caption || asset.description}</p>
+        <div className="tag-list">{asset.culturalTags.map((tag) => <span key={tag}>{tag}</span>)}</div>
+        <div className="match-box"><div className="card-heading"><span className="section-kicker">WHY THIS MATCHED</span><strong>{archiveDomain.percent(explanation.matchConfidence)}% {archiveDomain.confidenceLabel(explanation.matchConfidence)}</strong></div>{explanation.signals.slice(0, 3).map((signal) => <p key={signal.label}><b>{signal.label}:</b> {signal.detail}</p>)}<small>{explanation.metadataReviewNote}</small></div>
+        <div className="rights-summary"><span>Rights: <b>{asset.rightsStatus}</b></span><span>Authenticity: <b>{archiveDomain.percent(asset.authenticityConfidence)}%</b></span><span>Access: <b>{assetPricingLabel(asset)}</b></span></div>
+        <div className="modal-actions"><button type="button" className="dark-button" onClick={openPurchase}>{purchaseLabel} <span>↗</span></button><button type="button" className="ghost-button" onClick={() => authenticated ? setSaveOpen((open) => !open) : notify("Sign in to save assets to a private lightbox.")}>{saveOpen ? "Close lightbox" : "Save to lightbox"}</button></div>
+
+        {purchaseOpen && <section className="asset-purchase-panel" aria-labelledby="asset-purchase-title">
+          <div className="card-heading"><div><span className="section-kicker">AUTOMATIC LICENCE PURCHASE</span><h3 id="asset-purchase-title">Buy this asset with a recorded contract.</h3></div><span className={`purchase-status ${validation?.allowed ? "ready" : ""}`}>{statusLabel}</span></div>
+          <p className="purchase-intro">Choose the intended use below. Veld checks the published record and rights evidence before creating the licence; payment still opens through the configured provider.</p>
+          <div className="asset-purchase-controls">
+            <label>Licence type<select value={licenceType} onChange={(event) => { setLicenceType(event.target.value as LicenceType); setTermsAccepted(false); }}>{licenceOptions.map((option) => <option key={option} value={option}>{option[0].toUpperCase() + option.slice(1)}</option>)}</select></label>
+            <label>Territory<select value={territory} onChange={(event) => { setTerritory(event.target.value); setTermsAccepted(false); }}><option>Worldwide</option><option>South Africa</option><option>Southern Africa</option></select></label>
+            <label>Duration<select value={durationDays} onChange={(event) => { setDurationDays(Number(event.target.value)); setTermsAccepted(false); }}><option value={30}>30 days</option><option value={90}>90 days</option><option value={365}>1 year</option><option value={730}>2 years</option></select></label>
+          </div>
+          {validation?.licence && <div className="purchase-description"><div><span className="section-kicker">SELECTED LICENCE</span><strong>{validation.licence.label}</strong><p>{validation.licence.summary}</p></div><div><span className="section-kicker">PRICE</span><strong>{validation.priceCents === null ? "Custom quote" : formatZar(validation.priceCents)}</strong><p>{validation.priceCents === null ? "The contributor must confirm pricing." : "No charge is made until secure checkout is opened."}</p></div></div>}
+          {validationState === "loading" && <p className="purchase-feedback" role="status" aria-live="polite">Checking approval, rights scope, and release evidence…</p>}
+          {validationState === "error" && <p className="purchase-feedback error" role="alert">{purchaseError || "Licence validation is unavailable."} <button type="button" className="text-button" onClick={() => void validateLicence()}>Try again</button></p>}
+          {validation && <div className={`purchase-checks ${validation.allowed ? "clear" : "blocked"}`} aria-label="Licence validation checks">{validation.checks.map((check) => <div key={check.label}><span className={check.passed ? "check-pass" : "check-fail"}>{check.passed ? "✓" : "×"}</span><span><strong>{check.label}</strong><small>{check.detail}</small></span></div>)}</div>}
+          {validation?.licence && <p className="purchase-usage"><strong>Usage:</strong> {validation.licence.usage} <span>{validation.licence.releaseNote}</span></p>}
+          <details className="purchase-terms" onToggle={(event) => { if (event.currentTarget.open) setTermsViewed(true); }}><summary>Read {buyerAgreement.title} and {paymentDisclosure.title}</summary><div><h4>{buyerAgreement.title} · {buyerAgreement.version}</h4>{buyerAgreement.sections.map((section) => <p key={section.heading}><strong>{section.heading}</strong> {section.body}</p>)}<h4>{paymentDisclosure.title} · {paymentDisclosure.version}</h4>{paymentDisclosure.sections.map((section) => <p key={section.heading}><strong>{section.heading}</strong> {section.body}</p>)}</div></details>
+          <label className="purchase-terms-check"><input type="checkbox" checked={termsAccepted} disabled={!termsViewed || purchaseBusy} onChange={(event) => setTermsAccepted(event.target.checked)} /><span>I have read and accept the displayed buyer licence and payment terms for this selected use.</span></label>
+          {purchaseError && validationState !== "error" && <p className="purchase-feedback error" role="alert">{purchaseError}</p>}
+          <div className="purchase-actions"><button type="button" className="outline-button" onClick={() => void validateLicence()} disabled={validationState === "loading" || purchaseBusy}>Check licence again</button><button type="button" className="dark-button" onClick={() => void purchaseLicence()} disabled={purchaseBusy || validationState === "loading" || !validation?.allowed || !termsAccepted}>{purchaseBusy ? "Preparing secure checkout…" : demoMode ? "Simulate purchase (no charge)" : "Purchase licence"} ↗</button></div>
+        </section>}
+
+        {saveOpen && authenticated && <section className="lightbox-panel" aria-label="Save to lightbox"><div className="card-heading"><div><span className="section-kicker">YOUR LIGHTBOXES</span><h3>Keep this asset in reach.</h3></div><span>{lightboxes.reduce((total, box) => total + box.assetCount, 0)} saved</span></div>{lightboxes.length ? <div className="lightbox-list">{lightboxes.map((box) => <button type="button" key={box.id} disabled={savingId === box.id || box.assetIds.includes(asset.id)} onClick={() => void save(box.id)}><span><strong>{box.name}</strong><small>{box.assetCount} asset{box.assetCount === 1 ? "" : "s"} · {box.visibility}</small></span><b>{box.assetIds.includes(asset.id) ? "Saved" : savingId === box.id ? "Saving…" : "Add ↗"}</b></button>)}</div> : <p className="lightbox-empty">Create your first private collection for a brief, mood, or client.</p>}<form className="lightbox-create" onSubmit={createAndSave}><label>New lightbox name<input required maxLength={120} value={newName} onChange={(event) => setNewName(event.target.value)} placeholder="e.g. Cape Town launch" /></label><button type="submit" className="outline-button">Create & save</button></form></section>}
+      </div>
+    </div>
+  </div>;
 }
 
 function AuthenticatedApp() {
