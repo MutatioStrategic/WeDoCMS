@@ -4569,6 +4569,22 @@ const campaignAssetSchema = z.object({
   stage: z.enum(["shortlisted", "rejected", "approved", "needs_review"]).default("shortlisted"),
   note: z.string().trim().max(1000).default(""),
 });
+const campaignTermsAcceptanceSchema = z.object({
+  viewed: z.literal(true),
+  accepted: z.literal(true),
+  buyerAgreementVersion: z.literal(buyerAgreement.version),
+  paymentAgreementVersion: z.literal(paymentDisclosure.version),
+});
+
+async function campaignTermsAccepted(c: { env: Bindings }, campaignId: string, user: RequestUser): Promise<boolean> {
+  const row = await c.env.DB.prepare(`SELECT COUNT(DISTINCT agreement_type) AS agreement_count
+    FROM marketplace_agreement_acceptances
+    WHERE organization_id = ? AND user_id = ? AND context_type = 'listing' AND context_id = ?
+      AND ((agreement_type = 'buyer' AND agreement_version = ?) OR (agreement_type = 'payment' AND agreement_version = ?))`)
+    .bind(user.organizationId, user.id, campaignId, buyerAgreement.version, paymentDisclosure.version)
+    .first<{ agreement_count: number }>();
+  return Number(row?.agreement_count ?? 0) === 2;
+}
 
 function safeJsonObject<T>(value: unknown, fallback: T): T {
   if (typeof value !== "string" || !value.trim()) return fallback;
@@ -4680,7 +4696,26 @@ app.get("/api/campaigns/:id", async (c) => {
     const staged = stagedByAsset.get(item.asset.id);
     return { ...item, stage: staged?.stage ?? null, note: staged?.note ?? "" };
   });
-  return c.json({ campaign: summary, recommendations, assets, editVersions: [], derivatives: [], bundles: [] });
+  return c.json({ campaign: summary, recommendations, assets, editVersions: [], derivatives: [], bundles: [], buyerTermsAccepted: await campaignTermsAccepted(c, campaignId, user) });
+});
+
+app.post("/api/campaigns/:id/terms/accept", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, 403);
+  const campaignId = c.req.param("id");
+  const campaign = await c.env.DB.prepare("SELECT id FROM campaigns WHERE id = ? AND organization_id = ?").bind(campaignId, user.organizationId).first<{ id: string }>();
+  if (!campaign) return c.json({ error: "Campaign not found" }, 404);
+  campaignTermsAcceptanceSchema.parse(await c.req.json());
+  const acceptedAt = new Date().toISOString();
+  const buyerTermsHash = await sha256Hex(agreementText(buyerAgreement));
+  const paymentTermsHash = await sha256Hex(agreementText(paymentDisclosure));
+  const statements = [
+    c.env.DB.prepare("INSERT OR IGNORE INTO marketplace_agreement_acceptances (id, organization_id, user_id, agreement_type, agreement_version, terms_sha256, context_type, context_id, accepted_at) VALUES (?, ?, ?, 'buyer', ?, ?, 'listing', ?, ?)").bind(crypto.randomUUID(), user.organizationId, user.id, buyerAgreement.version, buyerTermsHash, campaignId, acceptedAt),
+    c.env.DB.prepare("INSERT OR IGNORE INTO marketplace_agreement_acceptances (id, organization_id, user_id, agreement_type, agreement_version, terms_sha256, context_type, context_id, accepted_at) VALUES (?, ?, ?, 'payment', ?, ?, 'listing', ?, ?)").bind(crypto.randomUUID(), user.organizationId, user.id, paymentDisclosure.version, paymentTermsHash, campaignId, acceptedAt),
+  ];
+  if (!(await campaignTermsAccepted(c, campaignId, user))) statements.push(c.env.DB.prepare("INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, metadata_json) VALUES (?, ?, 'campaign_terms_accepted', 'campaign', ?, ?)").bind(crypto.randomUUID(), user.id, campaignId, JSON.stringify({ buyerAgreementVersion: buyerAgreement.version, paymentAgreementVersion: paymentDisclosure.version, acceptedAt })));
+  await c.env.DB.batch(statements);
+  return c.json({ accepted: await campaignTermsAccepted(c, campaignId, user), buyerAgreementVersion: buyerAgreement.version, paymentAgreementVersion: paymentDisclosure.version, acceptedAt });
 });
 
 app.post("/api/campaigns/:id/assets", async (c) => {
@@ -4690,6 +4725,9 @@ app.post("/api/campaigns/:id/assets", async (c) => {
   const campaignId = c.req.param("id");
   const campaign = await c.env.DB.prepare("SELECT id FROM campaigns WHERE id = ? AND organization_id = ?").bind(campaignId, user.organizationId).first<{ id: string }>();
   if (!campaign) return c.json({ error: "Campaign not found" }, 404);
+  if (payload.stage === "approved" && user.role === "buyer" && !(await campaignTermsAccepted(c, campaignId, user))) {
+    return c.json({ error: "View and accept the current buyer and payment terms before approving a campaign source", code: "campaign_terms_required" }, 422);
+  }
   const asset = await c.env.DB.prepare("SELECT id FROM assets WHERE id = ? AND organization_id = ? AND status = 'published'").bind(payload.assetId, user.organizationId).first<{ id: string }>();
   if (!asset) return c.json({ error: "Published asset not found" }, 404);
   await c.env.DB.batch([
@@ -4720,6 +4758,7 @@ app.get("/api/campaigns/:id/manifest", async (c) => {
       rightsVerifiedCount: approvedAssets.filter((asset) => asset.rightsStatus === "verified").length,
       humanVerifiedCount: approvedAssets.filter((asset) => asset.humanVerified).length,
     },
+    terms: { accepted: await campaignTermsAccepted(c, String(campaign.id), user), buyerAgreementVersion: buyerAgreement.version, paymentAgreementVersion: paymentDisclosure.version },
     assets: approvedAssets.map((asset) => ({ id: asset.id, title: asset.title, rightsStatus: asset.rightsStatus, humanVerified: asset.humanVerified, sourceAttribution: asset.sourceAttribution })),
   });
 });

@@ -99,6 +99,18 @@ The unavailable-backend state explains that no licence or payment was created
 and offers a retry. A missing published-asset state sends the buyer back to
 approved archive search.
 
+## Buyer campaign-pack approval
+
+1. A signed-in buyer opens a campaign workspace and sees the current buyer
+   licence and payment terms directly above the ranked source photos.
+2. The buyer must open the terms, then explicitly accept the displayed
+   versions. The acceptance is recorded against that campaign and buyer.
+3. Until that acceptance succeeds, **Approve for pack** remains disabled and
+   the Worker rejects direct approval requests as well.
+4. Rights warnings and provenance remain visible on each source before the
+   buyer approves it. A failed acceptance or unavailable backend leaves the
+   source unapproved and offers a retry.
+
 ## Buyer purchase history, membership, and credits
 
 1. A signed-in buyer opens the Buyer ROI workspace and sees the complete

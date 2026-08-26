@@ -25,10 +25,16 @@ Bundle requests support `social_media`, `website`, `paid_ads`, `print_handoff`, 
 
 Approved downloads expire after seven days. Bundle history exposes pending, approved, expired, revoked, and failed states.
 
+Buyer approval is terms-gated: the buyer must open and accept the current buyer
+licence and payment disclosures above the source photos. The acceptance is
+stored for the campaign and rechecked by the Worker before an asset can move to
+`approved`.
+
 ## Key API surface
 
 - `GET/POST /api/campaigns`
 - `GET /api/campaigns/:id`
+- `POST /api/campaigns/:id/terms/accept`
 - `POST /api/campaigns/:id/assets`
 - `GET/POST /api/assets/:id/edit-versions`
 - `POST /api/assets/:id/derivatives`

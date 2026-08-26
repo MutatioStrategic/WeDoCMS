@@ -13,6 +13,7 @@ import { WordPressIntegrationPanel } from "./wordpress-integration";
 import type { BrandKit, CampaignBrief, CampaignPlatform, CampaignRecommendation, CampaignStage } from "./campaign-intelligence";
 import { cropPresets, defaultEditRecipe, derivativeForPreset, fitCrop, safeZonePercent, type CropPreset, type EditRecipe } from "./campaign-editor";
 import { Icon, type IconName } from "./ui";
+import { buyerAgreement, paymentDisclosure } from "./legal/agreements";
 
 declare global {
   interface Window {
@@ -464,7 +465,7 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
 
     {view === "explore" && <ExploreView query={query} setQuery={setQuery} runSearch={runSearch} assets={assets} filter={filter} setFilter={setFilter} sort={sort} setSort={setSort} orientation={orientation} setOrientation={setOrientation} verifiedCount={verifiedCount} notice={notice} onOpen={openAsset} authenticated={Boolean(sessionUser)} discovery={discovery} onUseQuery={useDiscoveryQuery} onSaveSearch={saveCurrentSearch} onDeleteSearch={deleteSavedSearch} />}
     {view === "search" && <SearchResultsView query={query} setQuery={setQuery} activeQuery={activeQuery} runSearch={runSearch} assets={assets} assetsLoading={assetsLoading} filter={filter} setFilter={setFilter} sort={sort} setSort={setSort} orientation={orientation} setOrientation={setOrientation} notice={notice} onOpen={openAsset} />}
-    {view === "campaigns" && <CampaignWorkspace api={api} onNotice={setNotice} onOpen={openAsset} />}
+    {view === "campaigns" && <CampaignWorkspace api={api} onNotice={setNotice} onOpen={openAsset} role={sessionUser?.role} />}
     {view === "contributors" && <CreatorMarketplace onOpen={openAsset} />}
     {view === "contributor" && <><AnalyticsDashboard role="contributor" /><MarketplaceLegalDocuments api={api} /><SellerVerificationPanel api={api} onNotice={setNotice} /><ContributorWorkspace api={api} onNotice={setNotice} /><ContributorAssetLibrary api={api} onNotice={setNotice} /></>}
     {view === "buyer" && <AnalyticsDashboard role="buyer" onOpenAccount={() => navigate("account")} />}
@@ -748,7 +749,7 @@ function sharedAssetSignals(left: Asset, right: Asset): number {
   return [...right.subjectTags, ...right.culturalTags].filter((tag) => leftTags.has(tag.toLowerCase())).length;
 }
 
-function CampaignWorkspace({ api, onNotice, onOpen }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void; onOpen: (asset: Asset) => void }) {
+function CampaignWorkspace({ api, onNotice, onOpen, role }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void; onOpen: (asset: Asset) => void; role?: string }) {
   const [campaigns, setCampaigns] = useState<CampaignSummary[]>([]);
   const [activeId, setActiveId] = useState("");
   const [activeCampaign, setActiveCampaign] = useState<CampaignSummary | null>(null);
@@ -769,6 +770,10 @@ function CampaignWorkspace({ api, onNotice, onOpen }: { api: (path: string, init
   const [assistantTool, setAssistantTool] = useState<AssistantTool>("similar");
   const [selectedAssetId, setSelectedAssetId] = useState("");
   const [copyDraft, setCopyDraft] = useState("A better way to come home");
+  const isBuyer = role === "buyer";
+  const [buyerTermsViewed, setBuyerTermsViewed] = useState(false);
+  const [buyerTermsAccepted, setBuyerTermsAccepted] = useState(false);
+  const [termsSaving, setTermsSaving] = useState(false);
 
   const loadCampaigns = useCallback(async () => {
     try {
@@ -794,6 +799,9 @@ function CampaignWorkspace({ api, onNotice, onOpen }: { api: (path: string, init
       setActiveCampaign(data.campaign);
       setCampaignAssets(data.assets ?? []);
       setRecommendations(data.recommendations);
+      const accepted = Boolean((data as { buyerTermsAccepted?: boolean }).buyerTermsAccepted);
+      setBuyerTermsAccepted(accepted);
+      setBuyerTermsViewed(accepted);
       setSelectedAssetId((current) => current && data.recommendations.some((item) => item.asset.id === current) ? current : data.recommendations[0]?.asset.id || "");
     } catch {
       onNotice("This campaign could not be loaded. No local recommendations were applied.");
@@ -802,6 +810,28 @@ function CampaignWorkspace({ api, onNotice, onOpen }: { api: (path: string, init
 
   useEffect(() => { void loadCampaigns(); }, [loadCampaigns]);
   useEffect(() => { if (activeId) void loadCampaign(activeId); }, [activeId, loadCampaign]);
+
+  async function acceptBuyerCampaignTerms(): Promise<void> {
+    if (!activeCampaign || !buyerTermsViewed || termsSaving) return;
+    setTermsSaving(true);
+    try {
+      const response = await api(`/api/campaigns/${activeCampaign.id}/terms/accept`, { method: "POST", body: JSON.stringify({
+        viewed: true,
+        accepted: true,
+        buyerAgreementVersion: buyerAgreement.version,
+        paymentAgreementVersion: paymentDisclosure.version,
+      }) });
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) throw new Error(body.error ?? "The campaign terms could not be accepted.");
+      setBuyerTermsAccepted(true);
+      onNotice("Campaign pack terms accepted. You can now approve licensed sources for this campaign.");
+    } catch (error) {
+      setBuyerTermsAccepted(false);
+      onNotice(error instanceof Error ? error.message : "The campaign terms could not be accepted.");
+    } finally {
+      setTermsSaving(false);
+    }
+  }
 
   function applyPropertyPreset() {
     setName("New property launch");
@@ -834,9 +864,16 @@ function CampaignWorkspace({ api, onNotice, onOpen }: { api: (path: string, init
 
   async function changeStage(item: CampaignRecommendationRow, stage: CampaignStage) {
     if (!activeCampaign) return;
+    if (stage === "approved" && isBuyer && (!buyerTermsViewed || !buyerTermsAccepted)) {
+      onNotice("View and accept the campaign pack terms above the photos before approving a source.");
+      return;
+    }
     try {
       const response = await api(`/api/campaigns/${activeCampaign.id}/assets`, { method: "POST", body: JSON.stringify({ assetId: item.asset.id, stage, note: stage === "approved" ? "Approved after rights and creative review." : "" }) });
-      if (!response.ok) throw new Error();
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error ?? "That campaign decision was not saved.");
+      }
       setRecommendations((current) => current.map((recommendation) => recommendation.asset.id === item.asset.id ? { ...recommendation, stage } : recommendation));
       setCampaignAssets((current) => {
         const existing = current.find((asset) => asset.id === item.asset.id);
@@ -844,8 +881,8 @@ function CampaignWorkspace({ api, onNotice, onOpen }: { api: (path: string, init
         return existing ? current.map((asset) => asset.id === item.asset.id ? nextAsset : asset) : [nextAsset, ...current];
       });
       onNotice(stage === "shortlisted" ? `${item.asset.title} added to this campaign.` : `${item.asset.title} moved to ${stage.replaceAll("_", " ")}.`);
-    } catch {
-      onNotice("That campaign decision was not saved. No local decision was applied.");
+    } catch (error) {
+      onNotice(`${error instanceof Error ? error.message : "That campaign decision was not saved."} No local decision was applied.`);
     }
   }
 
@@ -905,7 +942,8 @@ function CampaignWorkspace({ api, onNotice, onOpen }: { api: (path: string, init
     </section>
 
     {activeCampaign && <section className="campaign-editor"><div className="campaign-editor-heading"><div><span className="section-kicker">ACTIVE WORKSPACE</span><h2>{activeCampaign.name}</h2><p>{activeCampaign.brief}</p></div><button className="outline-button" type="button" onClick={() => void downloadManifest()}>Export campaign pack ↗</button></div><div className="brief-pills"><span>{activeCampaign.briefFields.usageRights} use</span>{activeCampaign.briefFields.platforms.map((platform) => <span key={platform}>{campaignPlatformLabel(platform)}</span>)}{activeCampaign.briefFields.tone.map((value) => <span key={value}>{value}</span>)}</div>
-      <div className="campaign-results"><section><div className="card-heading campaign-section-heading"><div><span className="section-kicker">MARKETING ASSET INTELLIGENCE</span><h3>Ranked for this brief</h3></div><span>{recommendations.length} published sources</span></div>{recommendations.length ? <div className="campaign-recommendations">{recommendations.slice(0, 12).map((item) => <article className={`campaign-recommendation ${item.asset.id === selectedAsset?.id ? "selected" : ""}`} key={item.asset.id}><button type="button" className="recommendation-select" onClick={() => setSelectedAssetId(item.asset.id)}><AssetPreview asset={item.asset} className={`recommendation-preview ${item.asset.kind}`} /><div className="recommendation-copy"><div className="card-heading"><span className="section-kicker">{item.asset.kind} · {item.asset.city ?? item.asset.country}</span><strong>{item.score}% fit</strong></div><h4>{item.asset.title}</h4><p>{item.reasons[0]}</p><div className="recommendation-meta"><span>Rights {item.asset.rightsStatus}</span><span>{item.warnings.length ? `${item.warnings.length} review note${item.warnings.length === 1 ? "" : "s"}` : "No stored blockers"}</span></div></div></button><div className="recommendation-actions"><button type="button" className="text-button" onClick={() => onOpen(item.asset)}>Inspect source</button>{item.stage === "approved" ? <button type="button" className="approve-button" onClick={() => void changeStage(item, "shortlisted")}>Approved ✓</button> : <button type="button" className="outline-button" onClick={() => void changeStage(item, "approved")} disabled={!item.usable}>{item.usable ? "Approve for pack" : "Rights blocked"}</button>}</div>{item.warnings.length > 0 && <div className="recommendation-warnings">{item.warnings.slice(0, 2).map((warning) => <p className={`warning-${warning.severity}`} key={warning.code}><strong>{warning.label}</strong> {warning.detail}</p>)}</div>}</article>)}</div> : <div className="empty-state">No published assets are available for this organization yet.</div>}</section>
+      {isBuyer && <section className={`campaign-terms-gate ${buyerTermsAccepted ? "accepted" : ""}`} aria-labelledby="campaign-terms-heading"><div className="card-heading"><div><span className="section-kicker">BUYER APPROVAL GATE</span><h3 id="campaign-terms-heading">Read the terms before approving a pack source.</h3></div><span className={`status-pill ${buyerTermsAccepted ? "cool" : "warm"}`}>{buyerTermsAccepted ? "Accepted" : "Required"}</span></div><p>Approval confirms that your campaign will use the contributor's media only within the displayed licence, territory, duration, attribution, and restrictions. It does not transfer copyright.</p><details onToggle={(event) => { if (event.currentTarget.open) setBuyerTermsViewed(true); }}><summary>View buyer licence and payment terms · {buyerAgreement.version} / {paymentDisclosure.version}</summary><div className="campaign-terms-copy"><h4>{buyerAgreement.title}</h4>{buyerAgreement.sections.map((section) => <section key={section.heading}><strong>{section.heading}</strong><p>{section.body}</p></section>)}<h4>{paymentDisclosure.title}</h4>{paymentDisclosure.sections.map((section) => <section key={section.heading}><strong>{section.heading}</strong><p>{section.body}</p></section>)}</div></details><label className="checkbox-row campaign-terms-check"><input type="checkbox" checked={buyerTermsAccepted} disabled={!buyerTermsViewed || termsSaving} onChange={() => void acceptBuyerCampaignTerms()} /> I have read and accept these current terms for this campaign pack.</label>{!buyerTermsViewed && <small className="field-help">Open “View buyer licence and payment terms” first. The approval buttons stay locked until the terms are viewed and accepted.</small>}</section>}
+       <div className="campaign-results"><section><div className="card-heading campaign-section-heading"><div><span className="section-kicker">MARKETING ASSET INTELLIGENCE</span><h3>Ranked for this brief</h3></div><span>{recommendations.length} published sources</span></div>{recommendations.length ? <div className="campaign-recommendations">{recommendations.slice(0, 12).map((item) => <article className={`campaign-recommendation ${item.asset.id === selectedAsset?.id ? "selected" : ""}`} key={item.asset.id}><button type="button" className="recommendation-select" onClick={() => setSelectedAssetId(item.asset.id)}><AssetPreview asset={item.asset} className={`recommendation-preview ${item.asset.kind}`} /><div className="recommendation-copy"><div className="card-heading"><span className="section-kicker">{item.asset.kind} · {item.asset.city ?? item.asset.country}</span><strong>{item.score}% fit</strong></div><h4>{item.asset.title}</h4><p>{item.reasons[0]}</p><div className="recommendation-meta"><span>Rights {item.asset.rightsStatus}</span><span>{item.warnings.length ? `${item.warnings.length} review note${item.warnings.length === 1 ? "" : "s"}` : "No stored blockers"}</span></div></div></button><div className="recommendation-actions"><button type="button" className="text-button" onClick={() => onOpen(item.asset)}>Inspect source</button>{item.stage === "approved" ? <button type="button" className="approve-button" onClick={() => void changeStage(item, "shortlisted")}>Approved ✓</button> : <button type="button" className="outline-button" onClick={() => void changeStage(item, "approved")} disabled={!item.usable || (isBuyer && (!buyerTermsViewed || !buyerTermsAccepted))}>{!item.usable ? "Rights blocked" : isBuyer && (!buyerTermsViewed || !buyerTermsAccepted) ? "Read terms to approve" : "Approve for pack"}</button>}</div>{item.warnings.length > 0 && <div className="recommendation-warnings">{item.warnings.slice(0, 2).map((warning) => <p className={`warning-${warning.severity}`} key={warning.code}><strong>{warning.label}</strong> {warning.detail}</p>)}</div>}</article>)}</div> : <div className="empty-state">No published assets are available for this organization yet.</div>}</section>
 
         <aside className="creative-assistant"><div className="assistant-heading"><div><span className="section-kicker">INSIDE THE EDITOR</span><h3>Creative assistant</h3></div><span className="ai-badge">AI SUGGESTION</span></div><p className="assistant-intro">Choose an action. Each result explains what it used, and the source asset remains the licensed contributor media.</p>{recommendations.length > 0 && <label className="assistant-source">Working source<select value={selectedAsset?.id ?? ""} onChange={(event) => setSelectedAssetId(event.target.value)}>{recommendations.slice(0, 12).map((item) => <option key={item.asset.id} value={item.asset.id}>{item.asset.title}</option>)}</select></label>}<div className="assistant-tools">{assistantTools.map((tool) => <button type="button" key={tool.id} className={assistantTool === tool.id ? "active" : ""} onClick={() => setAssistantTool(tool.id)}>{tool.label}<span>→</span></button>)}</div>{selectedAsset ? <div className="assistant-output">
           {assistantTool === "similar" && <><AssistantOutputHeading title="Similar, ranked candidates" detail="Based on the active brief, stored tags, place, and rights metadata." />{similar.map((item) => <button className="assistant-result" type="button" key={item.asset.id} onClick={() => setSelectedAssetId(item.asset.id)}><span><strong>{item.asset.title}</strong><small>{item.asset.city ?? item.asset.country} · {sharedAssetSignals(selectedAsset, item.asset)} shared signals</small></span><b>{item.score}%</b></button>)}</>}
