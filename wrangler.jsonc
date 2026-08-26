@@ -258,6 +258,10 @@
 					"bucket_name": "veld-archive-demo-media"
 				},
 				{
+					"binding": "MEDIA_LIBRARY_BUCKET",
+					"bucket_name": "veld-archive-media"
+				},
+				{
 					"binding": "MEDIA_DR_BUCKET",
 					"bucket_name": "veld-archive-demo-media-dr"
 				},
