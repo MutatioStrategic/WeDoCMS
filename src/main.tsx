@@ -34,7 +34,7 @@ function TurnstileChallenge({ onToken }: { onToken: (token: string) => void }) {
 
 type View = "explore" | "search" | "campaigns" | "contributors" | "contributor" | "buyer" | "review" | "governance" | "community" | "account" | "studio" | "rights" | "stakeholders" | "wordpress";
 type SidebarSection = { label: string; items: Array<{ view: View; label: string; icon: IconName; badge?: string }> };
-const gatedViews = new Set<View>(["campaigns", "contributor", "buyer", "review", "governance", "wordpress"]);
+const gatedViews = new Set<View>(["campaigns", "contributor", "buyer", "review", "governance", "account", "studio", "wordpress"]);
 const sidebarSections: SidebarSection[] = [
   { label: "Discover", items: [{ view: "explore", label: "Explore archive", icon: "compass" }, { view: "search", label: "Search workbench", icon: "search" }, { view: "community", label: "Community", icon: "users" }] },
   { label: "Workspaces", items: [{ view: "campaigns", label: "Campaign intelligence", icon: "sparkles", badge: "3A" }, { view: "studio", label: "Media studio", icon: "image" }, { view: "contributors", label: "Creator marketplace", icon: "briefcase" }, { view: "buyer", label: "Buyer ROI", icon: "grid" }] },
@@ -46,6 +46,17 @@ type AppNotification = { id: string; type: string; title: string; body: string; 
 type Auth0Bridge = Pick<Auth0ContextInterface, "isAuthenticated" | "isLoading" | "getAccessTokenSilently" | "loginWithRedirect" | "logout">;
 type SupabaseAuthMode = "signin" | "signup" | "forgot" | "reset";
 type DemoRole = "buyer" | "contributor" | "editor" | "admin";
+
+function canAccessView(view: View, role: string | undefined, authenticated: boolean): boolean {
+  if (!gatedViews.has(view)) return true;
+  if (!authenticated) return false;
+  if (role === "admin") return true;
+  if (view === "account") return true;
+  if (view === "campaigns" || view === "buyer" || view === "studio") return role === "buyer";
+  if (view === "contributor") return role === "contributor" || role === "editor";
+  if (view === "review" || view === "governance" || view === "wordpress") return role === "editor";
+  return false;
+}
 
 const auth0Domain = (import.meta.env.VITE_AUTH0_DOMAIN as string | undefined)?.trim();
 const auth0ClientId = (import.meta.env.VITE_AUTH0_CLIENT_ID as string | undefined)?.trim();
@@ -90,6 +101,7 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
   const [supabaseAuthOpen, setSupabaseAuthOpen] = useState(recoveryLinkPresent);
   const [supabaseAuthMode, setSupabaseAuthMode] = useState<SupabaseAuthMode>(() => recoveryLinkPresent() ? "reset" : "signin");
   const [supabaseAuthMethod, setSupabaseAuthMethod] = useState<"email" | "phone">("email");
+  const [supabaseAccountIntent, setSupabaseAccountIntent] = useState<"buyer" | "seller">("buyer");
   const [supabaseEmail, setSupabaseEmail] = useState("");
   const [supabasePassword, setSupabasePassword] = useState("");
   const [supabasePasswordConfirmation, setSupabasePasswordConfirmation] = useState("");
@@ -102,6 +114,7 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
   const authExchangeAttempted = React.useRef(false);
   const supabaseExchangeAttempted = React.useRef(false);
   const supabaseRecoveryPending = React.useRef(recoveryLinkPresent());
+  const supabaseAccountIntentRef = React.useRef<"buyer" | "seller">("buyer");
 
   const api = useCallback((path: string, init: RequestInit = {}) => fetch(path, { ...init, credentials: "include", headers: { ...(init.body ? { "Content-Type": "application/json" } : {}), ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}), ...(init.headers ?? {}) } }), [csrfToken]);
 
@@ -127,7 +140,7 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify(auth0Organization ? { organizationId: auth0Organization } : {}),
+        body: JSON.stringify({ ...(auth0Organization ? { organizationId: auth0Organization } : {}), ...(window.sessionStorage.getItem("veld.account-intent") === "seller" ? { accountIntent: "seller" } : {}) }),
       }))
       .then(async (response) => {
         if (!response.ok) throw new Error("Identity exchange failed");
@@ -137,6 +150,8 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
         if (!active) return;
         setSessionUser(data.user);
         setCsrfToken(data.csrfToken);
+        if (data.user.role === "contributor") setView("contributor");
+        window.sessionStorage.removeItem("veld.account-intent");
         setNotice(`Signed in to ${data.user.organizationName}.`);
       })
       .catch(() => {
@@ -150,11 +165,16 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
     if (!session?.access_token || supabaseExchangeAttempted.current) return;
     supabaseExchangeAttempted.current = true;
     try {
-      const response = await fetch("/api/auth/exchange", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` }, body: "{}" });
+      const accountIntent = window.sessionStorage.getItem("veld.account-intent") === "seller" || supabaseAccountIntentRef.current === "seller" ? "seller" : undefined;
+      const response = await fetch("/api/auth/exchange", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` }, body: JSON.stringify(accountIntent ? { accountIntent } : {}) });
       if (!response.ok) throw new Error("Identity exchange failed");
       const data = await response.json() as { user: SessionUser; csrfToken: string };
       setSessionUser(data.user);
       setCsrfToken(data.csrfToken);
+      if (accountIntent === "seller" || data.user.role === "contributor") setView("contributor");
+      window.sessionStorage.removeItem("veld.account-intent");
+      supabaseAccountIntentRef.current = "buyer";
+      setSupabaseAccountIntent("buyer");
       setSupabaseAuthOpen(false);
       setSupabasePassword("");
       setSupabaseAuthMessage(null);
@@ -358,9 +378,21 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
     }
   }
 
+  function chooseSupabaseAccountIntent(intent: "buyer" | "seller"): void {
+    supabaseAccountIntentRef.current = intent;
+    setSupabaseAccountIntent(intent);
+    if (intent === "seller") window.sessionStorage.setItem("veld.account-intent", "seller");
+    else window.sessionStorage.removeItem("veld.account-intent");
+  }
+
   function navigate(nextView: View) {
-    if (!sessionUser && gatedViews.has(nextView)) {
-      setNotice("Sign in is required for this workspace.");
+    if (!canAccessView(nextView, sessionUser?.role, Boolean(sessionUser))) {
+      if (!sessionUser && gatedViews.has(nextView)) {
+        if (nextView === "contributor") openSellerSignUp();
+        else openBuyerSignIn();
+        return;
+      }
+      setNotice(nextView === "contributor" ? "Contributor access is required for seller tools." : nextView === "buyer" || nextView === "campaigns" || nextView === "studio" ? "Buyer access is required for this workspace." : "Editor access is required for this workspace.");
       return;
     }
     setView(nextView);
@@ -450,6 +482,11 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
   const verifiedCount = useMemo(() => assets.filter((asset) => asset.humanVerified).length, [assets]);
   function openAsset(asset: Asset) { setSelectedAsset(asset); trackEvent({ type: "asset_view", assetId: asset.id }); }
   function openBuyerSignIn(assetId?: string): void {
+    chooseSupabaseAccountIntent("buyer");
+    if (assetId) {
+      setPendingAssetId(assetId);
+      setPendingAssetPurchase(true);
+    }
     const returnPath = assetId
       ? `${window.location.pathname}?asset=${encodeURIComponent(assetId)}&purchase=1`
       : window.location.pathname;
@@ -458,13 +495,33 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
       return;
     }
     if (supabase) {
-      setSupabaseAuthMode("signin");
+      setSupabaseAuthMode("signup");
       setSupabaseAuthOpen(true);
-      setNotice("Sign in to purchase this licence. Your selected asset will remain open.");
+      setNotice(assetId ? "Create a buyer account or switch to sign in. Your selected asset will remain open." : "Create a buyer account, or switch to sign in if you already have one.");
       return;
     }
     if (demoMode || import.meta.env.DEV) {
       void devSignIn("buyer");
+      return;
+    }
+    setNotice("An external identity provider is not configured for this deployment.");
+  }
+
+  function openSellerSignUp(): void {
+    chooseSupabaseAccountIntent("seller");
+    if (auth0) {
+      window.sessionStorage.setItem("veld.account-intent", "seller");
+      void auth0.loginWithRedirect({ authorizationParams: { ...(auth0Audience ? { audience: auth0Audience } : {}), ...(auth0Organization ? { organization: auth0Organization } : {}) }, appState: { returnTo: "/contributor" } });
+      return;
+    }
+    if (supabase) {
+      setSupabaseAuthMode("signup");
+      setSupabaseAuthOpen(true);
+      setNotice("Create a seller account to complete verification, then upload your first media record.");
+      return;
+    }
+    if (demoMode || import.meta.env.DEV) {
+      void devSignIn("contributor");
       return;
     }
     setNotice("An external identity provider is not configured for this deployment.");
@@ -497,7 +554,7 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
   const currentViewLabel = sidebarSections.flatMap((section) => section.items).find((item) => item.view === view)?.label ?? "Explore archive";
 
   return <div className={`app-shell better-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
-    <BetterSidebar view={view} navigate={navigate} collapsed={sidebarCollapsed} mobileOpen={mobileSidebarOpen} authenticated={Boolean(sessionUser)} onToggleCollapse={() => setSidebarCollapsed((value) => !value)} onCloseMobile={() => setMobileSidebarOpen(false)} />
+    <BetterSidebar view={view} navigate={navigate} collapsed={sidebarCollapsed} mobileOpen={mobileSidebarOpen} authenticated={Boolean(sessionUser)} role={sessionUser?.role} onToggleCollapse={() => setSidebarCollapsed((value) => !value)} onCloseMobile={() => setMobileSidebarOpen(false)} />
     <header className="topbar">
       <button type="button" className="better-mobile-menu" aria-label="Open navigation" onClick={() => setMobileSidebarOpen(true)}><Icon name="menu" /></button>
       <button className="wordmark wordmark-button" onClick={() => navigate("explore")} aria-label="Veld Archive home"><span className="mark">V</span><span>veld<span className="muted">archive</span></span></button>
@@ -511,11 +568,15 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
         {demoMode && sessionUser && <button className="ghost-button demo-sign-out" onClick={() => { void api("/api/auth/logout", { method: "POST" }).then(() => { setSessionUser(null); setCsrfToken(""); setNotice("Demo session ended."); }); }}>Exit demo</button>}
         {!demoMode && import.meta.env.DEV && !sessionUser && <label className="role-switcher">Local role <select value={devRole} onChange={(event) => setDevRole(event.target.value as DemoRole)}><option value="buyer">Buyer</option><option value="contributor">Contributor</option><option value="editor">Editor</option><option value="admin">Admin</option></select></label>}
         {!demoMode && import.meta.env.DEV && !sessionUser && <button className="ghost-button local-dev-login" onClick={() => void devSignIn()}>Local sign in</button>}
-        {!sessionUser && <button className="dark-button subscription-button" onClick={async () => { if (auth0) { await auth0.loginWithRedirect({ authorizationParams: { ...(auth0Audience ? { audience: auth0Audience } : {}), ...(auth0Organization ? { organization: auth0Organization } : {}) }, appState: { returnTo: "/account" } }); return; } if (supabase) { setSupabaseAuthMode("signup"); setSupabaseAuthOpen(true); setNotice("Create or sign in to your account, then open Account to start the verified subscription checkout."); return; } setNotice("Sign in to start a subscription through your account."); }}>Subscribe</button>}
+        {!sessionUser && <><button className="dark-button role-action buyer-signup-button" onClick={() => openBuyerSignIn()}>Create buyer account</button><button className="ghost-button role-action seller-signup-button" onClick={openSellerSignUp}>Sell your media</button></>}
+        {sessionUser?.role === "buyer" && <button className="dark-button role-action" onClick={() => navigate("search")}>Find media <span>↗</span></button>}
+        {(sessionUser?.role === "contributor" || sessionUser?.role === "editor") && <button className="dark-button role-action" onClick={() => navigate("contributor")}>+ Upload media <span>↗</span></button>}
+        {sessionUser?.role === "admin" && <button className="dark-button role-action" onClick={() => navigate("review")}>Review queue <span>↗</span></button>}
         {!sessionUser && <button className="ghost-button" aria-expanded={supabase ? supabaseAuthOpen : undefined} onClick={async () => { if (auth0) { await auth0.loginWithRedirect({ authorizationParams: { ...(auth0Audience ? { audience: auth0Audience } : {}), ...(auth0Organization ? { organization: auth0Organization } : {}) } }); return; } if (supabase) { setSupabaseAuthMode("signin"); setSupabaseAuthOpen(true); return; } if (!import.meta.env.DEV) { setNotice("An external identity provider is not configured for this deployment."); return; } await devSignIn(); }}>Sign in</button>}
         {sessionUser && <><button className="ghost-button" onClick={() => navigate("account")}>Account</button><button className="ghost-button" onClick={() => { void api("/api/auth/logout", { method: "POST" }).then(() => { setSessionUser(null); setCsrfToken(""); setNotice("Signed out."); if (auth0) auth0.logout({ logoutParams: { returnTo: window.location.origin } }); if (supabase) void supabase.auth.signOut(); }); }}>Sign out</button></>}
       </div>
     </header>
+    {supabase && supabaseAuthOpen && !sessionUser && supabaseAuthMode === "signup" && <p className="auth-intent-note" role="status">{supabaseAccountIntent === "seller" ? "Seller account: complete verification and payout setup before uploading media." : "Buyer account: create an account to keep your selected asset and continue to licence terms."}</p>}
     {supabase && supabaseAuthOpen && !sessionUser && <section className="auth-panel" aria-label="Supabase authentication"><div><span className="section-kicker">SUPABASE AUTH</span><h2>{supabaseAuthMode === "signup" ? "Create your archive account." : supabaseAuthMode === "forgot" ? "Reset your password." : supabaseAuthMode === "reset" ? "Choose a new password." : "Welcome back."}</h2><p>{supabaseAuthMode === "forgot" ? "Enter your email and we’ll send a secure reset link. For your privacy, the response is the same whether an account exists." : supabaseAuthMode === "reset" ? "Your reset link is verified by Supabase. Set a new password, then sign in again." : supabaseAuthMethod === "phone" ? "Use a one-time SMS code. SMS delivery must be enabled for this Supabase project." : "Email/password authentication is handled by Supabase; Veld receives only the verified access token."}</p></div><form onSubmit={(event) => void submitSupabaseAuth(event)}>{supabaseAuthMessage && <p className={`auth-feedback ${supabaseAuthMessage.tone}`} role={supabaseAuthMessage.tone === "error" ? "alert" : "status"} aria-live="polite">{supabaseAuthMessage.text}</p>}{["signin", "signup"].includes(supabaseAuthMode) && <div className="auth-method-switch" role="group" aria-label="Verification method"><button type="button" className={supabaseAuthMethod === "email" ? "active" : ""} onClick={() => { setSupabaseAuthMethod("email"); setSupabasePhoneCodeSent(false); setSupabaseAuthMessage(null); }}>Email</button><button type="button" className={supabaseAuthMethod === "phone" ? "active" : ""} onClick={() => { setSupabaseAuthMethod("phone"); setSupabasePhoneCodeSent(false); setSupabaseAuthMessage(null); }}>SMS</button></div>}{supabaseAuthMode === "reset" ? <><label>New password<input type="password" autoComplete="new-password" minLength={8} required value={supabasePassword} onChange={(event) => setSupabasePassword(event.target.value)} /></label><label>Confirm new password<input type="password" autoComplete="new-password" minLength={8} required value={supabasePasswordConfirmation} onChange={(event) => setSupabasePasswordConfirmation(event.target.value)} /></label></> : supabaseAuthMethod === "phone" && ["signin", "signup"].includes(supabaseAuthMode) ? <>{supabaseAuthMode === "signup" && <label>Display name<input type="text" autoComplete="name" required value={supabaseDisplayName} onChange={(event) => setSupabaseDisplayName(event.target.value)} /></label>}<label>Phone number<input type="tel" autoComplete="tel" inputMode="tel" pattern="\+[1-9][0-9]{7,14}" required disabled={supabasePhoneCodeSent} value={supabasePhone} onChange={(event) => setSupabasePhone(event.target.value)} /></label>{supabasePhoneCodeSent && <label>SMS code<input type="text" autoComplete="one-time-code" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} required value={supabasePhoneCode} onChange={(event) => setSupabasePhoneCode(event.target.value)} /></label>}</> : <><label>Email<input type="email" autoComplete="email" required value={supabaseEmail} onChange={(event) => setSupabaseEmail(event.target.value)} /></label>{["signin", "signup"].includes(supabaseAuthMode) && <label>Password<input type="password" autoComplete={supabaseAuthMode === "signup" ? "new-password" : "current-password"} minLength={8} required value={supabasePassword} onChange={(event) => setSupabasePassword(event.target.value)} /></label>}</>}<div className="modal-actions"><button type="submit" className="dark-button" disabled={supabaseAuthBusy}>{supabaseAuthBusy ? "Working…" : supabaseAuthMode === "forgot" ? "Send reset link" : supabaseAuthMode === "reset" ? "Update password" : supabaseAuthMethod === "phone" ? supabasePhoneCodeSent ? "Verify SMS code" : "Send SMS code" : supabaseAuthMode === "signup" ? "Create account" : "Sign in"}</button>{supabaseAuthMode === "signin" && supabaseAuthMethod === "email" && <button type="button" className="text-button" onClick={() => { setSupabaseAuthMode("forgot"); setSupabasePassword(""); setSupabaseAuthMessage(null); }}>Forgot password?</button>}{["signin", "signup"].includes(supabaseAuthMode) && <button type="button" className="ghost-button" onClick={() => { setSupabaseAuthMode((mode) => mode === "signup" ? "signin" : "signup"); setSupabasePassword(""); setSupabasePasswordConfirmation(""); setSupabasePhoneCodeSent(false); setSupabaseAuthMessage(null); }}>{supabaseAuthMode === "signup" ? "Use existing account" : "Create an account"}</button>}{supabaseAuthMode === "forgot" && <button type="button" className="ghost-button" onClick={() => { setSupabaseAuthMode("signin"); setSupabaseAuthMessage(null); }}>Back to sign in</button>}{supabaseAuthMode === "reset" && <button type="button" className="ghost-button" onClick={() => { setSupabaseAuthMode("signin"); setSupabasePassword(""); setSupabasePasswordConfirmation(""); setSupabaseAuthMessage(null); }}>Back to sign in</button>}<button type="button" className="ghost-button" onClick={() => setSupabaseAuthOpen(false)}>Close</button></div></form></section>}
     {sessionUser && <details className="notification-center"><summary>Alerts {notifications.some((item) => !item.read_at) && <span>{notifications.filter((item) => !item.read_at).length}</span>}</summary><div><strong>In-app alerts</strong>{notifications.length ? notifications.slice(0, 8).map((item) => <article className={item.read_at ? "read" : ""} key={item.id}><h3>{item.title}</h3><p>{item.body}</p><small>{new Date(item.created_at).toLocaleDateString("en-ZA")}</small>{!item.read_at && <button type="button" onClick={() => void markNotificationRead(item.id)}>Mark read</button>}</article>) : <p>No alerts yet. Saved-search matches will appear here.</p>}</div></details>}
     {!analyticsConsent && <button className="privacy-consent" onClick={() => setAnalyticsConsent(true)}>Allow anonymous demand insights</button>}
@@ -524,8 +585,8 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
     {view === "search" && <SearchResultsView query={query} setQuery={setQuery} activeQuery={activeQuery} runSearch={runSearch} assets={assets} assetsLoading={assetsLoading} filter={filter} setFilter={setFilter} sort={sort} setSort={setSort} orientation={orientation} setOrientation={setOrientation} notice={notice} onOpen={openAsset} />}
     {view === "campaigns" && <CampaignWorkspace api={api} onNotice={setNotice} onOpen={openAsset} role={sessionUser?.role} />}
     {view === "contributors" && <CreatorMarketplace onOpen={openAsset} />}
-    {view === "contributor" && <><AnalyticsDashboard role="contributor" /><MarketplaceLegalDocuments api={api} /><SellerVerificationPanel api={api} onNotice={setNotice} /><ContributorWorkspace api={api} onNotice={setNotice} /><ContributorAssetLibrary api={api} onNotice={setNotice} /></>}
-    {view === "buyer" && <AnalyticsDashboard role="buyer" onOpenAccount={() => navigate("account")} />}
+    {view === "contributor" && <><ContributorFlowHeader onUpload={() => document.getElementById("contributor-upload")?.scrollIntoView({ behavior: "smooth", block: "start" })} /><AnalyticsDashboard role="contributor" /><MarketplaceLegalDocuments api={api} /><SellerVerificationPanel api={api} onNotice={setNotice} /><div id="contributor-upload"><ContributorWorkspace api={api} onNotice={setNotice} /></div><div id="contributor-library"><ContributorAssetLibrary api={api} onNotice={setNotice} /></div></>}
+    {view === "buyer" && <><BuyerFlowHeader onSearch={() => navigate("search")} onCampaigns={() => navigate("campaigns")} onAccount={() => navigate("account")} /><AnalyticsDashboard role="buyer" onOpenAccount={() => navigate("account")} /></>}
     {view === "review" && <ReviewWorkspace items={reviewItems} api={api} onNotice={setNotice} onReload={loadReviewQueue} />}
     {view === "governance" && <><MarketplaceLegalDocuments api={api} /><GovernanceWorkspace api={api} onNotice={setNotice} /></>}
     {view === "community" && <CommunityWorkspace api={api} onNotice={setNotice} sessionUser={sessionUser} />}
@@ -540,7 +601,7 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
   </div>;
 }
 
-function BetterSidebar({ view, navigate, collapsed, mobileOpen, authenticated, onToggleCollapse, onCloseMobile }: { view: View; navigate: (nextView: View) => void; collapsed: boolean; mobileOpen: boolean; authenticated: boolean; onToggleCollapse: () => void; onCloseMobile: () => void }) {
+function BetterSidebar({ view, navigate, collapsed, mobileOpen, authenticated, role, onToggleCollapse, onCloseMobile }: { view: View; navigate: (nextView: View) => void; collapsed: boolean; mobileOpen: boolean; authenticated: boolean; role?: string; onToggleCollapse: () => void; onCloseMobile: () => void }) {
   const [hoverExpanded, setHoverExpanded] = useState(false);
   const expanded = mobileOpen || !collapsed || hoverExpanded;
   return <>
@@ -557,13 +618,10 @@ function BetterSidebar({ view, navigate, collapsed, mobileOpen, authenticated, o
       </div>
       <button type="button" className="better-command-button" onClick={() => { navigate("search"); onCloseMobile(); }}><Icon name="search" /><span>Search archive</span><kbd><Icon name="command" size={12} /> K</kbd></button>
       <nav className="better-sidebar-nav">
-        {sidebarSections.map((section) => <div className="better-nav-section" key={section.label}>
+        {sidebarSections.map((section) => { const items = section.items.filter((item) => canAccessView(item.view, role, authenticated)); if (!items.length) return null; return <div className="better-nav-section" key={section.label}>
           <span className="better-nav-label">{section.label}</span>
-          {section.items.map((item) => {
-            const signInRequired = !authenticated && gatedViews.has(item.view);
-            return <button type="button" key={item.view} className={`better-nav-item ${view === item.view ? "is-active" : ""} ${signInRequired ? "is-gated" : ""}`} aria-current={view === item.view ? "page" : undefined} aria-label={signInRequired ? `${item.label}. Sign in required.` : item.label} title={!expanded ? item.label : undefined} onClick={() => { navigate(item.view); onCloseMobile(); }}><span className="better-nav-icon"><Icon name={item.icon} /></span><span className="better-nav-text">{item.label}</span>{item.badge && <span className="better-nav-badge">{item.badge}</span>}{signInRequired && <span className="better-nav-lock">Sign in</span>}</button>;
-          })}
-        </div>)}
+          {items.map((item) => <button type="button" key={item.view} className={`better-nav-item ${view === item.view ? "is-active" : ""} ${gatedViews.has(item.view) ? "is-gated" : ""}`} aria-current={view === item.view ? "page" : undefined} aria-label={item.label} title={!expanded ? item.label : undefined} onClick={() => { navigate(item.view); onCloseMobile(); }}><span className="better-nav-icon"><Icon name={item.icon} /></span><span className="better-nav-text">{item.label}</span>{item.badge && <span className="better-nav-badge">{item.badge}</span>}{gatedViews.has(item.view) && <span className="better-nav-lock">Workspace</span>}</button>)}
+        </div>; })}
       </nav>
       <div className="better-sidebar-footer"><span className="better-status-dot" /><span className="better-sidebar-footer-copy"><strong>Archive service online</strong><small>Verified content pipeline</small></span></div>
     </aside>
@@ -698,6 +756,18 @@ function assetPricingLabel(asset: Asset): string {
   if (asset.freeDownloadEnabled) return "Free intro download";
   const model = asset.monetizationModel ?? "membership";
   return model === "individual_license" && asset.licensePriceCents ? `${formatZar(asset.licensePriceCents)} / year` : monetizationLabel(model);
+}
+
+function FlowSteps({ steps }: { steps: string[] }) {
+  return <ol className={`flow-steps flow-steps-${steps.length}`}>{steps.map((step, index) => <li key={step}><span>{String(index + 1).padStart(2, "0")}</span><strong>{step}</strong>{index < steps.length - 1 && <b aria-hidden="true">→</b>}</li>)}</ol>;
+}
+
+function BuyerFlowHeader({ onSearch, onCampaigns, onAccount }: { onSearch: () => void; onCampaigns: () => void; onAccount: () => void }) {
+  return <section className="flow-home" aria-labelledby="buyer-flow-title"><div className="flow-home-copy"><span className="section-kicker">BUYER WORKSPACE</span><h1 id="buyer-flow-title">From search intent to controlled delivery.</h1><p>Find a verified asset, inspect its evidence, accept the current terms, pay securely, and return here when the signed payment webhook unlocks delivery.</p><div className="flow-home-actions"><button type="button" className="dark-button" onClick={onSearch}>Find media <span>↗</span></button><button type="button" className="outline-button" onClick={onCampaigns}>Open campaigns</button><button type="button" className="ghost-button" onClick={onAccount}>Account & licences</button></div></div><FlowSteps steps={["Search", "Inspect", "Validate", "Request", "Pay", "Deliver"]} /></section>;
+}
+
+function ContributorFlowHeader({ onUpload }: { onUpload: () => void }) {
+  return <section className="flow-home" aria-labelledby="contributor-flow-title"><div className="flow-home-copy"><span className="section-kicker">SELLER WORKSPACE</span><h1 id="contributor-flow-title">From your context to a searchable record.</h1><p>Complete the seller tender once, then use the upload action whenever you have a new image or video. Editors approve the current revision before buyers can find it.</p><div className="flow-home-actions"><button type="button" className="dark-button" onClick={onUpload}>+ Upload media <span>↗</span></button><a className="outline-button" href="#contributor-library">Open my library</a></div></div><FlowSteps steps={["Profile", "Verify", "Upload", "Review", "Approve + index"]} /></section>;
 }
 
 function MetricBars({ points, tone = "rust" }: { points: { label: string; value: number }[]; tone?: "rust" | "green" }) {
@@ -1818,6 +1888,11 @@ function Root() {
     clientId={auth0ClientId!}
     cacheLocation="memory"
     authorizationParams={{ redirect_uri: window.location.origin, scope: auth0Scopes, ...(auth0Audience ? { audience: auth0Audience } : {}), ...(auth0Organization ? { organization: auth0Organization } : {}) }}
+    onRedirectCallback={(appState) => {
+      const returnTo = typeof appState?.returnTo === "string" && appState.returnTo.startsWith("/") && !appState.returnTo.startsWith("//") ? appState.returnTo : "/";
+      const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+      if (returnTo !== current) window.location.assign(returnTo);
+    }}
   >
     <AuthenticatedApp />
   </Auth0Provider>;

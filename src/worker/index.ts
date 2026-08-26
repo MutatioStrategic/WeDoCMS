@@ -76,6 +76,9 @@ import { decidePayoutBatch } from "./payout-decision";
 import { AUTO_APPROVAL_SCOPE, AUTO_APPROVAL_TERMS_VERSION, autoApprovalIsActive, licenceApprovalStatus } from "./licence-approval";
 import { discoveryTokens, normalizeSavedQuery, scoreRecommendation } from "./discovery";
 import { parseCampaignBrief, rankCampaignAssets, type BrandKit, type CampaignBrief, type CampaignStage } from "../campaign-intelligence";
+import { decideRightsTransition, isRightsReviewer } from "./rights-transition";
+import { createStoredZip, type ZipEntry } from "./zip";
+import { settlementAmounts } from "./payment-settlement";
 import { enqueueZohoOutbox, dispatchDueZohoOutbox, dispatchZohoOutboxJob, type ZohoOutboxJobMessage } from "./zoho-outbox";
 import type { ZohoSocialDraft } from "../integrations/zoho";
 import { bearerToken, normalizeWordPressSiteUrl, WORDPRESS_SCOPES, wordPressApiBaseUrl } from "../integrations/wordpress";
@@ -84,7 +87,13 @@ import {
   assetCreateResponseSchema,
   contractResponseValidationErrorSchema,
   ContractResponseValidationError,
+  derivativeRequestSchema,
+  derivativeResponseSchema,
+  editVersionRequestSchema,
+  editVersionResponseSchema,
   errorResponseSchema,
+  bundleRequestSchema,
+  bundleResponseSchema,
   governanceActionRequestSchema as contractGovernanceActionRequestSchema,
   governanceActionResponseSchema,
   healthResponseSchema,
@@ -92,6 +101,11 @@ import {
   paymentWebhookRequestSchema,
   searchResponseSchema,
   sessionResponseSchema,
+  rightsTransitionRequestSchema,
+  rightsTransitionResponseSchema,
+  streamPlaybackResponseSchema,
+  streamUploadRequestSchema,
+  streamUploadResponseSchema,
   streamWebhookRequestSchema,
   uploadCompleteResponseSchema,
   uploadRequestSchema as contractUploadRequestSchema,
@@ -112,6 +126,9 @@ type SecretBindings = {
   TURNSTILE_SECRET?: string;
   TURNSTILE_HOSTNAMES?: string;
   STREAM_WEBHOOK_SECRET?: string;
+  STREAM_ACCOUNT_ID?: string;
+  STREAM_ALLOWED_ORIGINS?: string;
+  STREAM_API_TOKEN?: string;
   STREAM_CUSTOMER_CODE?: string;
   STREAM_PUBLIC_PLAYBACK_ENABLED?: string;
   CHAOS_TEST_TOKEN?: string;
@@ -260,6 +277,9 @@ async function runMaintenance(env: Bindings): Promise<void> {
     env.DB.prepare("DELETE FROM rate_limit_buckets WHERE updated_at < datetime('now', '-2 day')"),
     env.DB.prepare("DELETE FROM notifications WHERE created_at < datetime('now', '-365 day') AND read_at IS NOT NULL"),
     env.DB.prepare("UPDATE upload_sessions SET status = 'expired', failure_reason = 'upload_session_expired' WHERE status = 'created' AND created_at < datetime('now', '-1 day')"),
+    env.DB.prepare("UPDATE campaign_bundles SET status = 'expired', updated_at = CURRENT_TIMESTAMP WHERE status = 'approved' AND expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP"),
+    env.DB.prepare("UPDATE campaign_bundle_builds SET status = 'failed', error_text = 'bundle_build_timeout', updated_at = CURRENT_TIMESTAMP WHERE status = 'building' AND started_at < datetime('now', '-1 hour')"),
+    env.DB.prepare("UPDATE stream_uploads SET status = 'expired', updated_at = CURRENT_TIMESTAMP WHERE status IN ('created', 'uploading') AND expires_at <= CURRENT_TIMESTAMP"),
     env.DB.prepare("UPDATE photographer_subscriptions SET status = 'expired', updated_at = CURRENT_TIMESTAMP WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP"),
   ]);
 }
@@ -368,6 +388,14 @@ const exchangeSchema = z.object({
 });
 type AppContext = Context<{ Bindings: Bindings; Variables: Variables }>;
 type DemoRole = z.infer<typeof devLoginSchema>["role"];
+
+/**
+ * Marketplace terms are intentionally readable before sign-in so a buyer or
+ * seller can understand the contract before creating an account or starting
+ * checkout. The checkout and onboarding routes still verify the exact
+ * version and persist an acceptance hash server-side.
+ */
+app.get("/api/legal/agreements", (c) => c.json({ documents: [sellerAgreement, buyerAgreement, paymentDisclosure] }));
 
 async function sessionResponse(c: { env: Bindings; req: { raw: Request }; json: (data: unknown, status?: number) => Response }, userId: string, organizationId: string, transport: "cookie" | "bearer" = "cookie"): Promise<Response> {
   const session = await createSession(c.env, userId, organizationId);
@@ -655,7 +683,7 @@ async function buildWatermarkedPreview(env: Bindings, source: ReadableStream<Uin
 }
 
 async function writeWatermarkedPreview(env: Bindings, originalKey: string, previousPreviewKey?: string | null): Promise<{ key: string; contentType: string; variants: { preview640Key: string; preview1200Key: string; preview1800Key: string } }> {
-  const source = await env.MEDIA_BUCKET.get(originalKey);
+  const source = await getReadableMedia(env, originalKey);
   if (!source) throw new Error("R2 original disappeared before preview creation");
   const widths = [640, 1200, PREVIEW_MAX_DIMENSION];
   const sourceBytes = source.size <= 20 * 1024 * 1024 ? await source.arrayBuffer() : null;
@@ -686,7 +714,7 @@ async function writeWatermarkedPreview(env: Bindings, originalKey: string, previ
 
 async function writeVideoPoster(env: Bindings, originalKey: string, previousPosterKey?: string | null): Promise<string> {
   if (!env.MEDIA) throw new Error("Cloudflare Media binding is not configured");
-  const source = await env.MEDIA_BUCKET.get(originalKey);
+  const source = await getReadableMedia(env, originalKey);
   if (!source) throw new Error("R2 video original disappeared before poster creation");
   const frame = env.MEDIA.input(source.body).transform({ width: 1200, height: 675, fit: "contain" }).output({ mode: "frame", time: "1s", format: "jpg" });
   const frameStream = await frame.media();
@@ -761,6 +789,7 @@ const assetRowToDomain = (row: Record<string, unknown>, env?: Pick<SecretBinding
   posterUrl: row.kind === "video" && row.video_poster_key ? `/api/assets/${encodeURIComponent(String(row.id))}/poster` : null,
   streamUid: (row.stream_uid as string | null) ?? null,
   streamEmbedUrl: streamEmbedUrl(row, env),
+  streamStatus: (row.stream_status as Asset["streamStatus"]) ?? "not_configured",
   monetizationModel: (row.monetization_model as MonetizationModel | undefined) ?? "membership",
   licensePriceCents: row.license_price_cents == null ? null : Number(row.license_price_cents),
   freeDownloadEnabled: Number(row.free_download_enabled) === 1,
@@ -813,10 +842,18 @@ export function createMediaResponse(request: Request, object: R2ObjectBody, fall
   return new Response(request.method === "HEAD" ? null : object.body, { status, headers });
 }
 
-export async function headReadableMedia(env: MediaReadBindings, key: string): Promise<R2Object | null> {
+type ReadableMediaSource = { source: "primary" | "library"; object: R2Object };
+
+export async function resolveReadableMediaHead(env: MediaReadBindings, key: string): Promise<ReadableMediaSource | null> {
   const primary = await env.MEDIA_BUCKET.head(key);
-  if (primary || !env.MEDIA_LIBRARY_BUCKET) return primary;
-  return env.MEDIA_LIBRARY_BUCKET.head(key);
+  if (primary) return { source: "primary", object: primary };
+  if (!env.MEDIA_LIBRARY_BUCKET) return null;
+  const library = await env.MEDIA_LIBRARY_BUCKET.head(key);
+  return library ? { source: "library", object: library } : null;
+}
+
+export async function headReadableMedia(env: MediaReadBindings, key: string): Promise<R2Object | null> {
+  return (await resolveReadableMediaHead(env, key))?.object ?? null;
 }
 
 export async function getReadableMedia(env: MediaReadBindings, key: string, options?: R2GetOptions): Promise<R2ObjectBody | null> {
@@ -1140,13 +1177,13 @@ function verificationBucket(env: Bindings, region: "za" | "eu"): R2Bucket {
 }
 
 async function ensureVerificationCase(c: { env: Bindings }, user: RequestUser, residencyRegion: "za" | "eu", subjectType: "individual" | "business"): Promise<string> {
-  const existing = await c.env.DB.prepare("SELECT id FROM contributor_verification_cases WHERE contributor_id = ? AND status IN ('pending', 'in_review') ORDER BY created_at DESC LIMIT 1").bind(user.id).first<{ id: string }>();
+  const existing = await c.env.DB.prepare("SELECT id FROM contributor_verification_cases WHERE contributor_id = ? AND organization_id = ? AND residency_region = ? AND status IN ('pending', 'in_review') ORDER BY created_at DESC LIMIT 1").bind(user.id, user.organizationId, residencyRegion).first<{ id: string }>();
   if (existing) return existing.id;
   const caseId = crypto.randomUUID();
   const retentionDays = Math.max(365, Number(c.env.AUDIT_RETENTION_DAYS ?? 2555));
   const retentionUntil = new Date(Date.now() + retentionDays * 86_400_000).toISOString();
-  await c.env.DB.prepare("INSERT INTO contributor_verification_cases (id, contributor_id, residency_region, subject_type, provider, retention_until) VALUES (?, ?, ?, ?, ?, ?)")
-    .bind(caseId, user.id, residencyRegion, subjectType, c.env.KYC_PROVIDER ?? "configured-provider", retentionUntil).run();
+  await c.env.DB.prepare("INSERT INTO contributor_verification_cases (id, organization_id, contributor_id, residency_region, subject_type, provider, retention_until) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .bind(caseId, user.organizationId, user.id, residencyRegion, subjectType, c.env.KYC_PROVIDER ?? "configured-provider", retentionUntil).run();
   return caseId;
 }
 
@@ -1821,6 +1858,7 @@ app.post("/api/payments/:licenceId/session", async (c) => {
 const settlementSchema = z.object({
   amountCents: z.number().int().positive().max(100_000_000),
   currency: z.string().length(3).default("ZAR"),
+  provider: z.string().trim().min(2).max(80).optional(),
   platformFeeCents: z.number().int().nonnegative().optional(),
   taxCents: z.number().int().nonnegative().default(0),
   royaltyCents: z.number().int().nonnegative().optional(),
@@ -1838,16 +1876,19 @@ async function postSaleSettlement(env: Bindings, licenceId: string, payload: z.i
   if (!licence) throw new Error("Licence not found");
   if (licence.status !== "pending") throw new Error(`Licence cannot be settled from status ${licence.status}`);
   if (Number(licence.price_cents) !== payload.amountCents) throw new Error("Settlement amount does not match the licence price");
-  const fee = payload.platformFeeCents ?? Math.floor(payload.amountCents * 0.2);
-  const royalty = payload.royaltyCents ?? payload.amountCents - fee - payload.taxCents;
-  if (fee + royalty + payload.taxCents !== payload.amountCents || royalty < 0) throw new Error("Sale postings must balance to the settled amount");
+  const allocation = payload.provider?.toLowerCase() === "paystack"
+    ? await env.DB.prepare("SELECT provider, currency, artist_amount_cents AS artistAmountCents, platform_amount_cents AS platformAmountCents, status FROM payment_split_allocations WHERE licence_id = ?").bind(licenceId).first<{ provider: string; currency: string; artistAmountCents: number; platformAmountCents: number; status: string | null }>()
+    : null;
+  const amounts = settlementAmounts({ ...payload, allocation });
+  const fee = amounts.platformFeeCents;
+  const royalty = amounts.royaltyCents;
   const transactionId = crypto.randomUUID();
   await env.DB.batch([
     env.DB.prepare("INSERT INTO ledger_transactions (id, licence_id, transaction_type, idempotency_key, amount_cents, currency) VALUES (?, ?, 'sale', ?, ?, ?)").bind(transactionId, licenceId, payload.idempotencyKey, payload.amountCents, payload.currency.toUpperCase()),
     env.DB.prepare("INSERT INTO ledger_postings (id, transaction_id, account_code, debit_cents, credit_cents, metadata_json) VALUES (?, ?, 'cash_clearing', ?, 0, '{}')").bind(crypto.randomUUID(), transactionId, payload.amountCents),
     env.DB.prepare("INSERT INTO ledger_postings (id, transaction_id, account_code, contributor_id, debit_cents, credit_cents, metadata_json) VALUES (?, ?, 'contributor_payable', ?, 0, ?, ?)").bind(crypto.randomUUID(), transactionId, licence.owner_id, royalty, JSON.stringify({ licenceId })),
     env.DB.prepare("INSERT INTO ledger_postings (id, transaction_id, account_code, debit_cents, credit_cents, metadata_json) VALUES (?, ?, 'platform_revenue', 0, ?, '{}')").bind(crypto.randomUUID(), transactionId, fee),
-    ...(payload.taxCents > 0 ? [env.DB.prepare("INSERT INTO ledger_postings (id, transaction_id, account_code, debit_cents, credit_cents, metadata_json) VALUES (?, ?, 'tax_payable', 0, ?, '{}')").bind(crypto.randomUUID(), transactionId, payload.taxCents)] : []),
+    ...(amounts.taxCents > 0 ? [env.DB.prepare("INSERT INTO ledger_postings (id, transaction_id, account_code, debit_cents, credit_cents, metadata_json) VALUES (?, ?, 'tax_payable', 0, ?, '{}')").bind(crypto.randomUUID(), transactionId, amounts.taxCents)] : []),
     env.DB.prepare("INSERT INTO ledger_entries (id, licence_id, contributor_id, entry_type, amount_cents, currency) VALUES (?, ?, ?, 'sale', ?, ?), (?, ?, ?, 'platform_fee', ?, ?)").bind(crypto.randomUUID(), licenceId, licence.owner_id, royalty, payload.currency.toUpperCase(), crypto.randomUUID(), licenceId, licence.owner_id, -fee, payload.currency.toUpperCase()),
     env.DB.prepare("UPDATE licences SET status = 'paid', price_cents = ? WHERE id = ?").bind(payload.amountCents, licenceId),
   ]);
@@ -2445,7 +2486,7 @@ app.post("/api/webhooks/payments", async (c) => {
         const existingSale = await c.env.DB.prepare("SELECT id FROM ledger_transactions WHERE licence_id = ? AND transaction_type = 'sale' ORDER BY created_at DESC LIMIT 1").bind(payload.licenceId).first<{ id: string }>();
         transactionId = existingSale?.id ?? null;
       } else {
-      transactionId = (await postSaleSettlement(c.env, payload.licenceId!, { amountCents: payload.amountCents, currency: payload.currency, taxCents: 0, idempotencyKey: `${payload.provider}:${payload.eventId}` })).transactionId;
+      transactionId = (await postSaleSettlement(c.env, payload.licenceId!, { amountCents: payload.amountCents, currency: payload.currency, provider: payload.provider, taxCents: 0, idempotencyKey: `${payload.provider}:${payload.eventId}` })).transactionId;
       await c.env.DB.batch([
         c.env.DB.prepare("UPDATE licences SET payment_provider = ?, payment_reference = ?, paid_at = CURRENT_TIMESTAMP, status = 'paid', price_cents = ? WHERE id = ? AND status = 'pending'").bind(payload.provider, payload.paymentReference ?? payload.eventId, payload.amountCents, payload.licenceId),
         c.env.DB.prepare("UPDATE payment_split_allocations SET status = 'settled', provider_reference = COALESCE(?, provider_reference), updated_at = CURRENT_TIMESTAMP WHERE licence_id = ?").bind(payload.paymentReference ?? null, payload.licenceId),
@@ -2533,6 +2574,7 @@ async function processPayoutBatch(env: Bindings, batchId: string): Promise<void>
   for (const item of items.results as Record<string, unknown>[]) {
     const reference = `payout-${batchId}-${String(item.id)}`;
     try {
+      if (String(item.provider) === "paystack") throw new Error("Paystack marketplace splits settle directly during checkout and are not eligible for manual payout batches");
       const provider = registry.get(String(item.provider) as "stripe_connect" | "payfast" | "za_bank");
       const payout = await provider.createPayout({
         idempotencyKey: reference,
@@ -2568,7 +2610,7 @@ app.post("/api/admin/payout-batches", async (c) => {
     SELECT p.contributor_id, SUM(p.credit_cents - p.debit_cents) AS balance_cents,
       w.id AS wallet_id, sc.id AS contract_id, w.currency
     FROM ledger_postings p JOIN ledger_transactions t ON t.id = p.transaction_id
-      JOIN payout_wallets w ON w.contributor_id = p.contributor_id AND w.status = 'verified'
+      JOIN payout_wallets w ON w.contributor_id = p.contributor_id AND w.status = 'verified' AND w.provider <> 'paystack'
       JOIN onboarding_tenders ot ON ot.contributor_id = p.contributor_id AND ot.organization_id = ? AND ot.status = 'approved'
       JOIN seller_contracts sc ON sc.id = ot.contract_id AND sc.status = 'signed'
     WHERE p.account_code = 'contributor_payable' AND t.created_at < datetime(?, '+1 day')
@@ -2942,7 +2984,8 @@ app.get("/api/admin/approval-ledger", async (c) => {
       LEFT JOIN contributor_verification_cases verification ON e.resource_type = 'verification_case' AND verification.id = e.resource_id
       LEFT JOIN organization_memberships verification_membership ON verification_membership.user_id = verification.contributor_id AND verification_membership.organization_id = ? AND verification_membership.status = 'active'
       LEFT JOIN users verification_user ON verification_user.id = verification.contributor_id
-    WHERE e.action IN (${placeholders})
+    WHERE e.organization_id = ?
+      AND e.action IN (${placeholders})
       AND e.residency_region = ?
       AND (
         asset.id IS NOT NULL OR tender.id IS NOT NULL OR contract.id IS NOT NULL OR verification_membership.id IS NOT NULL
@@ -2951,6 +2994,7 @@ app.get("/api/admin/approval-ledger", async (c) => {
     ORDER BY e.occurred_at DESC
     LIMIT ?
   `).bind(
+    user.organizationId,
     user.organizationId,
     user.organizationId,
     user.organizationId,
@@ -3031,6 +3075,7 @@ app.get("/api/admin/analytics/audit-search", async (c) => {
     limit: c.req.query("limit") ?? 50,
   });
   const clauses = [
+    "e.organization_id = ?",
     "e.residency_region = ?",
     `(e.stream_id IN (SELECT 'contributor:' || user_id FROM organization_memberships WHERE organization_id = ? AND status = 'active')
       OR EXISTS (SELECT 1 FROM assets scoped_asset WHERE e.resource_type = 'asset' AND scoped_asset.id = e.resource_id AND scoped_asset.organization_id = ?)
@@ -3038,7 +3083,7 @@ app.get("/api/admin/analytics/audit-search", async (c) => {
       OR EXISTS (SELECT 1 FROM seller_contracts scoped_contract WHERE e.resource_type = 'seller_contract' AND scoped_contract.id = e.resource_id AND scoped_contract.organization_id = ?)
       OR EXISTS (SELECT 1 FROM contributor_verification_cases scoped_case JOIN organization_memberships scoped_membership ON scoped_membership.user_id = scoped_case.contributor_id AND scoped_membership.organization_id = ? AND scoped_membership.status = 'active' WHERE e.resource_type = 'verification_case' AND scoped_case.id = e.resource_id))`,
   ];
-  const values: (string | number)[] = [user.residencyRegion, user.organizationId, user.organizationId, user.organizationId, user.organizationId, user.organizationId];
+  const values: (string | number)[] = [user.organizationId, user.residencyRegion, user.organizationId, user.organizationId, user.organizationId, user.organizationId, user.organizationId];
   if (filters.q) {
     clauses.push("(e.action LIKE ? OR e.resource_type LIKE ? OR e.resource_id LIKE ? OR e.actor_id LIKE ? OR e.data_json LIKE ?)");
     const pattern = `%${filters.q}%`;
@@ -3141,8 +3186,8 @@ app.get("/api/audit/events/:streamId", async (c) => {
   if (residencyRegion !== actor.residencyRegion) return c.json({ error: "Residency mismatch" }, 403);
   const parsedLimit = Number(c.req.query("limit") ?? 100);
   const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(Math.trunc(parsedLimit), 1), 1000) : 100;
-  const result = await c.env.DB.prepare("SELECT * FROM audit_log_events WHERE stream_id = ? AND residency_region = ? ORDER BY sequence DESC LIMIT ?")
-    .bind(streamId, residencyRegion, limit).all<Record<string, unknown>>();
+  const result = await c.env.DB.prepare("SELECT * FROM audit_log_events WHERE organization_id = ? AND stream_id = ? AND residency_region = ? ORDER BY sequence DESC LIMIT ?")
+    .bind(actor.organizationId, streamId, residencyRegion, limit).all<Record<string, unknown>>();
   const events: Array<StoredAuditEvent & { verification: { hashValid: boolean; signatureValid: boolean } }> = [];
   for (const row of result.results as Record<string, unknown>[]) {
     const event = storedAuditEventFromRow(row);
@@ -3164,14 +3209,15 @@ app.post("/api/audit/exports", async (c) => {
   if (actor.type !== "admin" && actor.type !== "service") return c.json({ error: "Admin or service identity required" }, 403);
   const filters = auditExportSchema.parse(await c.req.json());
   if (filters.residencyRegion !== actor.residencyRegion) return c.json({ error: "Export residency must match actor residency" }, 403);
-  const result = await exportAuditEvents(c.env, filters);
+  const result = await exportAuditEvents(c.env, { ...filters, organizationId: actor.organizationId, createdBy: actor.id });
   return c.json({ ...result, download: `/api/audit/exports/${result.exportId}` }, 201);
 });
 
 app.get("/api/audit/exports/:exportId", async (c) => {
   const actor = await requestActor(c);
   if (!actor) return c.json({ error: "Authentication required" }, 401);
-  const row = await c.env.DB.prepare("SELECT * FROM audit_exports WHERE id = ?").bind(c.req.param("exportId")).first<Record<string, unknown>>();
+  if (actor.type !== "admin" && actor.type !== "service") return c.json({ error: "Admin or service identity required" }, 403);
+  const row = await c.env.DB.prepare("SELECT * FROM audit_exports WHERE id = ? AND organization_id = ? AND created_by IS NOT NULL").bind(c.req.param("exportId"), actor.organizationId).first<Record<string, unknown>>();
   if (!row) return c.json({ error: "Export not found" }, 404);
   if (String(row.residency_region) !== actor.residencyRegion) return c.json({ error: "Export residency mismatch" }, 403);
   const object = await getAuditBucket(c.env, actor.residencyRegion).get(String(row.object_key));
@@ -3194,8 +3240,8 @@ app.post("/api/verification/cases", async (c) => {
   const caseId = crypto.randomUUID();
   const retentionDays = Math.max(365, Number(c.env.AUDIT_RETENTION_DAYS ?? 2555));
   const retentionUntil = new Date(Date.now() + retentionDays * 86_400_000).toISOString();
-  await c.env.DB.prepare("INSERT INTO contributor_verification_cases (id, contributor_id, residency_region, subject_type, provider, retention_until) VALUES (?, ?, ?, ?, ?, ?)")
-    .bind(caseId, actor.id, payload.residencyRegion, payload.subjectType, payload.provider, retentionUntil).run();
+  await c.env.DB.prepare("INSERT INTO contributor_verification_cases (id, organization_id, contributor_id, residency_region, subject_type, provider, retention_until) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .bind(caseId, actor.organizationId, actor.id, payload.residencyRegion, payload.subjectType, payload.provider, retentionUntil).run();
   const audit = await appendAuditEvent(c.env, {
     streamId: `contributor:${actor.id}`,
     actorId: actor.id,
@@ -3214,11 +3260,11 @@ app.post("/api/verification/cases", async (c) => {
 app.get("/api/verification/cases/:caseId", async (c) => {
   const actor = await requestActor(c);
   if (!actor) return c.json({ error: "Authentication required" }, 401);
-  const row = await c.env.DB.prepare("SELECT id, contributor_id, residency_region, subject_type, provider, status, risk_level, sanctions_status, pep_status, adverse_media_status, retention_until, created_at, updated_at FROM contributor_verification_cases WHERE id = ?")
-    .bind(c.req.param("caseId")).first<Record<string, unknown>>();
+  const row = await c.env.DB.prepare("SELECT id, organization_id, contributor_id, residency_region, subject_type, provider, status, risk_level, sanctions_status, pep_status, adverse_media_status, retention_until, created_at, updated_at FROM contributor_verification_cases WHERE id = ? AND organization_id = ? AND residency_region = ?")
+    .bind(c.req.param("caseId"), actor.organizationId, actor.residencyRegion).first<Record<string, unknown>>();
   if (!row) return c.json({ error: "Verification case not found" }, 404);
   if (String(row.contributor_id) !== actor.id && actor.type !== "admin") return c.json({ error: "Forbidden" }, 403);
-  return c.json({ case: row, documents: await c.env.DB.prepare("SELECT id, document_type, content_sha256, issued_country, expires_at, created_at FROM verification_documents WHERE case_id = ?").bind(c.req.param("caseId")).all() });
+  return c.json({ case: row, documents: await c.env.DB.prepare("SELECT id, document_type, content_sha256, issued_country, expires_at, created_at, uploaded_at, size_bytes FROM verification_documents WHERE case_id = ?").bind(c.req.param("caseId")).all() });
 });
 
 const verificationDocumentSchema = z.object({
@@ -3232,12 +3278,12 @@ app.post("/api/verification/cases/:caseId/documents", async (c) => {
   const actor = await requestActor(c);
   if (!actor) return c.json({ error: "Authentication required" }, 401);
   const payload = verificationDocumentSchema.parse(await c.req.json());
-  const row = await c.env.DB.prepare("SELECT contributor_id, residency_region, retention_until FROM contributor_verification_cases WHERE id = ?").bind(c.req.param("caseId")).first<Record<string, unknown>>();
+  const row = await c.env.DB.prepare("SELECT organization_id, contributor_id, residency_region, retention_until FROM contributor_verification_cases WHERE id = ? AND organization_id = ? AND residency_region = ?").bind(c.req.param("caseId"), actor.organizationId, actor.residencyRegion).first<Record<string, unknown>>();
   if (!row) return c.json({ error: "Verification case not found" }, 404);
   if (String(row.contributor_id) !== actor.id && actor.type !== "admin") return c.json({ error: "Forbidden" }, 403);
   if (String(row.residency_region) !== actor.residencyRegion) return c.json({ error: "Residency mismatch" }, 403);
   const documentId = crypto.randomUUID();
-  const objectKey = `verification/${actor.id}/${c.req.param("caseId")}/${documentId}`;
+  const objectKey = `verification/${String(row.organization_id)}/${String(row.contributor_id)}/${c.req.param("caseId")}/${documentId}`;
   await c.env.DB.prepare("INSERT INTO verification_documents (id, case_id, document_type, object_key, content_sha256, issued_country, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
     .bind(documentId, c.req.param("caseId"), payload.documentType, objectKey, payload.contentSha256, payload.issuedCountry ?? null, payload.expiresAt ?? null).run();
   await appendAuditEvent(c.env, {
@@ -3252,18 +3298,17 @@ app.post("/api/verification/cases/:caseId/documents", async (c) => {
     residencyRegion: actor.residencyRegion,
     actorResidencyRegion: actor.residencyRegion,
   });
-  return c.json({ documentId, objectKey, upload: "Use the configured KYC provider for document transfer. Raw identity documents are deliberately excluded from audit records.", retentionUntil: row.retention_until }, 201);
+  return c.json({ documentId, upload: "Upload the document through the authenticated content route. Raw object keys and identity documents are never returned.", retentionUntil: row.retention_until }, 201);
 });
 
 app.put("/api/verification/documents/:documentId/content", async (c) => {
   const actor = await requestActor(c);
   if (!actor) return c.json({ error: "Authentication required" }, 401);
-  const document = await c.env.DB.prepare(`SELECT d.id, d.case_id, d.object_key, d.content_sha256, vc.contributor_id, vc.residency_region
-    FROM verification_documents d JOIN contributor_verification_cases vc ON vc.id = d.case_id WHERE d.id = ?`)
-    .bind(c.req.param("documentId")).first<Record<string, unknown>>();
+  const document = await c.env.DB.prepare(`SELECT d.id, d.case_id, d.object_key, d.content_sha256, vc.organization_id, vc.contributor_id, vc.residency_region
+    FROM verification_documents d JOIN contributor_verification_cases vc ON vc.id = d.case_id WHERE d.id = ? AND vc.organization_id = ? AND vc.residency_region = ?`)
+    .bind(c.req.param("documentId"), actor.organizationId, actor.residencyRegion).first<Record<string, unknown>>();
   if (!document) return c.json({ error: "Verification document not found" }, 404);
   if (String(document.contributor_id) !== actor.id && actor.type !== "admin") return c.json({ error: "Forbidden" }, 403);
-  if (String(document.residency_region) !== actor.residencyRegion) return c.json({ error: "Residency mismatch" }, 403);
   const claimedLength = Number(c.req.header("content-length") ?? 0);
   if (claimedLength > 12_000_000) return c.json({ error: "Verification document exceeds the 12 MB limit" }, 413);
   const bytes = await c.req.raw.arrayBuffer();
@@ -3283,12 +3328,12 @@ app.post("/api/verification/documents/:documentId/ocr", async (c) => {
   if (String(c.env.OCR_ENABLED ?? "false") !== "true") return c.json({ error: "OCR is disabled until explicitly enabled", code: "ocr_disabled", model }, 503);
   const ai = c.env.AI;
   if (!ai) return c.json({ error: "Workers AI binding is not configured", code: "ai_binding_missing", model }, 503);
-  const document = await c.env.DB.prepare(`SELECT d.id, d.case_id, d.object_key, d.document_type, d.content_sha256, vc.contributor_id, vc.residency_region
-    FROM verification_documents d JOIN contributor_verification_cases vc ON vc.id = d.case_id WHERE d.id = ?`)
-    .bind(c.req.param("documentId")).first<Record<string, unknown>>();
+  const document = await c.env.DB.prepare(`SELECT d.id, d.case_id, d.object_key, d.document_type, d.content_sha256, vc.organization_id, vc.contributor_id, vc.residency_region
+    FROM verification_documents d JOIN contributor_verification_cases vc ON vc.id = d.case_id WHERE d.id = ? AND vc.organization_id = ? AND vc.residency_region = ?`)
+    .bind(c.req.param("documentId"), actor.organizationId, actor.residencyRegion).first<Record<string, unknown>>();
   if (!document) return c.json({ error: "Verification document not found" }, 404);
   const residencyRegion = residencyRegionSchema.parse(String(document.residency_region));
-  if (residencyRegion !== actor.residencyRegion) return c.json({ error: "Residency mismatch" }, 403);
+  if (residencyRegion !== actor.residencyRegion || String(document.organization_id) !== actor.organizationId) return c.json({ error: "Residency or organization mismatch" }, 403);
   const object = await verificationBucket(c.env, residencyRegion).get(String(document.object_key));
   if (!object) return c.json({ error: "Document content has not been uploaded" }, 409);
   if (object.size > 12_000_000) return c.json({ error: "Verification document exceeds the OCR limit" }, 413);
@@ -3372,7 +3417,7 @@ app.post("/api/webhooks/kyc", async (c) => {
   const body = await c.req.text();
   if (!(await verifyKycWebhook(c.env.KYC_WEBHOOK_SECRET, c.req.header("x-kyc-signature") ?? "", body))) return c.json({ error: "Invalid KYC webhook signature" }, 401);
   const payload = kycWebhookSchema.parse(JSON.parse(body));
-  const row = await c.env.DB.prepare("SELECT contributor_id, residency_region FROM contributor_verification_cases WHERE id = ?").bind(payload.caseId).first<Record<string, unknown>>();
+  const row = await c.env.DB.prepare("SELECT organization_id, contributor_id, residency_region FROM contributor_verification_cases WHERE id = ? AND organization_id IS NOT NULL").bind(payload.caseId).first<Record<string, unknown>>();
   if (!row) return c.json({ error: "Verification case not found" }, 404);
   await c.env.DB.prepare(`
     UPDATE contributor_verification_cases
@@ -3394,6 +3439,7 @@ app.post("/api/webhooks/kyc", async (c) => {
     data: { status: payload.status, riskLevel: payload.riskLevel, sanctionsStatus: payload.sanctionsStatus, pepStatus: payload.pepStatus, adverseMediaStatus: payload.adverseMediaStatus, checks: payload.checks.map((check) => ({ type: check.type, result: check.result })) },
     residencyRegion,
     actorResidencyRegion: residencyRegion,
+    organizationId: String(row.organization_id),
   });
   return c.json({ accepted: true, caseId: payload.caseId, status: payload.status, auditEventId: audit.event.eventId });
 });
@@ -3523,16 +3569,16 @@ app.on(["GET", "HEAD"], "/api/assets/:id/original", async (c) => {
   // This keeps unavailable originals from consuming user entitlements.
   const originalKey = typeof row.original_key === "string" ? row.original_key.trim() : "";
   if (!originalKey) return c.json({ error: "Original media is unavailable" }, 404);
-  const object = await c.env.MEDIA_BUCKET.head(originalKey);
-  if (!object) return c.json({ error: "Original media is unavailable" }, 404);
+  const mediaSource = await resolveReadableMediaHead(c.env, originalKey);
+  if (!mediaSource) return c.json({ error: "Original media is unavailable" }, 404);
   const filename = String(row.source_file_name ?? "original").replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 180) || "original";
-  const signedUrl = await createPresignedR2Url(c.env, c.env.R2_BUCKET_NAME, originalKey, "GET", 300, {
+  const signedUrl = mediaSource.source === "primary" ? await createPresignedR2Url(c.env, c.env.R2_BUCKET_NAME, originalKey, "GET", 300, {
     contentDisposition: `attachment; filename="${filename}"`,
     contentType: originalContentType(row),
-  });
+  }) : null;
   // Do not consume a free allowance or bundle credit if the delivery URL
   // cannot be produced for this deployment.
-  if (!signedUrl) return c.json({ error: "Original download signing is unavailable" }, 503);
+  if (mediaSource.source === "primary" && !signedUrl) return c.json({ error: "Original download signing is unavailable" }, 503);
 
   if (!elevated && String(row.owner_id) !== user.id && !Number(row.paid_entitlement) && !Number(row.subscription_entitlement) && !platformSubscription && !existingFree && freeEligible && c.req.method === "GET") {
     const claimId = crypto.randomUUID();
@@ -3563,7 +3609,24 @@ app.on(["GET", "HEAD"], "/api/assets/:id/original", async (c) => {
       .bind(crypto.randomUUID(), user.organizationId, row.id, user.id, entitlementType, originalKey).run();
   }
   recordMetric(c.env, "asset_download", c.get("trace"), 1, [user.organizationId, String(row.id), entitlementType]);
-  return new Response(null, { status: 302, headers: { Location: signedUrl, "Cache-Control": "private, no-store" } });
+  if (mediaSource.source === "library") {
+    if (c.req.method === "HEAD") {
+      const headers = new Headers();
+      mediaSource.object.writeHttpMetadata(headers);
+      headers.set("Content-Type", originalContentType(row));
+      headers.set("Content-Length", String(mediaSource.object.size));
+      headers.set("Content-Disposition", `attachment; filename="${filename}"`);
+      headers.set("Cache-Control", "private, no-store");
+      return new Response(null, { status: 200, headers });
+    }
+    const fallback = await c.env.MEDIA_LIBRARY_BUCKET?.get(originalKey, c.req.header("Range") ? { range: c.req.raw.headers } : undefined);
+    if (!fallback) return c.json({ error: "Original media is unavailable" }, 404);
+    const response = createMediaResponse(c.req.raw, fallback, originalContentType(row));
+    response.headers.set("Content-Disposition", `attachment; filename="${filename}"`);
+    response.headers.set("Cache-Control", "private, no-store");
+    return response;
+  }
+  return new Response(null, { status: 302, headers: { Location: signedUrl!, "Cache-Control": "private, no-store" } });
 });
 
 // Cloudflare Image Resizing uses this short-lived, HMAC-signed source URL for
@@ -3577,7 +3640,7 @@ app.on(["GET", "HEAD"], "/internal/media-preview-source", async (c) => {
   if (!key || !secret || !Number.isFinite(expires) || expires < Math.floor(Date.now() / 1000)) return c.json({ error: "Not found" }, 404);
   const expected = hex(await hmac(utf8(secret), `${key}.${expires}`));
   if (!timingSafeEqual(expected, signature)) return c.json({ error: "Not found" }, 404);
-  const object = c.req.method === "HEAD" ? await c.env.MEDIA_BUCKET.head(key) : await c.env.MEDIA_BUCKET.get(key);
+  const object = c.req.method === "HEAD" ? await headReadableMedia(c.env, key) : await getReadableMedia(c.env, key);
   if (!object) return c.json({ error: "Not found" }, 404);
   const headers = new Headers();
   object.writeHttpMetadata(headers);
@@ -3605,7 +3668,7 @@ app.on(["GET", "HEAD"], "/internal/photo-ai-source/:jobId", async (c) => {
   }
   const sourceKey = String(row.preview_key || row.original_key || "");
   if (!sourceKey) return c.json({ error: "Source image not found" }, 404);
-  const object = (c.req.method === "HEAD" ? await c.env.MEDIA_BUCKET.head(sourceKey) : await c.env.MEDIA_BUCKET.get(sourceKey)) as R2ObjectBody | null;
+  const object = (c.req.method === "HEAD" ? await headReadableMedia(c.env, sourceKey) : await getReadableMedia(c.env, sourceKey)) as R2ObjectBody | null;
   if (!object) return c.json({ error: "Source image not found" }, 404);
   const headers = new Headers();
   object.writeHttpMetadata(headers);
@@ -4731,6 +4794,96 @@ app.post("/api/campaigns", async (c) => {
   return c.json({ id, name: payload.name, brief: briefText, briefText, briefFields, brandKit: payload.brandKit, status: payload.status, assetCounts: { shortlisted: 0, approved: 0, needsReview: 0, rejected: 0 } }, 201);
 });
 
+type CampaignLicenceRow = {
+  id: string;
+  asset_id: string;
+  licence_type: string;
+  territory: string;
+  duration_days: number;
+  paid_at: string;
+  licence_expires_at: string;
+};
+
+function editVersionPayload(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    assetId: String(row.asset_id),
+    versionNumber: Number(row.version_number),
+    recipe: safeJsonObject<Record<string, unknown>>(row.recipe_json, {}),
+    note: String(row.note ?? ""),
+    createdAt: String(row.created_at),
+  };
+}
+
+function derivativePayload(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    assetId: String(row.asset_id),
+    editVersionId: String(row.edit_version_id),
+    campaignId: row.campaign_id == null ? null : String(row.campaign_id),
+    licenceId: String(row.licence_id),
+    variant: String(row.variant),
+    status: String(row.status),
+    contentType: String(row.content_type),
+    sizeBytes: Number(row.size_bytes ?? 0),
+    width: row.width == null ? null : Number(row.width),
+    height: row.height == null ? null : Number(row.height),
+    contentUrl: `/api/assets/${encodeURIComponent(String(row.asset_id))}/derivatives/${encodeURIComponent(String(row.id))}/content`,
+    createdAt: String(row.created_at),
+  };
+}
+
+function bundlePayload(row: Record<string, unknown>) {
+  const buildStatus = String(row.build_status ?? "");
+  return {
+    id: String(row.id),
+    campaignId: String(row.campaign_id),
+    bundleType: String(row.bundle_type),
+    status: buildStatus === "building" ? "building" : String(row.status),
+    expiresAt: row.expires_at == null ? null : String(row.expires_at),
+    download: String(row.status) === "approved" && row.expires_at ? `/api/campaign-bundles/${encodeURIComponent(String(row.id))}/download` : null,
+    manifest: safeJsonObject<Record<string, unknown>>(row.manifest_json, {}),
+    buildStatus: buildStatus || null,
+    error: row.build_error == null ? null : String(row.build_error),
+    createdAt: String(row.created_at),
+  };
+}
+
+function campaignAssetBlockers(row: Record<string, unknown>, hasLicence: boolean, hasDerivative: boolean, requireDerivative = true): Array<{ code: string; message: string }> {
+  const blockers: Array<{ code: string; message: string }> = [];
+  if (!hasLicence) blockers.push({ code: "licence_required", message: "An active paid licence owned by this organization is required." });
+  if (String(row.rights_status) !== "verified" || Number(row.human_verified) !== 1) blockers.push({ code: "rights_not_verified", message: "Rights and human review must be verified before delivery." });
+  if (!["verified", "not_required"].includes(String(row.model_release_status)) || !["verified", "not_required"].includes(String(row.property_release_status))) blockers.push({ code: "release_required", message: "Required model or property releases are not verified." });
+  if (requireDerivative && !hasDerivative) blockers.push({ code: "derivative_required", message: "A ready derivative is required for this bundle." });
+  return blockers;
+}
+
+async function activeCampaignLicence(env: Bindings, organizationId: string, buyerId: string, assetId: string): Promise<CampaignLicenceRow | null> {
+  return env.DB.prepare(`SELECT l.id, l.asset_id, l.licence_type, l.territory, l.duration_days, l.paid_at,
+      datetime(l.paid_at, '+' || l.duration_days || ' days') AS licence_expires_at
+    FROM licences l
+    WHERE l.organization_id = ? AND l.asset_id = ? AND l.buyer_id = ? AND l.status = 'paid'
+      AND l.paid_at IS NOT NULL AND datetime(l.paid_at, '+' || l.duration_days || ' days') > CURRENT_TIMESTAMP
+    ORDER BY l.created_at DESC LIMIT 1`).bind(organizationId, assetId, buyerId).first<CampaignLicenceRow>();
+}
+
+async function licensedCampaignAsset(c: { env: Bindings }, user: RequestUser, campaignId: string, assetId: string, licenceId: string | null): Promise<Record<string, unknown> | null> {
+  const licenceFilter = licenceId == null ? "" : " AND l.id = ?";
+  const values: unknown[] = [user.id];
+  if (licenceId != null) values.push(licenceId);
+  values.push(campaignId, user.organizationId, assetId);
+  return c.env.DB.prepare(`SELECT c.id AS campaign_id, c.owner_id AS campaign_owner_id, ca.stage, a.id AS asset_id, a.owner_id,
+      a.kind, a.title, a.rights_status, a.human_verified, a.model_release_status, a.property_release_status,
+      a.original_key, a.source_file_name, a.source_attribution, l.id AS licence_id, l.licence_type, l.territory,
+      l.duration_days, l.paid_at, datetime(l.paid_at, '+' || l.duration_days || ' days') AS licence_expires_at
+    FROM campaigns c JOIN campaign_assets ca ON ca.campaign_id = c.id
+      JOIN assets a ON a.id = ca.asset_id AND a.organization_id = c.organization_id
+      JOIN licences l ON l.asset_id = a.id AND l.organization_id = c.organization_id AND l.buyer_id = ?
+        AND l.status = 'paid' AND l.paid_at IS NOT NULL
+        AND datetime(l.paid_at, '+' || l.duration_days || ' days') > CURRENT_TIMESTAMP${licenceFilter}
+    WHERE c.id = ? AND c.organization_id = ? AND ca.asset_id = ? LIMIT 1`).bind(...values).first<Record<string, unknown>>();
+}
+
 app.get("/api/campaigns/:id", async (c) => {
   const user = await requestUser(c);
   if (!user) return c.json({ error: "Authentication required" }, 401);
@@ -4744,18 +4897,40 @@ app.get("/api/campaigns/:id", async (c) => {
     WHERE c.id = ? AND c.organization_id = ? GROUP BY c.id`).bind(campaignId, user.organizationId).first<Record<string, unknown>>();
   if (!campaign) return c.json({ error: "Campaign not found" }, 404);
   const summary = campaignSummaryFromRow(campaign);
-  const stagedRows = await c.env.DB.prepare(`SELECT ca.stage, ca.note, a.*, u.display_name AS contributor
+  const stagedRows = await c.env.DB.prepare(`SELECT ca.stage, ca.note, a.*, u.display_name AS contributor,
+      (SELECT l.id FROM licences l
+       WHERE l.asset_id = a.id AND l.organization_id = a.organization_id AND l.buyer_id = ? AND l.status = 'paid'
+         AND l.paid_at IS NOT NULL AND datetime(l.paid_at, '+' || l.duration_days || ' days') > CURRENT_TIMESTAMP
+       ORDER BY l.created_at DESC LIMIT 1) AS active_licence_id
     FROM campaign_assets ca JOIN assets a ON a.id = ca.asset_id JOIN users u ON u.id = a.owner_id
-    WHERE ca.campaign_id = ? AND a.organization_id = ? ORDER BY ca.updated_at DESC`).bind(campaignId, user.organizationId).all<Record<string, unknown>>();
+    WHERE ca.campaign_id = ? AND a.organization_id = ? ORDER BY ca.updated_at DESC`).bind(user.id, campaignId, user.organizationId).all<Record<string, unknown>>();
   const stagedByAsset = new Map(stagedRows.results.map((row) => [String(row.id), { stage: String(row.stage) as CampaignStage, note: String(row.note ?? "") }]));
-  const assets = stagedRows.results.map((row) => ({ ...assetRowToDomain(row, c.env), campaignStage: String(row.stage) as CampaignStage, campaignNote: String(row.note ?? ""), activeLicenceId: null }));
+  const assetIds = stagedRows.results.map((row) => String(row.id));
+  const placeholders = assetIds.map(() => "?").join(", ");
+  const licenceRows = assetIds.length ? await c.env.DB.prepare(`SELECT l.id, l.asset_id, l.licence_type, l.territory, l.duration_days, l.paid_at, datetime(l.paid_at, '+' || l.duration_days || ' days') AS licence_expires_at
+    FROM licences l WHERE l.organization_id = ? AND l.buyer_id = ? AND l.status = 'paid' AND l.paid_at IS NOT NULL
+      AND datetime(l.paid_at, '+' || l.duration_days || ' days') > CURRENT_TIMESTAMP AND l.asset_id IN (${placeholders})
+    ORDER BY l.created_at DESC`).bind(user.organizationId, user.id, ...assetIds).all<CampaignLicenceRow>() : { results: [] as CampaignLicenceRow[] };
+  const licenceByAsset = new Map(licenceRows.results.map((row) => [String(row.asset_id), row]));
+  const assets = stagedRows.results.map((row) => ({ ...assetRowToDomain(row, c.env), campaignStage: String(row.stage) as CampaignStage, campaignNote: String(row.note ?? ""), activeLicenceId: row.active_licence_id == null ? null : String(row.active_licence_id) }));
+  const editVersions = assetIds.length ? (await c.env.DB.prepare(`SELECT id, asset_id, version_number, recipe_json, note, created_at FROM asset_edit_versions WHERE organization_id = ? AND asset_id IN (${placeholders}) ORDER BY asset_id, version_number ASC`).bind(user.organizationId, ...assetIds).all<Record<string, unknown>>()).results.map(editVersionPayload) : [];
+  const derivativeRows = assetIds.length ? (await c.env.DB.prepare(`SELECT id, asset_id, edit_version_id, campaign_id, licence_id, variant, status, content_type, size_bytes, width, height, created_at FROM asset_derivative_exports WHERE organization_id = ? AND campaign_id = ? AND asset_id IN (${placeholders}) ORDER BY created_at DESC`).bind(user.organizationId, campaignId, ...assetIds).all<Record<string, unknown>>()).results : [];
+  const derivatives = derivativeRows.map(derivativePayload);
+  const readyDerivativeAssets = new Set(derivativeRows.filter((row) => String(row.status) === "ready").map((row) => String(row.asset_id)));
+  const bundleRows = (await c.env.DB.prepare(`SELECT b.*, bb.status AS build_status, bb.error_text AS build_error
+    FROM campaign_bundles b LEFT JOIN campaign_bundle_builds bb ON bb.bundle_id = b.id
+    WHERE b.organization_id = ? AND b.campaign_id = ? ORDER BY b.created_at DESC`).bind(user.organizationId, campaignId).all<Record<string, unknown>>()).results;
+  const bundles = bundleRows.map(bundlePayload);
   const candidateRows = await c.env.DB.prepare("SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.organization_id = ? AND a.status = 'published' ORDER BY a.human_verified DESC, a.created_at DESC LIMIT 200").bind(user.organizationId).all<Record<string, unknown>>();
   const rankedCandidates = rankCampaignAssets(candidateRows.results.map((row) => assetRowToDomain(row, c.env)), summary.briefFields, summary.brandKit);
   const recommendations = [...rankedCandidates.slice(0, 12), ...rankedCandidates.slice(12).filter((item) => stagedByAsset.has(item.asset.id))].map((item) => {
     const staged = stagedByAsset.get(item.asset.id);
     return { ...item, stage: staged?.stage ?? null, note: staged?.note ?? "" };
   });
-  return c.json({ campaign: summary, recommendations, assets, editVersions: [], derivatives: [], bundles: [], buyerTermsAccepted: await campaignTermsAccepted(c, campaignId, user) });
+  return c.json({ campaign: summary, recommendations, assets, editVersions, derivatives, bundles,
+    licenceMetadata: assets.map((asset) => { const licence = licenceByAsset.get(asset.id); return { assetId: asset.id, licenceId: licence?.id ?? null, licenceType: licence?.licence_type ?? null, territory: licence?.territory ?? null, expiresAt: licence?.licence_expires_at ?? null }; }),
+    blockers: stagedRows.results.map((row) => ({ assetId: String(row.id), blockers: campaignAssetBlockers(row, row.active_licence_id != null, readyDerivativeAssets.has(String(row.id))) })),
+    buyerTermsAccepted: await campaignTermsAccepted(c, campaignId, user) });
 });
 
 app.post("/api/campaigns/:id/terms/accept", async (c) => {

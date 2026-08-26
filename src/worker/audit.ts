@@ -170,8 +170,8 @@ export async function appendAuditEvent(env: AuditBindings, rawInput: AuditEventI
   const result = await env.DB.prepare(`
     INSERT INTO audit_log_events (
       event_id, stream_id, sequence, occurred_at, actor_id, actor_type, action,
-      resource_type, resource_id, data_json, residency_region, previous_hash,
-      event_hash, signature, key_id, public_key_jwk, canonical_json, r2_key
+    resource_type, resource_id, data_json, residency_region, previous_hash,
+      event_hash, signature, key_id, public_key_jwk, canonical_json, r2_key, organization_id
     )
     SELECT ?, ?, sequence + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
     FROM audit_chain_heads
@@ -179,7 +179,7 @@ export async function appendAuditEvent(env: AuditBindings, rawInput: AuditEventI
   `).bind(
     record.eventId, record.streamId, record.occurredAt, record.actor.id, record.actor.type, record.action,
     record.resource.type, record.resource.id, JSON.stringify(record.data), record.residencyRegion, record.previousHash,
-    stored.hash, stored.signature, stored.keyId, JSON.stringify(stored.publicKeyJwk), canonical, stored.r2Key,
+    stored.hash, stored.signature, stored.keyId, JSON.stringify(stored.publicKeyJwk), canonical, stored.r2Key, input.organizationId ?? null,
     record.streamId, Number(head.sequence), record.previousHash,
   ).run();
 
@@ -217,9 +217,10 @@ export async function verifyAuditEvent(env: AuditBindings, event: StoredAuditEve
   return { hashValid, signatureValid };
 }
 
-export async function exportAuditEvents(env: AuditBindings, filters: { streamId: string; residencyRegion: ResidencyRegion; from?: string; to?: string }): Promise<{ exportId: string; objectKey: string; eventCount: number; manifestHash: string }> {
-  const clauses = ["stream_id = ?", "residency_region = ?"];
-  const values: string[] = [filters.streamId, filters.residencyRegion];
+export async function exportAuditEvents(env: AuditBindings, filters: { organizationId: string; streamId: string; residencyRegion: ResidencyRegion; from?: string; to?: string; createdBy?: string }): Promise<{ exportId: string; objectKey: string; eventCount: number; manifestHash: string }> {
+  if (!filters.organizationId) throw new Error("AUDIT_ORGANIZATION_REQUIRED");
+  const clauses = ["organization_id = ?", "stream_id = ?", "residency_region = ?"];
+  const values: string[] = [filters.organizationId, filters.streamId, filters.residencyRegion];
   if (filters.from) { clauses.push("occurred_at >= ?"); values.push(filters.from); }
   if (filters.to) { clauses.push("occurred_at <= ?"); values.push(filters.to); }
   const rows = await env.DB.prepare(`SELECT * FROM audit_log_events WHERE ${clauses.join(" AND ")} ORDER BY sequence ASC LIMIT 10000`).bind(...values).all<Record<string, unknown>>();
@@ -256,9 +257,9 @@ export async function exportAuditEvents(env: AuditBindings, filters: { streamId:
     customMetadata: { immutable: "true", manifestHash, exportId, residencyRegion: filters.residencyRegion },
   });
   await env.DB.prepare(`
-    INSERT INTO audit_exports (id, stream_id, residency_region, from_occurred_at, to_occurred_at, event_count, manifest_hash, object_key)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).bind(exportId, filters.streamId, filters.residencyRegion, filters.from ?? null, filters.to ?? null, events.length, manifestHash, objectKey).run();
+    INSERT INTO audit_exports (id, organization_id, created_by, stream_id, residency_region, from_occurred_at, to_occurred_at, event_count, manifest_hash, object_key)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(exportId, filters.organizationId, filters.createdBy ?? null, filters.streamId, filters.residencyRegion, filters.from ?? null, filters.to ?? null, events.length, manifestHash, objectKey).run();
   return { exportId, objectKey, eventCount: events.length, manifestHash };
 }
 

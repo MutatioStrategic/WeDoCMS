@@ -91,6 +91,7 @@ export const assetSchema = z.object({
   previewUrl: mediaReferenceSchema.nullable().optional(),
   streamUid: z.string().nullable().optional(),
   streamEmbedUrl: z.string().url().nullable().optional(),
+  streamStatus: z.enum(["not_configured", "uploading", "processing", "ready", "error"]).optional(),
   monetizationModel: z.enum(["membership", "individual_license", "custom_quote"]).optional(),
   licensePriceCents: z.number().int().nonnegative().nullable().optional(),
   freeDownloadEnabled: z.boolean().optional(),
@@ -220,12 +221,105 @@ export const streamWebhookRequestSchema = z.object({
     pctComplete: z.string().trim().max(40).optional(),
     errorReasonCode: z.string().trim().max(120).optional(),
     errorReasonText: z.string().trim().max(500).optional(),
+    errReasonCode: z.string().trim().max(120).optional(),
+    errReasonText: z.string().trim().max(500).optional(),
   }).optional(),
   meta: z.object({
     filename: z.string().trim().max(240).optional(),
     filetype: z.string().trim().max(120).optional(),
     name: z.string().trim().max(240).optional(),
   }).optional(),
+});
+
+export const editVersionRequestSchema = z.object({
+  recipe: z.record(z.unknown()).default({}),
+  note: z.string().trim().max(1000).default(""),
+  campaignId: z.string().min(1).max(120),
+  licenceId: z.string().min(1).max(120),
+}).strict();
+
+export const derivativeRequestSchema = z.object({
+  editVersionId: z.string().min(1).max(120),
+  campaignId: z.string().min(1).max(120),
+  licenceId: z.string().min(1).max(120),
+  variant: z.enum(["original", "edited", "social_square", "portrait", "landscape", "story_9_16", "reel_cover", "linkedin", "web_hero", "email_header"]),
+  contentType: z.string().regex(/^[a-z]+\/[a-z0-9.+-]+$/i).max(120),
+  sizeBytes: z.number().int().positive().max(50_000_000),
+  width: z.number().int().positive().max(20_000).optional(),
+  height: z.number().int().positive().max(20_000).optional(),
+}).strict();
+
+export const bundleRequestSchema = z.object({
+  bundleType: z.enum(["social_media", "website", "paid_ads", "print_handoff", "full_archive"]),
+}).strict();
+
+export const rightsTransitionRequestSchema = z.object({
+  to: z.enum(["under_review", "mediation", "resolved", "appealed", "closed"]),
+  resolutionSummary: z.string().trim().max(4000).optional(),
+  summary: z.string().trim().max(4000).optional(),
+  evidenceReferences: z.array(z.string().trim().max(240)).max(20).default([]),
+}).strict();
+
+export const streamUploadRequestSchema = z.object({
+  filename: z.string().trim().min(1).max(240),
+  contentType: z.string().regex(/^video\//i).max(120),
+  maxDurationSeconds: z.number().int().positive().max(86_400).default(3_600),
+}).strict();
+
+export const editVersionResponseSchema = z.object({
+  id: z.string().min(1),
+  assetId: z.string().min(1),
+  versionNumber: z.number().int().positive(),
+  recipe: z.record(z.unknown()),
+  note: z.string(),
+  createdAt: z.string(),
+});
+
+export const derivativeResponseSchema = z.object({
+  id: z.string().min(1),
+  assetId: z.string().min(1),
+  editVersionId: z.string().min(1),
+  campaignId: z.string().nullable().optional(),
+  licenceId: z.string().min(1),
+  variant: z.string().min(1),
+  status: z.enum(["pending", "ready", "failed", "revoked"]),
+  contentType: z.string().min(1),
+  sizeBytes: z.number().int().nonnegative(),
+  width: z.number().int().positive().nullable().optional(),
+  height: z.number().int().positive().nullable().optional(),
+  contentUrl: z.string().startsWith("/"),
+  createdAt: z.string(),
+});
+
+export const bundleResponseSchema = z.object({
+  id: z.string().min(1),
+  campaignId: z.string().min(1),
+  bundleType: z.string().min(1),
+  status: z.enum(["pending", "approved", "expired", "revoked", "failed", "building"]),
+  expiresAt: z.string().nullable().optional(),
+  download: z.string().startsWith("/").nullable().optional(),
+  createdAt: z.string(),
+}).passthrough();
+
+export const rightsTransitionResponseSchema = z.object({
+  id: z.string().min(1),
+  status: z.enum(["lodged", "under_review", "mediation", "resolved", "appealed", "closed"]),
+  auditEventId: z.string().min(1),
+});
+
+export const streamUploadResponseSchema = z.object({
+  assetId: z.string().min(1),
+  streamUid: z.string().min(1),
+  uploadUrl: z.string().url(),
+  expiresAt: z.string(),
+  status: z.enum(["uploading", "processing", "ready"]),
+});
+
+export const streamPlaybackResponseSchema = z.object({
+  assetId: z.string().min(1),
+  streamUid: z.string().min(1),
+  iframeUrl: z.string().url(),
+  expiresInSeconds: z.number().int().positive(),
 });
 
 export const contractResponseValidationErrorSchema = z.object({

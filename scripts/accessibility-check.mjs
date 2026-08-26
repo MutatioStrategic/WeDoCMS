@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { chromium } from "@playwright/test";
+import { chromium, expect } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 
 const port = "4173";
@@ -72,16 +72,16 @@ try {
   await page.locator(".better-nav-item").filter({ hasText: "System overview" }).click();
   const stakeholderOverview = await scan();
   const stakeholderOverviewPassed = report("stakeholder system overview", stakeholderOverview);
-  await page.locator(".better-nav-item").filter({ hasText: "Media studio" }).click();
-  const studio = await scan();
-  const studioPassed = report("media formatting studio", studio);
+  // Role-gated workspaces are intentionally omitted from anonymous navigation;
+  // their sign-up affordance is exposed in the header instead of a dead-end link.
+  await expect(page.locator(".better-nav-item").filter({ hasText: "Media studio" })).toHaveCount(0);
   await page.locator(".better-nav-item").filter({ hasText: "Community" }).click();
   await page.getByRole("button", { name: "Open a resolution case" }).click();
   const resolution = await scan();
   const resolutionPassed = report("community and resolution workspace", resolution);
   await context.close();
   await browser.close();
-  if (!initialPassed || !searchPassed || !assetDialogPassed || !stakeholderOverviewPassed || !studioPassed || !resolutionPassed) process.exitCode = 1;
+  if (!initialPassed || !searchPassed || !assetDialogPassed || !stakeholderOverviewPassed || !resolutionPassed) process.exitCode = 1;
 } finally {
   server.kill();
 }
