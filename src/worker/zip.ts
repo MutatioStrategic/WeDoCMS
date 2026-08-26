@@ -43,7 +43,7 @@ function crc32(value: number, bytes: Uint8Array): number {
 }
 
 function localHeader(path: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
-  return concat(u32(0x04034b50), u16(20), u16(0x0008), u16(0), u16(0), u16(0), u16(0), u32(0), u32(0), u32(0), u16(path.byteLength), u16(0), path);
+  return concat(u32(0x04034b50), u16(20), u16(0x0008), u16(0), u16(0), u16(0), u32(0), u32(0), u32(0), u16(path.byteLength), u16(0), path);
 }
 
 function dataDescriptor(crc: number, size: number): Uint8Array<ArrayBuffer> {

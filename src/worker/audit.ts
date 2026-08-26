@@ -132,7 +132,13 @@ export async function appendAuditEvent(env: AuditBindings, rawInput: AuditEventI
 
   if (input.eventId) {
     const existing = await env.DB.prepare("SELECT * FROM audit_log_events WHERE event_id = ?").bind(input.eventId).first<Record<string, unknown>>();
-    if (existing) return { event: asStoredEvent(existing), created: false };
+    if (existing) {
+      const existingOrganizationId = existing.organization_id == null ? null : String(existing.organization_id);
+      if (existingOrganizationId !== (input.organizationId ?? null) || String(existing.residency_region) !== input.residencyRegion) {
+        throw new Error("AUDIT_EVENT_SCOPE_MISMATCH");
+      }
+      return { event: asStoredEvent(existing), created: false };
+    }
   }
 
   const eventId = input.eventId ?? crypto.randomUUID();
@@ -192,7 +198,13 @@ export async function appendAuditEvent(env: AuditBindings, rawInput: AuditEventI
     return { event: stored, created: true };
   }
   const concurrent = await env.DB.prepare("SELECT * FROM audit_log_events WHERE event_id = ?").bind(record.eventId).first<Record<string, unknown>>();
-  if (concurrent) return { event: asStoredEvent(concurrent), created: false };
+  if (concurrent) {
+    const concurrentOrganizationId = concurrent.organization_id == null ? null : String(concurrent.organization_id);
+    if (concurrentOrganizationId !== (input.organizationId ?? null) || String(concurrent.residency_region) !== input.residencyRegion) {
+      throw new Error("AUDIT_EVENT_SCOPE_MISMATCH");
+    }
+    return { event: asStoredEvent(concurrent), created: false };
+  }
   throw new Error("AUDIT_CHAIN_CONFLICT");
 }
 

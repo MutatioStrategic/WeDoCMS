@@ -54,6 +54,7 @@ export type AuditCatalogRow = {
 
 export type AuditCatalogSearch = {
   organizationId: string;
+  residencyRegion: string;
   q?: string;
   action?: string;
   resourceType?: string;
@@ -172,7 +173,10 @@ export async function searchR2AuditCatalog(config: AuditAnalyticsConfig, filters
   if (!endpoint) return [];
   const namespace = sqlIdentifier(config.R2_ANALYTICS_NAMESPACE ?? "audit", "audit");
   const table = sqlIdentifier(config.R2_ANALYTICS_TABLE ?? "events", "events");
-  const conditions = [`organization_id = ${sqlLiteral(filters.organizationId)}`];
+  const conditions = [
+    `organization_id = ${sqlLiteral(filters.organizationId)}`,
+    `residency_region = ${sqlLiteral(filters.residencyRegion)}`,
+  ];
   if (filters.q) {
     const term = sqlLiteral(`%${filters.q}%`);
     conditions.push(`LOWER(action || ' ' || resource_type || ' ' || resource_id || ' ' || actor_id || ' ' || data_json) LIKE LOWER(${term})`);

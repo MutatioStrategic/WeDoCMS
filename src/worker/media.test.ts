@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { createMediaResponse, previewMediaKey, previewObjectKey, publicMediaKey } from "./index";
+import { describe, expect, it, vi } from "vitest";
+import { createMediaResponse, getReadableMedia, headReadableMedia, previewMediaKey, previewObjectKey, publicMediaKey } from "./index";
 
 function mediaObject(range?: { offset: number; length: number }): R2ObjectBody {
   return {
@@ -44,5 +44,40 @@ describe("media preview responses", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("Content-Type")).toBe("video/mp4");
     expect(response.body).toBeNull();
+  });
+
+  it("falls back to the production media library without writing to it", async () => {
+    const libraryObject = mediaObject();
+    const primary = {
+      head: vi.fn(async () => null),
+      get: vi.fn(async () => null),
+    } as unknown as Pick<R2Bucket, "get" | "head">;
+    const library = {
+      head: vi.fn(async () => libraryObject),
+      get: vi.fn(async () => libraryObject),
+    } as unknown as Pick<R2Bucket, "get" | "head">;
+
+    expect(await headReadableMedia({ MEDIA_BUCKET: primary, MEDIA_LIBRARY_BUCKET: library }, "previews/library.webp")).toBe(libraryObject);
+    expect(await getReadableMedia({ MEDIA_BUCKET: primary, MEDIA_LIBRARY_BUCKET: library }, "previews/library.webp")).toBe(libraryObject);
+    expect(library.head).toHaveBeenCalledOnce();
+    expect(library.get).toHaveBeenCalledOnce();
+  });
+
+  it("prefers the primary media bucket when both sources contain the object", async () => {
+    const primaryObject = mediaObject();
+    const libraryObject = mediaObject();
+    const primary = {
+      head: vi.fn(async () => primaryObject),
+      get: vi.fn(async () => primaryObject),
+    } as unknown as Pick<R2Bucket, "get" | "head">;
+    const library = {
+      head: vi.fn(async () => libraryObject),
+      get: vi.fn(async () => libraryObject),
+    } as unknown as Pick<R2Bucket, "get" | "head">;
+
+    expect(await headReadableMedia({ MEDIA_BUCKET: primary, MEDIA_LIBRARY_BUCKET: library }, "previews/primary.webp")).toBe(primaryObject);
+    expect(await getReadableMedia({ MEDIA_BUCKET: primary, MEDIA_LIBRARY_BUCKET: library }, "previews/primary.webp")).toBe(primaryObject);
+    expect(library.head).not.toHaveBeenCalled();
+    expect(library.get).not.toHaveBeenCalled();
   });
 });

@@ -9,33 +9,40 @@ ALTER TABLE audit_exports ADD COLUMN organization_id TEXT;
 ALTER TABLE audit_exports ADD COLUMN created_by TEXT;
 ALTER TABLE contributor_verification_cases ADD COLUMN organization_id TEXT;
 
+-- Existing audit rows are immutable at runtime. Recreate only the two update
+-- guards around this one-time ownership backfill so historical rows can be
+-- classified without weakening the append-only contract after migration.
+DROP TRIGGER IF EXISTS audit_log_events_no_update;
+DROP TRIGGER IF EXISTS audit_exports_no_update;
+
 UPDATE audit_log_events
 SET organization_id = COALESCE(
-  (SELECT om.organization_id FROM organization_memberships om WHERE om.user_id = audit_log_events.actor_id AND om.status = 'active' ORDER BY om.created_at LIMIT 1),
   (SELECT a.organization_id FROM assets a WHERE audit_log_events.resource_type = 'asset' AND a.id = audit_log_events.resource_id),
   (SELECT l.organization_id FROM licences l WHERE audit_log_events.resource_type = 'licence' AND l.id = audit_log_events.resource_id),
   (SELECT c.organization_id FROM campaigns c WHERE audit_log_events.resource_type = 'campaign' AND c.id = audit_log_events.resource_id),
   (SELECT t.organization_id FROM takedown_requests t WHERE audit_log_events.resource_type = 'takedown_request' AND t.id = audit_log_events.resource_id),
-  (SELECT vc.organization_id FROM contributor_verification_cases vc WHERE audit_log_events.resource_type = 'verification_case' AND vc.id = audit_log_events.resource_id)
+  (SELECT vc.organization_id FROM contributor_verification_cases vc WHERE audit_log_events.resource_type = 'verification_case' AND vc.id = audit_log_events.resource_id),
+  (SELECT MIN(om.organization_id) FROM organization_memberships om WHERE om.user_id = audit_log_events.actor_id AND om.status = 'active'
+    HAVING COUNT(DISTINCT om.organization_id) = 1)
 )
 WHERE organization_id IS NULL;
 
 UPDATE contributor_verification_cases
 SET organization_id = (
-  SELECT om.organization_id FROM organization_memberships om
+  SELECT MIN(om.organization_id) FROM organization_memberships om
   WHERE om.user_id = contributor_verification_cases.contributor_id
     AND om.status = 'active'
-  ORDER BY om.created_at LIMIT 1
+  HAVING COUNT(DISTINCT om.organization_id) = 1
 )
 WHERE organization_id IS NULL;
 
 UPDATE audit_exports
 SET organization_id = (
-  SELECT e.organization_id FROM audit_log_events e
+  SELECT MIN(e.organization_id) FROM audit_log_events e
   WHERE e.stream_id = audit_exports.stream_id
     AND e.residency_region = audit_exports.residency_region
     AND e.organization_id IS NOT NULL
-  ORDER BY e.sequence LIMIT 1
+  HAVING COUNT(DISTINCT e.organization_id) = 1
 )
 WHERE organization_id IS NULL;
 
@@ -91,5 +98,17 @@ CREATE INDEX IF NOT EXISTS idx_verification_cases_organization
   ON contributor_verification_cases(organization_id, residency_region, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_assets_stream_status
   ON assets(organization_id, stream_status, stream_updated_at DESC);
+
+CREATE TRIGGER IF NOT EXISTS audit_log_events_no_update
+BEFORE UPDATE ON audit_log_events
+BEGIN
+  SELECT RAISE(ABORT, 'audit log events are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS audit_exports_no_update
+BEFORE UPDATE ON audit_exports
+BEGIN
+  SELECT RAISE(ABORT, 'audit exports are immutable');
+END;
 
 PRAGMA foreign_keys = ON;
