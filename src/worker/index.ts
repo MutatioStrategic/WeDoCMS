@@ -83,6 +83,7 @@ import { bearerToken, normalizeWordPressSiteUrl, WORDPRESS_SCOPES, wordPressApiB
 import {
   assetCreateRequestSchema as contractAssetCreateRequestSchema,
   assetCreateResponseSchema,
+  authConfigResponseSchema,
   contractResponseValidationErrorSchema,
   ContractResponseValidationError,
   derivativeRequestSchema,
@@ -147,6 +148,10 @@ type SecretBindings = {
   CIPC_LOOKUP_URL?: string;
   CIPC_API_TOKEN?: string;
   APP_PUBLIC_URL?: string;
+  AUTH_REDIRECT_URL?: string;
+  AUTH_PROVIDER?: string;
+  SUPABASE_URL?: string;
+  SUPABASE_AUDIENCE?: string;
   STRIPE_SECRET_KEY?: string;
   PAYFAST_ENDPOINT?: string;
   PAYFAST_TOKEN?: string;
@@ -387,6 +392,51 @@ const exchangeSchema = z.object({
 type AppContext = Context<{ Bindings: Bindings; Variables: Variables }>;
 type DemoRole = z.infer<typeof devLoginSchema>["role"];
 
+export function isSupabasePublicKey(value: string | undefined): boolean {
+  const key = value?.trim();
+  if (!key) return false;
+  if (key.startsWith("sb_publishable_")) return true;
+  const parts = key.split(".");
+  if (parts.length !== 3) return false;
+  try {
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(parts[1].length / 4) * 4, "="))) as { role?: unknown };
+    return payload.role === "anon";
+  } catch {
+    return false;
+  }
+}
+
+function authRedirectUrlForRequest(request: Request, env: Bindings): string {
+  const configured = env.AUTH_REDIRECT_URL?.trim() || env.APP_PUBLIC_URL?.trim() || (String(env.APP_ENV) === "production" ? "https://veld-archive.pages.dev" : new URL(request.url).origin);
+  try {
+    const url = new URL(configured);
+    if (!/^https?:$/i.test(url.protocol)) throw new Error("unsupported redirect protocol");
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return String(env.APP_ENV) === "production" ? "https://veld-archive.pages.dev" : new URL(request.url).origin;
+  }
+}
+
+export function publicAuthConfig(request: Request, env: Bindings): unknown {
+  const redirectUrl = authRedirectUrlForRequest(request, env);
+  if (isDemoEnvironment(env)) return { provider: "demo", redirectUrl };
+  const provider = String(env.AUTH_PROVIDER ?? "both").trim().toLowerCase();
+  const supabaseUrl = env.SUPABASE_URL?.trim();
+  const key = env.SUPABASE_ANON_KEY?.trim();
+  if (!["supabase", "both"].includes(provider) || !supabaseUrl || !key) {
+    return { provider: "unavailable", redirectUrl, reason: "identity_provider_not_configured" };
+  }
+  try {
+    const url = new URL(supabaseUrl);
+    if (url.protocol !== "https:" || !isSupabasePublicKey(key)) throw new Error("invalid Supabase public configuration");
+  } catch {
+    return { provider: "unavailable", redirectUrl, reason: "identity_provider_key_invalid" };
+  }
+  return { provider: "supabase", supabaseUrl, publishableKey: key, redirectUrl };
+}
+
 /**
  * Marketplace terms are intentionally readable before sign-in so a buyer or
  * seller can understand the contract before creating an account or starting
@@ -426,6 +476,11 @@ app.get("/api/auth/session", async (c) => {
   const user = await getRequestUser(c.env, c.req.raw);
   const response = user ? { authenticated: true as const, user, csrfToken: user.csrfToken } : { authenticated: false as const, user: null };
   return c.json(validateContractResponse("GET /api/auth/session 200", sessionResponseSchema, response));
+});
+
+app.get("/api/auth/config", (c) => {
+  c.header("Cache-Control", "no-store");
+  return c.json(validateContractResponse("GET /api/auth/config 200", authConfigResponseSchema, publicAuthConfig(c.req.raw, c.env)));
 });
 
 app.post("/api/auth/logout", async (c) => {
@@ -3960,7 +4015,7 @@ async function launchReadiness(env: Bindings): Promise<Record<string, unknown>> 
   const demoAssets = tables.has("assets") ? await scalar("SELECT COUNT(*) AS total FROM assets WHERE COALESCE(demo_seed, 0) = 1 OR id LIKE 'asset-demo-%' OR id LIKE 'asset-test-photo-%'") : 0;
   const verifiedPaystackWallets = tables.has("payout_wallets") ? await scalar("SELECT COUNT(*) AS total FROM payout_wallets WHERE provider = 'paystack' AND status = 'verified' AND provider_account_id LIKE 'ACCT_%'") : 0;
   const auth0Configured = Boolean(env.AUTH_JWKS_URL?.trim() && env.AUTH_ISSUER?.trim() && env.AUTH_AUDIENCE?.trim());
-  const supabaseConfigured = Boolean(env.SUPABASE_URL?.trim() && env.SUPABASE_AUDIENCE?.trim());
+  const supabaseConfigured = Boolean(env.SUPABASE_URL?.trim() && env.SUPABASE_AUDIENCE?.trim() && isSupabasePublicKey(env.SUPABASE_ANON_KEY));
   const subscription = buyerSubscriptionConfiguration(env);
   let streamSecretConfigured = Boolean(env.STREAM_WEBHOOK_SECRET?.trim());
   if (!streamSecretConfigured && env.STREAM_WEBHOOK_SECRET_STORE) {

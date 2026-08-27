@@ -33,6 +33,25 @@ export const sessionResponseSchema = z.union([
   z.object({ authenticated: z.literal(true), user: sessionUserSchema, csrfToken: z.string().min(1) }),
 ]);
 
+export const authConfigResponseSchema = z.discriminatedUnion("provider", [
+  z.object({
+    provider: z.literal("supabase"),
+    supabaseUrl: z.string().url(),
+    publishableKey: z.string().min(1),
+    redirectUrl: z.string().url(),
+  }),
+  z.object({
+    provider: z.literal("demo"),
+    redirectUrl: z.string().url(),
+  }),
+  z.object({
+    provider: z.literal("unavailable"),
+    redirectUrl: z.string().url(),
+    reason: z.enum(["identity_provider_not_configured", "identity_provider_key_invalid"]),
+  }),
+]);
+export type AuthConfigResponse = z.infer<typeof authConfigResponseSchema>;
+
 const releaseStatusSchema = z.enum(["unknown", "not_required", "pending", "verified"]);
 const mediaReferenceSchema = z.string().refine((value) => value.startsWith("/") || /^https?:\/\//i.test(value), "Media reference must be a same-origin path or HTTPS URL");
 

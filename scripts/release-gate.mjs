@@ -20,7 +20,6 @@ async function filesUnder(directory) {
 
 const failures = [];
 let files = [];
-const builtContents = [];
 try {
   files = await filesUnder(dist);
 } catch {
@@ -29,7 +28,6 @@ try {
 
 for (const file of files.filter((candidate) => textExtensions.has(extname(candidate)))) {
   const content = await readFile(file, "utf8");
-  builtContents.push(content);
   for (const check of forbidden) if (check.pattern.test(content)) failures.push(`${check.label} found in ${file.replaceAll("\\", "/")}`);
 }
 
@@ -40,6 +38,8 @@ const demoSmokeSource = await readFile(new URL("../scripts/demo-screen-smoke.mjs
 const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 if (!sharedSource.includes('export type AssetKind = "image" | "video"')) failures.push("The declared product boundary must remain photo/video only.");
 if (!mainSource.includes("No substitute image is shown.")) failures.push("Missing the explicit unavailable-preview state; visual cards must not fabricate substitute media.");
+if (!mainSource.includes('fetch("/api/auth/config"') || !mainSource.includes("parseRuntimeAuthConfig") || !mainSource.includes("AuthBootstrap")) failures.push("The frontend must bootstrap authentication from the Worker-owned /api/auth/config contract.");
+if (!workerSource.includes('app.get("/api/auth/config"') || !workerSource.includes("SUPABASE_ANON_KEY") || !workerSource.includes("isSupabasePublicKey")) failures.push("The Worker must expose and validate its browser-safe Supabase authentication configuration.");
 const hasDemoFallback = /filterDemoAssets|demoAssets/.test(mainSource);
 if (hasDemoFallback && !mainSource.includes("import.meta.env.DEV")) failures.push("Demo fallback is not restricted to development builds.");
 if (/MEDIA_LIBRARY_BUCKET\s*\.\s*(?:put|delete|createMultipartUpload|resumeMultipartUpload)\s*\(/.test(workerSource)) failures.push("The production media library fallback must remain read-only in Worker code.");
@@ -60,7 +60,12 @@ if (process.argv.includes("--production")) {
   if (!/"APP_ENV"\s*:\s*"production"/.test(productionConfig)) failures.push("The production Wrangler environment must set APP_ENV to production.");
   if (/"cache"\s*:\s*\{\s*"enabled"\s*:\s*true/s.test(productionConfig)) failures.push("Worker-wide production caching must remain disabled for cookie-authenticated API responses.");
   if (/"AUTH_PROVIDER"\s*:\s*"(?:auth0|both)"/.test(productionConfig) && !/"AUTH_AUDIENCE"\s*:\s*"[^"]+"/.test(productionConfig)) failures.push("Auth0 is selected in production but AUTH_AUDIENCE is missing.");
-  if (!builtContents.some((content) => /https:\/\/[A-Za-z0-9.-]+\.supabase\.co/.test(content) || /https:\/\/[A-Za-z0-9.-]+\.auth0\.com/.test(content))) failures.push("The production frontend bundle has no configured Supabase or Auth0 origin; authentication buttons would be unavailable.");
+  if (!/"AUTH_PROVIDER"\s*:\s*"(?:supabase|both)"/.test(productionConfig)) failures.push("Supabase must be selected in the production authentication provider configuration.");
+  if (!/"SUPABASE_URL"\s*:\s*"https:\/\/[^"/]+\.supabase\.co"/.test(productionConfig)) failures.push("Production must declare its HTTPS Supabase project URL.");
+  if (!/"SUPABASE_AUDIENCE"\s*:\s*"[^"}]+"/.test(productionConfig)) failures.push("Production must declare the Supabase JWT audience.");
+  if (!/"SUPABASE_ANON_KEY"/.test(productionConfig)) failures.push("Production Wrangler secrets must require SUPABASE_ANON_KEY.");
+  if (!/"APP_PUBLIC_URL"\s*:\s*"https:\/\//.test(productionConfig) && !/"AUTH_REDIRECT_URL"\s*:\s*"https:\/\//.test(productionConfig)) failures.push("Production must declare an HTTPS auth redirect origin.");
+  if (/(^|\n)\s*"AUTH_COOKIE_DOMAIN"\s*:/.test(productionConfig)) failures.push("Production must not set a cross-host auth cookie domain; direct Worker and Pages origins need host-only sessions.");
   if (!/"PAYSTACK_SUBSCRIPTION_PLAN_CODE"\s*:\s*"PLN_[^"]+"/.test(productionConfig)) failures.push("The canonical Paystack subscription plan code is missing.");
   if (!/"binding"\s*:\s*"MEDIA_BUCKET"\s*,\s*"bucket_name"\s*:\s*"veld-archive-media"/.test(productionConfig)) failures.push("The production Worker must remain bound to the production media bucket.");
   if (!/"R2_BUCKET_NAME"\s*:\s*"veld-archive-media"/.test(productionConfig)) failures.push("Production R2 signing must target the production media bucket.");

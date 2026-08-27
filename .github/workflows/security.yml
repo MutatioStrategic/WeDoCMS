@@ -59,6 +59,7 @@ jobs:
       - run: npm run typecheck
       - run: npm test -- --run
       - run: npm run build
+      - run: npm run auth:check
       - name: Dependency audit
         run: npm audit --audit-level=high
       - name: Generate CycloneDX SBOM
@@ -207,6 +208,7 @@ jobs:
       - run: npm ci
       - run: npx wrangler types
       - run: npm run build
+      - run: npm run auth:check
       - name: Scan repository for vulnerabilities, secrets, and misconfiguration
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

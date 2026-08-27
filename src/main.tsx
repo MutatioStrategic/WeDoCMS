@@ -69,12 +69,45 @@ const demoMode = import.meta.env.MODE === "demo" || import.meta.env.VITE_DEMO_MO
 const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.trim();
 const supabaseKey = ((import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string | undefined) ?? (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined))?.trim();
 const supabaseConfigured = configuredValue(supabaseUrl) && configuredValue(supabaseKey);
-const supabaseClient: SupabaseClient | undefined = supabaseConfigured ? createClient(supabaseUrl!, supabaseKey!, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } }) : undefined;
-const authRedirectUrl = ((import.meta.env.VITE_AUTH_REDIRECT_URL as string | undefined)?.trim() || "https://veld-archive.pages.dev").replace(/\/$/, "");
+const staticSupabaseClient: SupabaseClient | undefined = supabaseConfigured ? createClient(supabaseUrl!, supabaseKey!, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } }) : undefined;
+const defaultAuthRedirectUrl = ((import.meta.env.VITE_AUTH_REDIRECT_URL as string | undefined)?.trim() || "https://veld-archive.pages.dev").replace(/\/$/, "");
 const emptyDiscovery: DiscoveryResponse = { trending: [], savedSearches: [], recommendations: [], personalized: false };
 const recoveryLinkPresent = (): boolean => typeof window !== "undefined" && (new URLSearchParams(window.location.search).get("passwordRecovery") === "1" || /(?:^|&)type=recovery(?:&|$)/.test(window.location.hash.replace(/^#/, "")));
 
-function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClient }) {
+type RuntimeAuthConfig =
+  | { provider: "supabase"; supabaseUrl: string; publishableKey: string; redirectUrl: string }
+  | { provider: "demo"; redirectUrl: string }
+  | { provider: "unavailable"; redirectUrl: string; reason: "identity_provider_not_configured" | "identity_provider_key_invalid" };
+
+function isHttpUrl(value: unknown): value is string {
+  if (typeof value !== "string" || !value.trim()) return false;
+  try { return /^https?:$/i.test(new URL(value).protocol); } catch { return false; }
+}
+
+function parseRuntimeAuthConfig(value: unknown): RuntimeAuthConfig | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  if (!isHttpUrl(record.redirectUrl)) return null;
+  if (record.provider === "supabase" && isHttpUrl(record.supabaseUrl) && typeof record.publishableKey === "string" && record.publishableKey.trim()) {
+    return { provider: "supabase", supabaseUrl: record.supabaseUrl, publishableKey: record.publishableKey, redirectUrl: record.redirectUrl };
+  }
+  if (record.provider === "demo") return { provider: "demo", redirectUrl: record.redirectUrl };
+  if (record.provider === "unavailable" && (record.reason === "identity_provider_not_configured" || record.reason === "identity_provider_key_invalid")) {
+    return { provider: "unavailable", redirectUrl: record.redirectUrl, reason: record.reason };
+  }
+  return null;
+}
+
+type AppProps = {
+  auth0?: Auth0Bridge;
+  supabase?: SupabaseClient;
+  authRedirectUrl?: string;
+  authLoading?: boolean;
+  authUnavailable?: boolean;
+  onRetryAuth?: () => void;
+};
+
+function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLoading = false, authUnavailable = false, onRetryAuth }: AppProps) {
   const [view, setView] = useState<View>(() => window.location.pathname === "/account" ? "account" : window.location.pathname.startsWith("/creators") ? "contributors" : "explore");
   const [query, setQuery] = useState("");
   const [activeQuery, setActiveQuery] = useState("");
@@ -491,14 +524,15 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
     const returnPath = assetId
       ? `${window.location.pathname}?asset=${encodeURIComponent(assetId)}&purchase=1`
       : window.location.pathname;
-    if (auth0) {
-      void auth0.loginWithRedirect({ authorizationParams: { ...(auth0Audience ? { audience: auth0Audience } : {}), ...(auth0Organization ? { organization: auth0Organization } : {}) }, appState: { returnTo: returnPath } });
-      return;
-    }
+    if (authLoading && !supabase && !auth0) { setNotice("Secure sign-in is still loading. Try again in a moment."); return; }
     if (supabase) {
       setSupabaseAuthMode("signup");
       setSupabaseAuthOpen(true);
       setNotice(assetId ? "Create a buyer account or switch to sign in. Your selected asset will remain open." : "Create a buyer account, or switch to sign in if you already have one.");
+      return;
+    }
+    if (auth0) {
+      void auth0.loginWithRedirect({ authorizationParams: { ...(auth0Audience ? { audience: auth0Audience } : {}), ...(auth0Organization ? { organization: auth0Organization } : {}) }, appState: { returnTo: returnPath } });
       return;
     }
     if (demoMode || import.meta.env.DEV) {
@@ -510,15 +544,16 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
 
   function openSellerSignUp(): void {
     chooseSupabaseAccountIntent("seller");
-    if (auth0) {
-      window.sessionStorage.setItem("veld.account-intent", "seller");
-      void auth0.loginWithRedirect({ authorizationParams: { ...(auth0Audience ? { audience: auth0Audience } : {}), ...(auth0Organization ? { organization: auth0Organization } : {}) }, appState: { returnTo: "/contributor" } });
-      return;
-    }
+    if (authLoading && !supabase && !auth0) { setNotice("Secure sign-in is still loading. Try again in a moment."); return; }
     if (supabase) {
       setSupabaseAuthMode("signup");
       setSupabaseAuthOpen(true);
       setNotice("Create a seller account to complete verification, then upload your first media record.");
+      return;
+    }
+    if (auth0) {
+      window.sessionStorage.setItem("veld.account-intent", "seller");
+      void auth0.loginWithRedirect({ authorizationParams: { ...(auth0Audience ? { audience: auth0Audience } : {}), ...(auth0Organization ? { organization: auth0Organization } : {}) }, appState: { returnTo: "/contributor" } });
       return;
     }
     if (demoMode || import.meta.env.DEV) {
@@ -526,6 +561,24 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
       return;
     }
     setNotice("An external identity provider is not configured for this deployment.");
+  }
+
+  function openSignIn(): void {
+    if (authLoading && !supabase && !auth0) { setNotice("Secure sign-in is still loading. Try again in a moment."); return; }
+    if (supabase) {
+      setSupabaseAuthMode("signin");
+      setSupabaseAuthOpen(true);
+      return;
+    }
+    if (auth0) {
+      void auth0.loginWithRedirect({ authorizationParams: { ...(auth0Audience ? { audience: auth0Audience } : {}), ...(auth0Organization ? { organization: auth0Organization } : {}) } });
+      return;
+    }
+    if (!import.meta.env.DEV) {
+      setNotice(authUnavailable ? "Supabase sign-in is unavailable for this deployment. Please retry shortly or contact support." : "An external identity provider is not configured for this deployment.");
+      return;
+    }
+    void devSignIn();
   }
   async function downloadFreePhoto(asset: Asset): Promise<void> {
     if (!sessionUser) { setNotice("Create an account to claim your introductory free photo downloads."); setSupabaseAuthMode("signup"); setSupabaseAuthOpen(Boolean(supabase)); return; }
@@ -573,7 +626,9 @@ function App({ auth0, supabase }: { auth0?: Auth0Bridge; supabase?: SupabaseClie
         {sessionUser?.role === "buyer" && <button className="dark-button role-action" onClick={() => navigate("search")}>Find media <span>↗</span></button>}
         {(sessionUser?.role === "contributor" || sessionUser?.role === "editor") && <button className="dark-button role-action" onClick={() => navigate("contributor")}>+ Upload media <span>↗</span></button>}
         {sessionUser?.role === "admin" && <button className="dark-button role-action" onClick={() => navigate("review")}>Review queue <span>↗</span></button>}
-        {!sessionUser && <button className="ghost-button" aria-expanded={supabase ? supabaseAuthOpen : undefined} onClick={async () => { if (auth0) { await auth0.loginWithRedirect({ authorizationParams: { ...(auth0Audience ? { audience: auth0Audience } : {}), ...(auth0Organization ? { organization: auth0Organization } : {}) } }); return; } if (supabase) { setSupabaseAuthMode("signin"); setSupabaseAuthOpen(true); return; } if (!import.meta.env.DEV) { setNotice("An external identity provider is not configured for this deployment."); return; } await devSignIn(); }}>Sign in</button>}
+        {!demoMode && authLoading && !supabase && !auth0 && <span className="auth-runtime-status" role="status">Secure sign-in loading…</span>}
+        {!demoMode && authUnavailable && !supabase && !auth0 && <button type="button" className="text-button" onClick={() => onRetryAuth?.()}>Retry sign-in setup</button>}
+        {!sessionUser && <button className="ghost-button" aria-expanded={supabase ? supabaseAuthOpen : undefined} onClick={openSignIn}>Sign in</button>}
         {sessionUser && <><button className="ghost-button" onClick={() => navigate("account")}>Account</button><button className="ghost-button" onClick={() => { void api("/api/auth/logout", { method: "POST" }).then(() => { setSessionUser(null); setCsrfToken(""); setNotice("Signed out."); if (auth0) auth0.logout({ logoutParams: { returnTo: window.location.origin } }); if (supabase) void supabase.auth.signOut(); }); }}>Sign out</button></>}
       </div>
     </header>
@@ -1965,12 +2020,40 @@ function AssetModal({ asset, api, autoOpenPurchase = false, onClose, onNotice: n
   </div>;
 }
 
+function AuthBootstrap({ auth0 }: { auth0?: Auth0Bridge }) {
+  const [authState, setAuthState] = useState<{ supabase?: SupabaseClient; redirectUrl: string; loading: boolean; unavailable: boolean }>(() => ({
+    supabase: demoMode ? undefined : staticSupabaseClient,
+    redirectUrl: defaultAuthRedirectUrl,
+    loading: !demoMode && !staticSupabaseClient,
+    unavailable: false,
+  }));
+  const loadAuthConfig = useCallback(async (): Promise<void> => {
+    if (demoMode) return;
+    setAuthState((current) => ({ ...current, loading: true, unavailable: false }));
+    try {
+      const response = await fetch("/api/auth/config", { credentials: "include", cache: "no-store", headers: { Accept: "application/json" } });
+      if (!response.ok) throw new Error("Auth configuration request failed");
+      const config = parseRuntimeAuthConfig(await response.json());
+      if (!config) throw new Error("Auth configuration response was invalid");
+      if (config.provider === "supabase") {
+        setAuthState({ supabase: createClient(config.supabaseUrl, config.publishableKey, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } }), redirectUrl: config.redirectUrl.replace(/\/$/, ""), loading: false, unavailable: false });
+        return;
+      }
+      setAuthState({ supabase: staticSupabaseClient, redirectUrl: config.redirectUrl.replace(/\/$/, ""), loading: false, unavailable: !staticSupabaseClient });
+    } catch {
+      setAuthState({ supabase: staticSupabaseClient, redirectUrl: defaultAuthRedirectUrl, loading: false, unavailable: !staticSupabaseClient });
+    }
+  }, []);
+  useEffect(() => { void loadAuthConfig(); }, [loadAuthConfig]);
+  return <App auth0={auth0} supabase={authState.supabase} authRedirectUrl={authState.redirectUrl} authLoading={authState.loading} authUnavailable={authState.unavailable} onRetryAuth={() => void loadAuthConfig()} />;
+}
+
 function AuthenticatedApp() {
-  return <App auth0={useAuth0()} supabase={supabaseClient} />;
+  return <AuthBootstrap auth0={useAuth0()} />;
 }
 
 function Root() {
-  if (demoMode || !auth0Configured) return <App supabase={demoMode ? undefined : supabaseClient} />;
+  if (demoMode || !auth0Configured) return <AuthBootstrap />;
   return <Auth0Provider
     domain={auth0Domain!}
     clientId={auth0ClientId!}
