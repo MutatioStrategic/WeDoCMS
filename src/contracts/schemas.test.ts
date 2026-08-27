@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   assetSchema,
   assetCreateRequestSchema,
+  authConfigResponseSchema,
   errorResponseSchema,
   governanceActionRequestSchema,
   healthResponseSchema,
@@ -86,6 +87,10 @@ describe("API contract Zod schemas", () => {
   it("covers health, anonymous session, and JSON error responses", () => {
     expect(healthResponseSchema.parse({ ok: true, service: "veld-archive-api", environment: "test" })).toBeTruthy();
     expect(sessionResponseSchema.parse({ authenticated: false, user: null })).toEqual({ authenticated: false, user: null });
+    expect(authConfigResponseSchema.parse({ provider: "supabase", supabaseUrl: "https://project.supabase.co", publishableKey: "sb_publishable_public", redirectUrl: "https://veld-archive.pages.dev" }).provider).toBe("supabase");
+    expect(authConfigResponseSchema.parse({ provider: "demo", redirectUrl: "https://demo.example.com" }).provider).toBe("demo");
+    expect(authConfigResponseSchema.parse({ provider: "unavailable", redirectUrl: "https://veld-archive.pages.dev", reason: "identity_provider_key_invalid" }).provider).toBe("unavailable");
+    expect(authConfigResponseSchema.safeParse({ provider: "supabase", supabaseUrl: "https://project.supabase.co", redirectUrl: "https://veld-archive.pages.dev" }).success).toBe(false);
     expect(errorResponseSchema.parse({ error: "Authentication required" })).toEqual({ error: "Authentication required" });
     expect(() => validateContractResponse("health", healthResponseSchema, { ok: false })).toThrow(/Contract response validation failed/);
   });

@@ -6,6 +6,7 @@ The Worker now fails closed for identity and storage operations. Before a produc
 
 ```text
 SESSION_SECRET                 # >= 32 random characters; rotate by overlapping deployments
+SUPABASE_ANON_KEY              # browser-safe publishable/anon key; store with Wrangler, never service-role
 AUTH_JWKS_URL                  # Auth0/.well-known/jwks.json URL for RS256 verification
 AUTH_ISSUER                    # expected issuer, including trailing slash
 AUTH_AUDIENCE                  # expected API audience
@@ -18,6 +19,13 @@ AUDIT_SIGNING_PUBLIC_JWK     # add before enabling audit exports/events
 ```
 
 `x-user-id`, `x-user-role`, and `x-demo-user-id` are not accepted as identity. Browser sessions use an HttpOnly, signed, revocable cookie plus a CSRF token. External IdP tokens are accepted only through the verified JWT exchange endpoint.
+
+The production SPA obtains Supabase settings from the Worker-owned
+`GET /api/auth/config` route. Confirm `AUTH_PROVIDER=supabase` or `both`,
+`SUPABASE_URL`, and `SUPABASE_AUDIENCE` in the selected Wrangler environment,
+then run `npm run auth:check` before every deployment. The route returns the
+publishable key only after validating its anon/publishable shape and never
+returns JWT audience, signing, or service-role secrets.
 
 ## CORS and browser policy
 

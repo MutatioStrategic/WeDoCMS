@@ -33,6 +33,14 @@ environment block or media binding must guard against this exact failure.
 5. A screen smoke that only checks labels is insufficient. A release is not
    healthy until it checks D1 result count, usable preview count, and real
    preview responses.
+6. Production authentication is Worker-owned and Supabase-backed. The
+   selected environment must declare `AUTH_PROVIDER=supabase` or `both`,
+   `SUPABASE_URL`, and `SUPABASE_AUDIENCE`, and require the
+   `SUPABASE_ANON_KEY` secret. The public `/api/auth/config` route must return
+   only a publishable/anon key and the configured HTTPS redirect origin.
+   Production sessions remain host-only unless the cookie domain exactly
+   matches the serving host. Demo uses explicit demo authentication and must
+   not receive the production Supabase key.
 
 ## Before editing
 
@@ -61,6 +69,7 @@ npm run typecheck
 npm test
 npm run build
 npm run release:check
+npm run auth:check
 node scripts/release-gate.mjs --production
 npx wrangler deploy --env production --dry-run
 npm run worker:deploy
@@ -73,6 +82,7 @@ npm run typecheck
 npm test
 npm run build:demo
 npm run release:check
+npm run auth:check
 npx wrangler deploy --env demo --dry-run
 npm run worker:deploy:demo
 $env:DEMO_BASE_URL = "https://<exact-demo-worker-host>"
@@ -122,6 +132,8 @@ The agent must report:
 - build command and smoke command used;
 - D1 database name/ID and media binding-to-bucket mapping;
 - D1 asset count, usable preview count, and sampled preview statuses;
+- `/api/auth/config` provider, redirect origin, and presence of the remote
+  `SUPABASE_ANON_KEY` secret (report the name only, never its value);
 - roles/screens covered;
 - migrations applied, if any;
 - warnings, quota failures, or skipped checks.

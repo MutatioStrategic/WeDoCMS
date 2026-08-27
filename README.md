@@ -49,13 +49,19 @@ The frontend runs on Vite. To run the Worker API locally after installing Wrangl
 npm run worker:dev
 ```
 
-`npm run worker:deploy` is production-only and refuses to deploy the root development bindings. It runs the production bundle gate and requires a dedicated `env.production` block with `APP_ENV=production` and no demo, localhost, or placeholder values. Use `npm run worker:deploy:development` only for an intentional non-production Worker.
+`npm run worker:deploy` is production-only and refuses to deploy the root development bindings. It runs the production bundle gate, `npm run auth:check`, preserves dashboard-managed values with `--keep-vars`, and requires a dedicated `env.production` block with `APP_ENV=production` and no demo, localhost, or placeholder values. Use `npm run worker:deploy:development` only for an intentional non-production Worker.
 
 Agents changing bindings or deploying to Cloudflare must follow
 [`docs/agent-deployment-safeguards.md`](docs/agent-deployment-safeguards.md).
 The short version: validate D1 records and R2 objects together, dry-run the
 selected Wrangler environment, and run the live media-and-screen smoke before
 reporting a deployment as healthy.
+
+Publish the production Pages shell with `npm run pages:deploy`. This builds the
+production frontend, runs the release and Supabase auth wiring gates, and
+publishes the `veld-archive` Pages project. Publish the Worker separately with
+`npm run worker:deploy`; both commands fail before upload if the runtime auth
+contract or production Supabase secret invariant is missing.
 
 ### Buyer access demo environment
 
@@ -77,7 +83,7 @@ and seller photo-only opt-in (including the rejected video case).
 
 Auth0 and Supabase can run together. Configure an Auth0 SPA application with Authorization Code + PKCE and a custom API that issues RS256 access tokens. Set `VITE_AUTH0_DOMAIN`, `VITE_AUTH0_CLIENT_ID`, `VITE_AUTH0_AUDIENCE`, and the optional `VITE_AUTH0_ORGANIZATION` for the frontend. Set `AUTH_JWKS_URL`, `AUTH_ISSUER`, `AUTH_AUDIENCE`, and `AUTH_ROLES_CLAIM` as Worker variables. The tenant Management API (`https://<tenant>/api/v2/`) is not the application API audience and must not be requested by the SPA. Register the deployed app URL as an allowed callback, logout, and web-origin URL in Auth0.
 
-For Supabase, set `VITE_SUPABASE_URL` and the public `VITE_SUPABASE_ANON_KEY` in the SPA environment, then set `SUPABASE_URL`, `AUTH_PROVIDER=both`, and either an explicit `SUPABASE_JWKS_URL` for asymmetric signing or the `SUPABASE_JWT_SECRET` Wrangler secret for this project's current legacy HS256 signing. Supabase email/password signup, email confirmation, login, phone OTP signup/login, password recovery, and session refresh are handled by the Supabase client; the Worker verifies the Supabase JWT and exchanges it for the same application session. Phone sign-in is restricted to South African mobile numbers. Users enter a local number such as `073 712 3456`; the clients normalize it to `+27737123456` before calling Supabase, and the Worker rejects a Supabase phone claim outside the South African mobile range. Phone-only identities receive a stable internal contact address until a real contact email is collected by a later account workflow. The anon key is safe for browser use; never put a Supabase service-role key in the client or Worker. For hosted Supabase, enable Auth > Providers > Phone and configure a supported SMS provider; the repository config enables SMS signup for local Supabase development but cannot provision hosted provider credentials. The web and native sign-in surfaces use Supabase's password recovery flow: reset requests return a privacy-preserving response, reset links return to the app, and the new password is submitted through the verified recovery session before the user signs in again. Configure the Supabase redirect allow list for the web origin and `veldarchive://auth/recovery` for native builds.
+For Supabase, configure the Worker as the source of truth: set `SUPABASE_URL`, `SUPABASE_AUDIENCE`, `AUTH_PROVIDER=both`, and the required browser-safe `SUPABASE_ANON_KEY` secret (`wrangler secret put SUPABASE_ANON_KEY --env production`). Use either an explicit `SUPABASE_JWKS_URL` for asymmetric signing or the `SUPABASE_JWT_SECRET` Wrangler secret for this project's current legacy HS256 signing. The SPA loads `/api/auth/config` at runtime, so production and direct Worker deployments do not depend on Vite remembering to embed auth settings; `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` remain optional local fallbacks only. Supabase email/password signup, email confirmation, login, phone OTP signup/login, password recovery, and session refresh are handled by the Supabase client; the Worker verifies the Supabase JWT and exchanges it for the same application session. Phone sign-in is restricted to South African mobile numbers. Users enter a local number such as `073 712 3456`; the clients normalize it to `+27737123456` before calling Supabase, and the Worker rejects a Supabase phone claim outside the South African mobile range. Phone-only identities receive a stable internal contact address until a real contact email is collected by a later account workflow. The anon/publishable key is safe for browser use; never put a Supabase service-role key in the client or expose it from the Worker. For hosted Supabase, enable Auth > Providers > Phone and configure a supported SMS provider; the repository config enables SMS signup for local Supabase development but cannot provision hosted provider credentials. The web and native sign-in surfaces use Supabase's password recovery flow: reset requests return a privacy-preserving response, reset links return to the app, and the new password is submitted through the verified recovery session before the user signs in again. Configure the Supabase redirect allow list for the web origin and `veldarchive://auth/recovery` for native builds. Demo deployments use explicit demo authentication and never receive the production Supabase secret.
 
 The Worker verifies external tokens against the configured issuer/JWKS, retrieves the Auth0 `openid profile email` UserInfo profile when configured, and creates the existing HttpOnly session. Supabase identities are namespaced in `auth_subject` to prevent cross-provider collisions. For a single-organisation deployment, pre-provision `DEFAULT_ORGANIZATION_ID`; a browser-supplied organization ID is accepted only when it matches a signed claim or that configured default. Keep `AUTH_ALLOW_ORG_PROVISIONING=false` in production. The identity provider owns sign-in; D1 remains the source of truth for application roles, organization memberships, credits, licence ownership, ledger entries, and payment state. D1 `auth_security_events` records provider, outcome, subject hash context, and bounded request metadata; high-risk events are also emitted to Worker Logs and Analytics Engine.
 
@@ -112,7 +118,7 @@ npm run test:a11y
 
 ### Desktop Postman/Newman sweep
 
-The checked-in `npm run test:postman` collection exercises the production API,
+The `npm run test:postman` sweep exercises the configured API,
 Supabase signup and identity-exchange boundaries, and the main desktop web
 shell. It discovers every `/api` route from the Worker source and loads desktop
 Vite values from the root `.env.local` (`VITE_SUPABASE_URL` and
@@ -127,6 +133,44 @@ npm run test:postman
 
 Use `POSTMAN_SKIP_SUPABASE=true` when the Supabase signup rate limit is active;
 the desktop shell and all API routes remain covered.
+
+#### Importable Postman collection
+
+Import [`postman/veld-archive-route-sweep.postman_collection.json`](postman/veld-archive-route-sweep.postman_collection.json)
+directly into the Postman app, then run the collection. It contains the desktop
+shell and every `/api` route discovered at export time, defaults to the demo
+Worker, and captures the demo-login session and CSRF tokens for later requests.
+The exported file intentionally omits the external Supabase signup request and
+contains blank credential-like variables.
+
+The repository is also connected to Postman Local Mode through
+`postman/.postman/resources.yaml`. Select the checked-in `demo` environment in
+Postman for the demo URLs and safe defaults. The `00 - Start here` folder logs
+in and verifies the selected role before the grouped endpoint folders run.
+Read-only and session checks run immediately; data-changing requests are
+skipped until `runWrites=true`, and external payment, webhook, integration, and
+security-boundary requests remain skipped until `runExternalWrites=true`.
+
+Set the collection variable `demoRole` to `buyer`, `contributor`, `editor`, or
+`admin`, then rerun the collection to exercise that role's session. The
+contributor persona is the seller-facing demo workflow in this build.
+
+Regenerate it after adding or changing Worker routes:
+
+```powershell
+$env:POSTMAN_DESKTOP_URL = "https://veld-archive.pages.dev"
+$env:POSTMAN_BASE_URL = "https://veld-archive-api-demo.blewisorlando.workers.dev"
+npm run postman:export
+```
+
+The export command derives the route list from `src/worker/index.ts`; do not
+hand-edit the generated JSON. Use `npm run test:postman` separately when the
+Supabase signup boundary also needs to be exercised.
+
+The blank `postman/postman/flows/New flow.flow` is kept as the app-created flow
+canvas. The endpoint test plan belongs in the linked collection because it can
+be run, filtered, and reported as a collection; the flow is not used as a
+second, drifting copy of all route definitions.
 
 Apply subsequent migrations in order as well; `0004_explainability_safety.sql` adds persisted metadata provenance and review status. Validate the chain with `npx wrangler d1 migrations list veld-archive --local`.
 

@@ -18,6 +18,11 @@ const cases = [
     response: [200, { authenticated: false, user: null }],
   },
   {
+    method: "GET",
+    path: "/api/auth/config",
+    response: [200, { provider: "supabase", supabaseUrl: "https://tenant.supabase.co", publishableKey: "sb_publishable_contract_test", redirectUrl: "https://archive.example.com" }],
+  },
+  {
     method: "POST",
     path: "/api/auth/exchange",
     request: { headers: { authorization: "Bearer consumer-contract-invalid-token", "content-type": "application/json" }, body: { organizationId: "org-demo" } },

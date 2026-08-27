@@ -21,6 +21,10 @@ function assert(condition, message) {
 
 const unauthenticated = await call("/api/me");
 assert(unauthenticated.ok && (await unauthenticated.json()).authenticated === false, "unauthenticated session check failed");
+const authConfig = await call("/api/auth/config");
+const authConfigBody = await authConfig.json();
+assert(authConfig.ok && ["supabase", "demo", "unavailable"].includes(authConfigBody.provider) && typeof authConfigBody.redirectUrl === "string", "auth configuration contract failed");
+if (authConfigBody.provider === "supabase") assert(typeof authConfigBody.publishableKey === "string" && authConfigBody.publishableKey.length > 0, "Supabase auth configuration omitted the publishable key");
 const publicDiscovery = await call("/api/discovery");
 assert(publicDiscovery.ok && Array.isArray((await publicDiscovery.json()).trending), "public trending discovery failed");
 

@@ -28,6 +28,47 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SessionResponse'
+  /api/auth/config:
+    get:
+      operationId: getAuthConfig
+      summary: Return the public authentication configuration for this deployment
+      responses:
+        '200':
+          description: Supabase, demo, or intentionally unavailable authentication configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthConfigResponse'
+  /api/auth/demo-login:
+    post:
+      operationId: createDemoSession
+      summary: Start an explicitly non-production demo session
+      description: Demo authentication is available only when the Worker enables the demo environment.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DemoLoginRequest'
+      responses:
+        '200':
+          description: Demo session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthenticatedSessionResponse'
+        '400':
+          description: Unsupported demo role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Demo seed identity is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/auth/exchange:
     post:
       operationId: exchangeIdentityToken
@@ -1406,6 +1447,29 @@ components:
         user: { $ref: '#/components/schemas/SessionUser' }
         csrfToken: { type: string }
       additionalProperties: false
+    AuthConfigResponse:
+      oneOf:
+        - type: object
+          required: [provider, supabaseUrl, publishableKey, redirectUrl]
+          properties:
+            provider: { type: string, enum: [supabase] }
+            supabaseUrl: { type: string, format: uri }
+            publishableKey: { type: string, minLength: 1 }
+            redirectUrl: { type: string, format: uri }
+          additionalProperties: false
+        - type: object
+          required: [provider, redirectUrl]
+          properties:
+            provider: { type: string, enum: [demo] }
+            redirectUrl: { type: string, format: uri }
+          additionalProperties: false
+        - type: object
+          required: [provider, redirectUrl, reason]
+          properties:
+            provider: { type: string, enum: [unavailable] }
+            redirectUrl: { type: string, format: uri }
+            reason: { type: string, enum: [identity_provider_not_configured, identity_provider_key_invalid] }
+          additionalProperties: false
     SavedSearchInput:
       type: object
       properties:

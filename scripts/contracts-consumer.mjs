@@ -48,6 +48,20 @@ const interactions = [
     },
   },
   {
+    description: "a browser authentication configuration request",
+    request: { method: "GET", path: "/api/auth/config" },
+    response: {
+      status: 200,
+      headers: { "content-type": jsonContentType },
+      body: { provider: "supabase", supabaseUrl: MatchersV3.string("https://tenant.supabase.co"), publishableKey: MatchersV3.string("sb_publishable_contract_test"), redirectUrl: MatchersV3.string("https://archive.example.com") },
+    },
+    assertBody: (body) => {
+      if (body.provider !== "supabase" || !/^https:\/\/[^/]+/.test(body.supabaseUrl) || typeof body.publishableKey !== "string" || typeof body.redirectUrl !== "string") {
+        throw new Error("Auth configuration response did not satisfy the consumer contract");
+      }
+    },
+  },
+  {
     description: "a request with an invalid bearer token",
     request: {
       method: "POST",

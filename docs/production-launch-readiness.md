@@ -41,7 +41,7 @@ source IP. Switch to the live endpoint only after those checks pass.
 
 ## Final production switch
 
-After the external checks pass, set `APP_ENV=production`, set
+After the external checks pass, run `npm run auth:check`, set `APP_ENV=production`, set
 `DEMO_AUTH_ENABLED=false`, replace development origins/hostnames with the
 production hostnames, apply migrations, deploy, and check `/api/health` plus
 the authenticated launch-readiness endpoint. The account owner must perform

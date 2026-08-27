@@ -26,6 +26,8 @@ jobs:
       - run: npm test -- --run
       - run: npm run build
       - run: npm run release:check
+      - run: npm run auth:check
+      - run: node scripts/release-gate.mjs --production
       - run: npm run test:migrations
       - run: npm run test:dr
       - name: Start local Worker for authenticated smoke tests
