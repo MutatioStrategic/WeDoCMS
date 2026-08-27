@@ -21,7 +21,7 @@
 ## Licensing and analytics
 
 - Review `licence_products` terms and restrictions with counsel before activating a product. Each changed term version must create a new product version or immutable evidence snapshot.
-- Publish the reviewed `seller-marketplace-v1`, `buyer-marketplace-v1`, and `payment-split-v1` documents. Onboarding and checkout record the accepted version and SHA-256 snapshot in `marketplace_agreement_acceptances`.
+- Publish the reviewed `seller-marketplace-v2`, `buyer-marketplace-v2`, and `payment-split-v2` documents. Onboarding and checkout record the accepted version and SHA-256 snapshot in `marketplace_agreement_acceptances`.
 - Reconcile licence receipts, evidence hashes, downloads, and settlement events weekly. Contributor performance is event-led; anonymous discovery remains aggregated and does not retain IPs, user agents, cookies, or visitor identifiers.
 
 ## Paystack test checkout

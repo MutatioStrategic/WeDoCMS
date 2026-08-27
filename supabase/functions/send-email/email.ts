@@ -32,34 +32,34 @@ export type CloudflareEmailEnvironment = {
 
 const actionCopy: Record<string, { subject: string; title: string; intro: string }> = {
   signup: {
-    subject: "Confirm your Veld Archive account",
-    title: "Confirm your Veld Archive account",
-    intro: "Finish creating your Veld Archive account by confirming this email address.",
+    subject: "Confirm your Stockvel account",
+    title: "Confirm your Stockvel account",
+    intro: "Finish creating your Stockvel account by confirming this email address.",
   },
   recovery: {
-    subject: "Reset your Veld Archive password",
-    title: "Reset your Veld Archive password",
-    intro: "Use the secure link below to choose a new Veld Archive password.",
+    subject: "Reset your Stockvel password",
+    title: "Reset your Stockvel password",
+    intro: "Use the secure link below to choose a new Stockvel password.",
   },
   email_change: {
-    subject: "Confirm your new Veld Archive email",
+    subject: "Confirm your new Stockvel email",
     title: "Confirm your new email address",
-    intro: "Confirm this address to finish changing the email on your Veld Archive account.",
+    intro: "Confirm this address to finish changing the email on your Stockvel account.",
   },
   invite: {
-    subject: "You are invited to Veld Archive",
-    title: "You are invited to Veld Archive",
-    intro: "Use the secure link below to accept your Veld Archive invitation.",
+    subject: "You are invited to Stockvel",
+    title: "You are invited to Stockvel",
+    intro: "Use the secure link below to accept your Stockvel invitation.",
   },
   magiclink: {
-    subject: "Your Veld Archive sign-in link",
-    title: "Sign in to Veld Archive",
-    intro: "Use the secure link below to sign in to Veld Archive.",
+    subject: "Your Stockvel sign-in link",
+    title: "Sign in to Stockvel",
+    intro: "Use the secure link below to sign in to Stockvel.",
   },
   reauthentication: {
-    subject: "Your Veld Archive verification code",
+    subject: "Your Stockvel verification code",
     title: "Confirm it is you",
-    intro: "Use this one-time code to continue your Veld Archive action.",
+    intro: "Use this one-time code to continue your Stockvel action.",
   },
 };
 
@@ -96,9 +96,9 @@ function verificationUrl(siteUrl: string, tokenHash: string, action: string, red
 
 function copyFor(action: string): { subject: string; title: string; intro: string } {
   return actionCopy[action] ?? {
-    subject: "A Veld Archive account action needs your attention",
-    title: "Veld Archive account action",
-    intro: "Use the secure link below to continue your Veld Archive account action.",
+    subject: "A Stockvel account action needs your attention",
+    title: "Stockvel account action",
+    intro: "Use the secure link below to continue your Stockvel account action.",
   };
 }
 

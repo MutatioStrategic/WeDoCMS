@@ -36,12 +36,12 @@ try {
     if (-not ($tables.name -contains $required)) { throw "Required migrated table missing: $required" }
   }
 
-  Invoke-D1Json "INSERT INTO buyer_credit_purchases (id, organization_id, buyer_id, credits, amount_cents) VALUES ('credit-model-test', 'org-demo', 'demo-buyer', 3, 30000)" | Out-Null
-  Invoke-D1ExpectedFailure "INSERT INTO buyer_credit_purchases (id, organization_id, buyer_id, credits, amount_cents) VALUES ('credit-model-invalid', 'org-demo', 'demo-buyer', 3, 29900)"
+  Invoke-D1Json "INSERT INTO buyer_credit_purchases (id, organization_id, buyer_id, credits, amount_cents) VALUES ('credit-model-test', 'org-demo', 'demo-buyer', 3, 897)" | Out-Null
+  Invoke-D1ExpectedFailure "INSERT INTO buyer_credit_purchases (id, organization_id, buyer_id, credits, amount_cents) VALUES ('credit-model-invalid', 'org-demo', 'demo-buyer', 3, 896)"
   Invoke-D1ExpectedFailure "INSERT INTO buyer_platform_subscriptions (id, organization_id, buyer_id, billing_day, start_date, next_charge_date) VALUES ('membership-model-invalid-day', 'org-demo', 'demo-buyer', 31, '2026-09-01', '2026-10-01')"
 
-  $seed = @(Invoke-D1Json "SELECT status, workflow_stage, organization_id, monetization_model FROM assets WHERE id = 'asset-table-mountain'")[0]
-  if ($seed.status -ne "published" -or $seed.workflow_stage -ne "approval" -or $seed.organization_id -ne "org-demo" -or $seed.monetization_model -ne "membership") {
+  $seed = @(Invoke-D1Json "SELECT status, workflow_stage, organization_id, monetization_model, license_credit_cost, subscription_included FROM assets WHERE id = 'asset-table-mountain'")[0]
+  if ($seed.status -ne "published" -or $seed.workflow_stage -ne "approval" -or $seed.organization_id -ne "org-demo" -or $seed.monetization_model -ne "membership" -or $seed.license_credit_cost -lt 1 -or $seed.subscription_included -ne 1) {
     throw "Seeded asset model state is invalid: $($seed | ConvertTo-Json -Compress)"
   }
   $ftsMatch = @(Invoke-D1Json "SELECT a.id FROM asset_search_fts JOIN assets a ON a.id = asset_search_fts.asset_id AND a.approved_revision = CAST(asset_search_fts.revision AS INTEGER) WHERE asset_search_fts MATCH 'Table' LIMIT 1")[0]

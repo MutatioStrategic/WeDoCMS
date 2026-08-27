@@ -6,7 +6,7 @@ This matrix compares the native Expo client on `better-2` with the desktop appli
 | --- | --- | --- | --- |
 | Public explore and asset evidence | Native | `/api/discovery`, `/api/assets`, asset previews | Includes loading, empty, error, detail, provenance, rights, and confidence states. |
 | Search, sorting, alerts, and facets | Native | `/api/assets`, `/api/assets/facets`, `/api/saved-searches` | Includes media type, province, category, human-review, keyboard, and saved-alert controls. |
-| Seller account creation | Native | Supabase Auth, `/api/auth/exchange` | Email confirmation deep-links to `veldarchive://auth/confirmed`; only newly provisioned seller accounts receive the contributor role. |
+| Seller account creation | Native | Supabase Auth, `/api/auth/exchange` | Email confirmation deep-links to `stockvel://auth/confirmed`; only newly provisioned seller accounts receive the contributor role. |
 | Seller profile, KYC/KYB, contract, payout | Native | `/api/onboarding*` | Supports individual/company, CIPC, hosted Didit, Firma reference verification, Turnstile, and Paystack subaccount capture. Provider failures remain visible and retryable. |
 | Upload and submission status | Native images; authenticated web video handoff | upload-session, asset, and Stream upload routes | Uses the platform image picker and the existing private, idempotent upload workflow. Video provisioning is available through the authenticated Worker/desktop handoff; provider secrets never reach mobile. |
 | Seller asset library and metadata | Native | `/api/my/assets`, `/api/assets/:id` | Editable core metadata and rights status; publication remains governed server-side. |

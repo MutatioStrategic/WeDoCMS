@@ -30,6 +30,7 @@ export type PhotoPipelineBindings = ObservabilityBindings & {
   PHOTO_INDEX_NAMESPACE?: string;
   PHOTO_CANDIDATE_INDEX_NAMESPACE?: string;
   PHOTO_AI_SOURCE_ORIGIN?: string;
+  SEARCH_RESULT_TARGET?: string;
   R2_ACCOUNT_ID?: string;
   R2_ACCESS_KEY_ID?: string;
   R2_SECRET_ACCESS_KEY?: string;
@@ -1081,13 +1082,33 @@ export async function processPhotoJob(env: PhotoPipelineBindings, job: PhotoEnri
   }
 }
 
+export type MetadataSearchStage = {
+  stage: "metadata" | "fuzzy";
+  queryType: "metadata" | "fuzzy";
+  resultCount: number;
+  latencyMs: number;
+  confidence: number;
+  skipped?: boolean;
+};
+
+const DEFAULT_SEARCH_RESULT_TARGET = 10;
+const FUZZY_CANDIDATE_LIMIT = 1000;
+
 function ftsQuery(value: string): string {
-  return searchTokens(value).map((token) => `"${token.replaceAll('"', '""')}"*`).join(" OR ");
+  return searchTokens(value)
+    .map((token) => `{title description} : "${token.replaceAll('"', '""')}"*`)
+    .join(" OR ");
 }
 
-function filterClauses(filters: { kind: "all" | "image" | "video"; status: "published" | "needs_review" | "all"; location?: string; locationType?: string; category?: string; excludeDemo?: boolean }): { clauses: string[]; values: string[] } {
+function searchResultTarget(env: PhotoPipelineBindings): number {
+  const parsed = Number.parseInt(String(env.SEARCH_RESULT_TARGET ?? ""), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? Math.min(parsed, 60) : DEFAULT_SEARCH_RESULT_TARGET;
+}
+
+function filterClauses(filters: { kind: "all" | "image" | "video"; status: "published" | "needs_review" | "all"; location?: string; locationType?: string; category?: string; verified?: boolean; excludeDemo?: boolean }): { clauses: string[]; values: string[] } {
   const clauses = [filters.status === "all" ? "1 = 1" : "a.status = ?", "a.id NOT LIKE 'asset-test-photo-%'", "COALESCE(a.preview_key, a.original_key, '') <> ''"];
   const values: string[] = filters.status === "all" ? [] : [filters.status];
+  if (filters.status === "published") clauses.push("a.approved_revision = a.asset_revision");
   if (filters.excludeDemo) clauses.push("COALESCE(a.demo_seed, 0) = 0", "a.id NOT LIKE 'asset-demo-%'");
   if (filters.kind !== "all") { clauses.push("a.kind = ?"); values.push(filters.kind); }
   if (filters.location) {
@@ -1097,72 +1118,112 @@ function filterClauses(filters: { kind: "all" | "image" | "video"; status: "publ
   }
   if (filters.locationType) { clauses.push("a.visual_location_type = ?"); values.push(filters.locationType); }
   if (filters.category) { clauses.push("a.primary_category = ?"); values.push(filters.category); }
+  if (filters.verified) clauses.push("a.human_verified = 1");
   return { clauses, values };
 }
 
 export async function searchPhotoIndex(
   env: PhotoPipelineBindings,
   query: string,
-  filters: { kind: "all" | "image" | "video"; status: "published" | "needs_review" | "all"; location?: string; locationType?: string; category?: string; excludeDemo?: boolean },
-): Promise<{ rows: Record<string, unknown>[]; usedVectorIndex: boolean; mode: "keyword" | "semantic-preview" | "hybrid"; fallbackReason?: "embedding_failed" | "embedding_empty" | "vector_query_failed" }> {
+  filters: { kind: "all" | "image" | "video"; status: "published" | "needs_review" | "all"; location?: string; locationType?: string; category?: string; verified?: boolean; excludeDemo?: boolean },
+): Promise<{ rows: Record<string, unknown>[]; usedVectorIndex: false; mode: "keyword"; stages: MetadataSearchStage[]; suggestions: string[]; fallbackReason?: "metadata_fts_unavailable" }> {
+  const normalizedQuery = query.trim();
   const filter = filterClauses(filters);
-  const match = ftsQuery(query);
-  const keywordResult = match
+  const target = searchResultTarget(env);
+  const metadataStartedAt = performance.now();
+  const exactResult = normalizedQuery
     ? await env.DB.prepare(`SELECT a.*, u.display_name AS contributor
-        FROM asset_search_fts JOIN assets a ON a.id = asset_search_fts.asset_id AND a.approved_revision = CAST(asset_search_fts.revision AS INTEGER)
-        JOIN users u ON u.id = a.owner_id
-        WHERE asset_search_fts MATCH ? AND ${filter.clauses.join(" AND ")}
-        ORDER BY bm25(asset_search_fts, 0, 0, 0, 3.2, 1.6, 1.8, 2.5, 1.7, 3.0, 2.8, 2.6, 2.0, 2.7) LIMIT 120`)
-      .bind(match, ...filter.values).all<Record<string, unknown>>()
+        FROM assets a JOIN users u ON u.id = a.owner_id
+        WHERE ${filter.clauses.join(" AND ")}
+          AND (
+            lower(trim(COALESCE(a.title, ''))) = lower(trim(?))
+            OR instr(lower(COALESCE(a.title, '')), lower(?)) > 0
+            OR instr(lower(COALESCE(a.description, '')), lower(?)) > 0
+          )
+        ORDER BY a.id ASC LIMIT 240`)
+      .bind(...filter.values, normalizedQuery, normalizedQuery, normalizedQuery).all<Record<string, unknown>>()
     : { results: [] as Record<string, unknown>[] };
-  const keywordRows = keywordResult.results as Record<string, unknown>[];
-  if (!env.PHOTO_INDEX || !env.AI || filters.status !== "published" || !query.trim()) {
-    return { rows: mergeHybridSearchRows([], keywordRows, query, new Map()), usedVectorIndex: false, mode: "keyword" };
+  const exactRows = (exactResult.results as Record<string, unknown>[]).flatMap((row) => {
+    const evidence = archiveDomain.metadataSearchEvidence(row, normalizedQuery);
+    return evidence ? [archiveDomain.withMetadataSearchEvidence(row, evidence)] : [];
+  });
+  let metadataRows = archiveDomain.rankMetadataSearchRows(exactRows);
+  const stages: MetadataSearchStage[] = [{
+    stage: "metadata",
+    queryType: "metadata",
+    resultCount: metadataRows.length,
+    latencyMs: Math.round((performance.now() - metadataStartedAt) * 100) / 100,
+    confidence: Number(metadataRows[0]?.metadata_score ?? 0) / 100,
+  }];
+
+  let fallbackReason: "metadata_fts_unavailable" | undefined;
+  const fuzzyStartedAt = performance.now();
+  if (metadataRows.length >= target || !normalizedQuery) {
+    stages.push({
+      stage: "fuzzy",
+      queryType: "fuzzy",
+      resultCount: metadataRows.length,
+      latencyMs: Math.round((performance.now() - fuzzyStartedAt) * 100) / 100,
+      confidence: Number(metadataRows[0]?.metadata_score ?? 0) / 100,
+      skipped: true,
+    });
+  } else {
+    const candidateRows: Record<string, unknown>[] = [];
+    const match = ftsQuery(normalizedQuery);
+    if (match) {
+      try {
+        const fuzzyResult = await env.DB.prepare(`SELECT a.*, u.display_name AS contributor
+            FROM asset_search_fts JOIN assets a ON a.id = asset_search_fts.asset_id AND a.approved_revision = CAST(asset_search_fts.revision AS INTEGER)
+            JOIN users u ON u.id = a.owner_id
+            WHERE asset_search_fts MATCH ? AND ${filter.clauses.join(" AND ")}
+            ORDER BY bm25(asset_search_fts, 0, 0, 0, 3.2, 1.6, 0, 0, 0, 0, 0, 0, 0, 0) ASC, a.id ASC LIMIT 240`)
+          .bind(match, ...filter.values).all<Record<string, unknown>>();
+        candidateRows.push(...fuzzyResult.results as Record<string, unknown>[]);
+      } catch {
+        fallbackReason = "metadata_fts_unavailable";
+      }
+    }
+
+    // The bounded scan repairs old/stale FTS rows after metadata edits and also
+    // makes a misspelling useful without ever widening the searchable fields.
+    const candidateResult = await env.DB.prepare(`SELECT a.*, u.display_name AS contributor
+        FROM assets a JOIN users u ON u.id = a.owner_id
+        WHERE ${filter.clauses.join(" AND ")}
+        ORDER BY a.id ASC LIMIT ${FUZZY_CANDIDATE_LIMIT}`).bind(...filter.values).all<Record<string, unknown>>();
+    candidateRows.push(...candidateResult.results as Record<string, unknown>[]);
+
+    const existingIds = new Set(metadataRows.map((row) => String(row.id)));
+    const fuzzyRows = new Map<string, Record<string, unknown>>();
+    for (const row of candidateRows) {
+      const id = String(row.id);
+      if (existingIds.has(id) || fuzzyRows.has(id)) continue;
+      const evidence = archiveDomain.metadataSearchEvidence(row, normalizedQuery, true);
+      if (evidence) fuzzyRows.set(id, archiveDomain.withMetadataSearchEvidence(row, evidence));
+    }
+    metadataRows = archiveDomain.rankMetadataSearchRows([...metadataRows, ...fuzzyRows.values()]);
+    stages.push({
+      stage: "fuzzy",
+      queryType: "fuzzy",
+      resultCount: metadataRows.length,
+      latencyMs: Math.round((performance.now() - fuzzyStartedAt) * 100) / 100,
+      confidence: Number(metadataRows[0]?.metadata_score ?? 0) / 100,
+    });
+    return {
+      rows: metadataRows.slice(0, 60),
+      usedVectorIndex: false,
+      mode: "keyword",
+      stages,
+      suggestions: metadataRows.length ? [] : archiveDomain.metadataSearchSuggestions(normalizedQuery, candidateRows),
+      ...(fallbackReason ? { fallbackReason } : {}),
+    };
   }
-  let vector: number[] | undefined;
-  try {
-    const embeddingResult = await env.AI.run(env.PHOTO_EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MODEL, { text: query, pooling: "cls" }) as { data?: number[][] };
-    vector = embeddingResult.data?.[0];
-  } catch (error) {
-    console.warn(JSON.stringify({
-      level: "warn",
-      event: "photo.search.embedding_failed",
-      model: env.PHOTO_EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MODEL,
-      error: error instanceof Error ? error.message.slice(0, 300) : "unknown-error",
-    }));
-    return { rows: mergeHybridSearchRows([], keywordRows, query, new Map()), usedVectorIndex: false, mode: "keyword", fallbackReason: "embedding_failed" as const };
-  }
-  if (!vector?.length) {
-    console.warn(JSON.stringify({ level: "warn", event: "photo.search.embedding_empty", model: env.PHOTO_EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MODEL }));
-    return { rows: mergeHybridSearchRows([], keywordRows, query, new Map()), usedVectorIndex: false, mode: "keyword", fallbackReason: "embedding_empty" as const };
-  }
-  const namespace = env.PHOTO_INDEX_NAMESPACE?.trim() || undefined;
-  let matches: VectorizeMatches;
-  try {
-    matches = await env.PHOTO_INDEX.query(vector, { topK: 80, returnMetadata: "none", ...(namespace ? { namespace } : {}) });
-  } catch (error) {
-    console.warn(JSON.stringify({
-      level: "warn",
-      event: "photo.search.vector_query_failed",
-      error: error instanceof Error ? error.message.slice(0, 300) : "unknown-error",
-    }));
-    return { rows: mergeHybridSearchRows([], keywordRows, query, new Map()), usedVectorIndex: false, mode: "keyword", fallbackReason: "vector_query_failed" as const };
-  }
-  const currentMatches = matches.matches.map((item) => ({ vectorId: item.id, assetId: vectorAssetId(item.id), score: item.score })).filter((item) => item.assetId);
-  const ids = [...new Set(currentMatches.map((item) => item.assetId))];
-  if (!ids.length) return { rows: keywordRows, usedVectorIndex: true, mode: keywordRows.length ? "hybrid" : "semantic-preview" };
-  const semanticFilter = filterClauses(filters);
-  semanticFilter.clauses.push(`a.id IN (${ids.map(() => "?").join(",")})`);
-  semanticFilter.values.push(...ids);
-  const semanticResult = await env.DB.prepare(`SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id
-    WHERE ${semanticFilter.clauses.join(" AND ")}`).bind(...semanticFilter.values).all<Record<string, unknown>>();
-  const validVectors = new Map((semanticResult.results as Record<string, unknown>[]).map((row) => [String(row.vector_index_id), String(row.id)]));
-  const semanticScores = new Map<string, number>();
-  for (const item of currentMatches) if (validVectors.get(item.vectorId) === item.assetId) semanticScores.set(item.assetId, Number(item.score ?? 0));
-  const semanticRows = (semanticResult.results as Record<string, unknown>[]).filter((row) => semanticScores.has(String(row.id)));
+
   return {
-    rows: mergeHybridSearchRows(semanticRows, keywordRows, query, semanticScores),
-    usedVectorIndex: true,
-    mode: keywordRows.length ? "hybrid" : "semantic-preview",
+    rows: metadataRows.slice(0, 60),
+    usedVectorIndex: false,
+    mode: "keyword",
+    stages,
+    suggestions: [],
+    ...(fallbackReason ? { fallbackReason } : {}),
   };
 }

@@ -9,7 +9,7 @@
 
 ## Media and search
 
-- [x] Keep the catalogue boundary explicit: Veld Archive supports photography and video, not audio or music.
+- [x] Keep the catalogue boundary explicit: Stockvel supports photography and video, not audio or music.
 - [x] Add tenant-scoped saved searches, daily/weekly in-app alerts, privacy-thresholded trending searches, and explainable recommendations based only on explicit saved searches/lightboxes.
 - [x] Fail closed on demo media in production search and preview delivery; never substitute fabricated media when a licensed preview is unavailable.
 - [x] Run `npm run release:check` against the production bundle and block any demo identifier, fallback metadata, placeholder configuration, or placeholder-preview copy.
@@ -17,7 +17,7 @@
 - [ ] Configure R2 CORS and short-lived presigned PUT credentials.
 - [ ] Configure media-processing queues, image transformations, and Stream direct uploads.
 - [ ] Configure signed Stream playback and webhook delivery.
-- [x] Provision Workers AI and Vectorize; enable semantic search only after index tests pass.
+- [x] Provision Workers AI and Vectorize for background photo enrichment and indexing; keep live buyer search metadata-only until a separately approved semantic-search release.
 - [ ] Replace all demo visual cards with approved, licensed media.
 - [ ] Configure Image Delivery variants (`thumb`, `card`, `preview`, `download`) and verify crop, format negotiation, cache policy, and private-original access.
 - [ ] Configure Stream direct uploads, signed playback, allowed origins, and the signed `/api/webhooks/stream` callback; verify a video progresses from processing to editorial review.
@@ -34,7 +34,7 @@
 - [ ] Configure Turnstile site keys and server secret for all high-risk actions.
 - [x] Implement payment webhook deduplication, idempotency, refund, chargeback, and reconciliation paths.
 - [ ] Obtain written Paystack confirmation of marketplace/split settlement, fee bearer, split basis, refunds, chargebacks, reserves, KYC and any PASA/FIC obligations; verify a seller Paystack subaccount and test the configured percentage split (for example 60% artist / 40% WeDoCMS).
-- [ ] Publish approved `seller-marketplace-v1`, `buyer-marketplace-v1`, and `payment-split-v1` terms; confirm onboarding and checkout acceptance hashes are retained.
+- [ ] Publish approved `seller-marketplace-v2`, `buyer-marketplace-v2`, and `payment-split-v2` terms; confirm onboarding and checkout acceptance hashes are retained.
 - [ ] Upload and review model/property releases using the configured KYC/document provider.
 
 ## Security and operations
@@ -53,7 +53,7 @@ No unchecked item is satisfied by source code, a dry run, or a checkbox alone. C
 
 Live Cloudflare changes and checks on 2026-08-16:
 
-- Present: `veld-archive-media`, `veld-archive-media-dr`, `veld-archive-backups`, `veld-archive-backups-dr`, `veld-archive-audit-za`, `veld-archive-audit-eu` (EU jurisdiction), `veld-archive-kyc-za`, `veld-archive-kyc-eu` (EU jurisdiction), all configured Veld queues, D1 `veld-archive`, and Vectorize `veld-archive-photo-index` (768 dimensions, cosine).
+- Present: `veld-archive-media`, `veld-archive-media-dr`, `veld-archive-backups`, `veld-archive-backups-dr`, `veld-archive-audit-za`, `veld-archive-audit-eu` (EU jurisdiction), `veld-archive-kyc-za`, `veld-archive-kyc-eu` (EU jurisdiction), all configured Stockvel queues, D1 `veld-archive`, and Vectorize `veld-archive-photo-index` (768 dimensions, cosine).
 - D1 migrations `0013` through the current `0019` applied remotely. `0019_auth_security_events.sql` adds provider-neutral security events for D1 plus structured Worker Logs/Analytics forwarding. The legacy `saved_searches` columns were reconciled before applying `0015`; the FTS5-derived tables were excluded from the pre-migration export.
 - A pre-production D1 export is stored locally under `.backups/` and uploaded to both backup buckets with a SHA-256 manifest.
 - Dedicated Wrangler environment `veld-archive-api-production` is deployed at `https://veld-archive-api-production.blewisorlando.workers.dev`; `/api/health` returned HTTP 200 and `environment: production`.

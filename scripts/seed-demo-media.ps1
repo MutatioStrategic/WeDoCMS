@@ -35,7 +35,7 @@ foreach ($item in $media) {
   $path = Join-Path $fixtureRoot $item.file
   if (-not (Test-Path -LiteralPath $path)) {
     Write-Host "Downloading $($item.file)..."
-    curl.exe -L --fail --retry 4 --retry-delay 2 -A "VeldArchiveDemoSeeder/1.0 (local development)" -o $path $item.url
+    curl.exe -L --fail --retry 4 --retry-delay 2 -A "StockvelDemoSeeder/1.0 (local development)" -o $path $item.url
     if ($LASTEXITCODE -ne 0) { throw "Download failed for $($item.file)." }
   } else {
     Write-Host "Keeping existing $($item.file)"

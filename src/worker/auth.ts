@@ -157,23 +157,34 @@ export function sessionTokenFromRequest(request: Request): string | null {
   const cookieSession = cookieValue(request);
   if (cookieSession) return cookieSession;
   const authorization = request.headers.get("Authorization") ?? "";
-  return authorization.match(/^VeldSession\s+([^\s]+)$/i)?.[1] ?? null;
+  return authorization.match(/^(?:StockvelSession|VeldSession)\s+([^\s]+)$/i)?.[1] ?? null;
 }
 
-function sessionCookie(value: string, env: AuthBindings, maxAge: number): string {
+function legacyCookieDomain(env: AuthBindings): string | null {
+  const domain = env.AUTH_COOKIE_DOMAIN?.trim().toLowerCase().replace(/^\./, "");
+  if (!domain || domain.length > 253 || !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(domain)) return null;
+  return domain;
+}
+
+function sessionCookie(value: string, env: AuthBindings, maxAge: number, domain?: string | null): string {
   const attributes = ["HttpOnly", "Path=/", `Max-Age=${maxAge}`, "SameSite=Lax"];
   const secureDemoCookie = String(env.APP_ENV) === "demo" && /^https:\/\//i.test(String(env.APP_PUBLIC_URL ?? ""));
   if (String(env.APP_ENV) === "production" || secureDemoCookie) attributes.push("Secure");
-  if (env.AUTH_COOKIE_DOMAIN) attributes.push(`Domain=${env.AUTH_COOKIE_DOMAIN}`);
+  if (domain) attributes.push(`Domain=${domain}`);
   return `va_session=${encodeURIComponent(value)}; ${attributes.join("; ")}`;
 }
 
-function clearSessionCookie(env: AuthBindings): string {
-  return sessionCookie("", env, 0);
+function clearSessionCookie(env: AuthBindings, domain?: string | null): string {
+  return sessionCookie("", env, 0, domain);
 }
 
 export function responseWithSession(response: Response, token: string, env: AuthBindings, maxAge = 8 * 60 * 60): Response {
   const headers = new Headers(response.headers);
+  // Sessions must be host-only: the Pages proxy and the direct Worker host
+  // are both supported origins. Clear a legacy domain cookie first so an old
+  // dashboard setting cannot win the cookie lookup after this response.
+  const legacyDomain = legacyCookieDomain(env);
+  if (legacyDomain) headers.append("Set-Cookie", clearSessionCookie(env, legacyDomain));
   headers.append("Set-Cookie", sessionCookie(token, env, maxAge));
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
@@ -181,6 +192,8 @@ export function responseWithSession(response: Response, token: string, env: Auth
 export function responseWithoutSession(response: Response, env: AuthBindings): Response {
   const headers = new Headers(response.headers);
   headers.append("Set-Cookie", clearSessionCookie(env));
+  const legacyDomain = legacyCookieDomain(env);
+  if (legacyDomain) headers.append("Set-Cookie", clearSessionCookie(env, legacyDomain));
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 

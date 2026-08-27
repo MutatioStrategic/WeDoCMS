@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { archiveDomain, buildMatchExplanation, evaluateLicenceRequest, normalizeHttpUrl, type Asset } from "./shared";
+import { archiveDomain, buildMatchExplanation, evaluateLicenceRequest, metadataSearchEvidence, metadataSearchSuggestions, normalizeHttpUrl, rankMetadataSearchRows, type Asset } from "./shared";
 import { friendlySupabasePhoneError, normalizeSouthAfricanPhone } from "./phone";
 
 describe("South African phone rules", () => {
@@ -52,7 +52,7 @@ describe("asset domain contract", () => {
       propertyReleaseStatus: "not_required",
       authenticityConfidence: 0.98,
       humanVerified: true,
-      contributor: "Veld Studio",
+      contributor: "Stockvel Studio",
       workflowStage: "approval",
       aiTags: [],
       curatorNotes: "",
@@ -106,6 +106,15 @@ describe("asset domain contract", () => {
     expect(archiveDomain.evaluateLicenceRequest(asset, { assetId: asset.id, licenceType: "editorial", territory: "ZA", durationDays: 30 }).allowed).toBe(true);
   });
 
+  it("keeps media access denominated in credits with a predictable duration multiple", () => {
+    expect(archiveDomain.mediaLicenceCreditCost(365)).toBe(100);
+    expect(archiveDomain.mediaLicenceCreditCost(730)).toBe(200);
+    expect(archiveDomain.mediaLicenceCreditCost(365, 250)).toBe(250);
+    expect(archiveDomain.mediaMembershipDurationLabel(365)).toBe("12 months");
+    expect(archiveDomain.mediaCreditReferenceAmountCents(100)).toBe(29_900);
+    expect(() => archiveDomain.mediaLicenceCreditCost(0)).toThrow();
+  });
+
   it("approves only the exact metadata revision a human reviewed", () => {
     expect(archiveDomain.canApproveMetadataRevision({ assetRevision: 4, reviewedRevision: 4, metadataReviewStatus: "reviewed" })).toBe(true);
     expect(archiveDomain.canApproveMetadataRevision({ assetRevision: 5, reviewedRevision: 4, metadataReviewStatus: "reviewed" })).toBe(false);
@@ -130,5 +139,61 @@ describe("asset domain contract", () => {
       { ...baseAsset, id: "braai", title: "Saturday braai, Cape Flats", locality: "Mitchells Plain", subjectTags: ["food", "community"], culturalTags: ["Cape Flats", "South African braai"] },
     ], "A verified Table Mountain landscape at golden hour");
     expect(results.map((asset) => asset.id)).toEqual(["table"]);
+  });
+
+  it("ranks title metadata before description metadata and records the source field", () => {
+    const exact = metadataSearchEvidence({ id: "exact", title: "Table Mountain", description: "A Cape Town landscape" }, "table mountain");
+    const title = metadataSearchEvidence({ id: "title", title: "Table Mountain at dawn", description: "A landscape" }, "table mountain");
+    const description = metadataSearchEvidence({ id: "description", title: "Cape Town landscape", description: "Table Mountain at dawn" }, "table mountain");
+
+    expect(exact).toMatchObject({ matched_field: "title", match_type: "exact", metadata_score: 100, source_id: "exact" });
+    expect(title?.metadata_score).toBeGreaterThan(description?.metadata_score ?? 0);
+    expect(rankMetadataSearchRows([
+      { id: "description", ...description },
+      { id: "title", ...title },
+      { id: "exact", ...exact },
+    ]).map((row) => row.id)).toEqual(["exact", "title", "description"]);
+  });
+
+  it("uses edit distance only in the fuzzy metadata fallback", () => {
+    expect(metadataSearchEvidence({ id: "no-fuzzy", title: "Forest path", description: "A quiet trail" }, "forst path")).toBeNull();
+    expect(metadataSearchEvidence({ id: "fuzzy", title: "Forest path", description: "A quiet trail" }, "forst path", true)).toMatchObject({
+      matched_field: "title",
+      match_type: "fuzzy",
+      source_id: "fuzzy",
+    });
+  });
+
+  it("matches metadata terms as words instead of arbitrary substrings", () => {
+    expect(metadataSearchEvidence({ id: "location", title: "Coastal location", description: "A quiet shoreline" }, "cat")).toBeNull();
+    expect(metadataSearchEvidence({ id: "cattle", title: "Cattle in a field", description: "A rural scene" }, "cat", true)).toBeNull();
+    expect(metadataSearchEvidence({ id: "cats", title: "Cats in a garden", description: "Two domestic cats outdoors" }, "cat")).toMatchObject({
+      matched_field: "title",
+      match_type: "contains",
+      source_id: "cats",
+    });
+    expect(metadataSearchEvidence({ id: "cat", title: "Cat portrait", description: "A close-up portrait" }, "cat")).toMatchObject({
+      matched_field: "title",
+      match_type: "contains",
+    });
+  });
+
+  it("explains a live result from its deterministic metadata evidence", () => {
+    const asset: Asset = {
+      id: "metadata-result", kind: "image", status: "published", workflowStage: "approval", title: "Forest path", description: "A quiet trail", caption: "A quiet trail", country: "South Africa", province: null, city: null, locality: null, landmark: null,
+      subjectTags: ["landscape"], culturalTags: [], rightsStatus: "verified", modelReleaseStatus: "not_required", propertyReleaseStatus: "not_required", authenticityConfidence: .9, humanVerified: true, contributor: "Studio", aiTags: [], curatorNotes: "",
+      matched_field: "title", match_type: "fuzzy", metadata_score: 72, source_id: "metadata-result", match_snippet: "Forest path",
+    };
+    const explanation = archiveDomain.withMatchExplanation(asset, "forst path").matchExplanation;
+    expect(explanation?.signals).toEqual([expect.objectContaining({ field: "title", source: "editorial" })]);
+    expect(explanation?.metadataReviewNote).toContain("Deterministic title metadata match");
+  });
+
+  it("derives no-result suggestions from stored metadata", () => {
+    const suggestions = metadataSearchSuggestions("forst", [
+      { id: "forest", title: "Forest path", description: "A quiet trail" },
+      { id: "coast", title: "Coastal morning", description: "Sea light" },
+    ]);
+    expect(suggestions).toContain("forest");
   });
 });

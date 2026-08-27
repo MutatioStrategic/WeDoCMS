@@ -1,6 +1,6 @@
 {
   "consumer": {
-    "name": "Veld Archive React Frontend"
+    "name": "Stockvel React Frontend"
   },
   "interactions": [
     {
@@ -72,7 +72,7 @@
         "body": {
           "environment": "test",
           "ok": true,
-          "service": "veld-archive-api"
+          "service": "stockvel-api"
         },
         "headers": {
           "Content-Type": "application/json",
@@ -266,6 +266,6 @@
     }
   },
   "provider": {
-    "name": "Veld Archive API"
+    "name": "Stockvel API"
   }
 }

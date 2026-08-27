@@ -32,11 +32,11 @@ then run `npm run auth:check` before every deployment. The route returns the
 publishable key only after validating its anon/publishable shape and never
 returns JWT audience, signing, or service-role secrets.
 
-### Supabase identity to Veld tenancy
+### Supabase identity to Stockvel tenancy
 
-Supabase authenticates the person; it does not create a Veld organisation or
+Supabase authenticates the person; it does not create a Stockvel organisation or
 membership. The Worker verifies the Supabase subject, exchanges it for an
-HttpOnly Veld session, and resolves `DEFAULT_ORGANIZATION_ID` (or a signed
+HttpOnly Stockvel session, and resolves `DEFAULT_ORGANIZATION_ID` (or a signed
 organisation claim) against D1. The resulting session organisation ID is the
 tenant boundary used by R2, AI, Vectorize, queues, and application queries.
 Keep the production organisation pre-provisioned with

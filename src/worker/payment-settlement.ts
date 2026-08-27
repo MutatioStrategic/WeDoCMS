@@ -12,6 +12,36 @@ export type SettlementAmounts = {
   taxCents: number;
 };
 
+export type CreditRedemptionSettlement = SettlementAmounts & {
+  amountCents: number;
+  artistSharePercentage: number;
+};
+
+/**
+ * Convert a credit redemption into the internal settlement reference used by
+ * the existing payout ledger. Credits remain the buyer-facing unit; the
+ * reference amount only lets the ledger and payout provider preserve the
+ * configured seller/platform split when a pooled wallet is redeemed.
+ */
+export function creditRedemptionSettlement(input: {
+  credits: number;
+  referenceUnitCents: number;
+  artistSharePercentage: number;
+}): CreditRedemptionSettlement {
+  if (!Number.isSafeInteger(input.credits) || input.credits < 1 || input.credits > 100000) throw new Error("Credit redemption must contain between 1 and 100,000 whole credits");
+  if (!Number.isSafeInteger(input.referenceUnitCents) || input.referenceUnitCents < 1) throw new Error("Credit reference unit must be a positive whole-cent amount");
+  if (!Number.isSafeInteger(input.artistSharePercentage) || input.artistSharePercentage < 1 || input.artistSharePercentage > 99) throw new Error("artistSharePercentage must be between 1 and 99");
+  const amountCents = input.credits * input.referenceUnitCents;
+  const royaltyCents = Math.floor(amountCents * input.artistSharePercentage / 100);
+  return {
+    amountCents,
+    artistSharePercentage: input.artistSharePercentage,
+    platformFeeCents: amountCents - royaltyCents,
+    royaltyCents,
+    taxCents: 0,
+  };
+}
+
 /**
  * Resolve ledger postings from the provider contract. Paystack is deliberately
  * fail-closed because its marketplace split is the seller settlement source of

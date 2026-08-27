@@ -49,7 +49,7 @@ export function friendlySupabaseAuthError(
     return "Supabase is temporarily rate-limiting email delivery. Wait a minute, then try again; repeated failures mean the Send Email hook or custom SMTP still needs to be configured.";
   }
   if (/only.*team|not authorized to use|email.*not authorized|default.*email service|smtp/.test(details)) {
-    return "Supabase is still using its limited default email service. Configure the Veld Archive Send Email hook before retrying.";
+    return "Supabase is still using its limited default email service. Configure the Stockvel Send Email hook before retrying.";
   }
   if (/email.?not.?confirmed|not confirmed|confirm your email/.test(details)) {
     return "Your email is not confirmed yet. Check your inbox or use Resend confirmation email.";
@@ -67,10 +67,10 @@ export function friendlyIdentityExchangeError(error: unknown): string {
   const message = supabaseErrorMessage(error, "Identity exchange failed.");
   const details = message.toLowerCase();
   if (/organization|organisation|membership|provisioned/.test(details)) {
-    return "Your Supabase identity is verified, but Veld has not connected it to an organisation yet. Ask an administrator to provision your account.";
+    return "Your Supabase identity is verified, but Stockvel has not connected it to an organisation yet. Ask an administrator to provision your account.";
   }
   if (/verified identity token|identity token required|jwt|token/.test(details)) {
-    return "Supabase signed you in, but Veld could not verify the session. Refresh and try again; if it persists, check the Supabase and Worker JWT configuration.";
+    return "Supabase signed you in, but Stockvel could not verify the session. Refresh and try again; if it persists, check the Supabase and Worker JWT configuration.";
   }
-  return "Supabase signed you in, but Veld could not create an application session. Try again, and contact an administrator if the problem continues.";
+  return "Supabase signed you in, but Stockvel could not create an application session. Try again, and contact an administrator if the problem continues.";
 }

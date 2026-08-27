@@ -1,4 +1,4 @@
-import { bearerHeaders, idempotencyHeaders, IntegrationError, readJson, type HttpClient } from "./http";
+import { bearerHeaders, fetchWithTimeout, idempotencyHeaders, IntegrationError, readJson, type HttpClient } from "./http";
 
 export type PaymentSessionRequest = {
   idempotencyKey: string;
@@ -68,13 +68,13 @@ export class JsonPaymentAdapter implements PaymentProvider {
   readonly provider: string;
   private readonly fetcher: HttpClient;
 
-  constructor(private readonly config: { provider: string; endpoint: string; token: string; fetcher?: HttpClient; headers?: Record<string, string> }) {
+  constructor(private readonly config: { provider: string; endpoint: string; token: string; fetcher?: HttpClient; headers?: Record<string, string>; requestTimeoutMs?: number }) {
     this.provider = config.provider;
     this.fetcher = config.fetcher ?? ((input, init) => globalThis.fetch(input, init));
   }
 
   async createCheckoutSession(request: PaymentSessionRequest): Promise<PaymentSession> {
-    const response = await this.fetcher(this.config.endpoint, {
+    const response = await fetchWithTimeout(this.fetcher, this.config.endpoint, {
       method: "POST",
       headers: {
         ...bearerHeaders(this.config.token),
@@ -98,7 +98,7 @@ export class JsonPaymentAdapter implements PaymentProvider {
         productType: request.productType ?? "licence",
         recurring: request.recurring,
       }),
-    });
+    }, this.provider, this.config.requestTimeoutMs);
     const value = await readJson<JsonPaymentResponse>(response, this.provider);
     const checkoutUrl = value.checkoutUrl ?? value.checkout_url ?? value.url;
     if (!value.id || !checkoutUrl) throw new IntegrationError(this.provider, "Provider returned no checkout session or hosted URL", { details: value });
@@ -119,12 +119,12 @@ export class PaystackPaymentAdapter implements PaymentProvider {
   readonly provider = "paystack";
   private readonly fetcher: HttpClient;
 
-  constructor(private readonly config: { endpoint: string; secretKey: string; fetcher?: HttpClient }) {
+  constructor(private readonly config: { endpoint: string; secretKey: string; fetcher?: HttpClient; requestTimeoutMs?: number }) {
     this.fetcher = config.fetcher ?? ((input, init) => globalThis.fetch(input, init));
   }
 
   async createCheckoutSession(request: PaymentSessionRequest): Promise<PaymentSession> {
-    const response = await this.fetcher(this.config.endpoint, {
+    const response = await fetchWithTimeout(this.fetcher, this.config.endpoint, {
       method: "POST",
       headers: {
         ...bearerHeaders(this.config.secretKey),
@@ -151,7 +151,7 @@ export class PaystackPaymentAdapter implements PaymentProvider {
           subaccounts: request.split.subaccounts,
         } : undefined,
       }),
-    });
+    }, this.provider, this.config.requestTimeoutMs);
     const value = await readJson<PaystackInitializeResponse>(response, this.provider);
     const checkoutUrl = value.data?.authorization_url;
     const reference = value.data?.reference;
@@ -170,10 +170,10 @@ export class PaystackPaymentAdapter implements PaymentProvider {
 
   async createSubscriptionManageLink(subscriptionCode: string): Promise<string> {
     const origin = new URL(this.config.endpoint).origin;
-    const response = await this.fetcher(`${origin}/subscription/${encodeURIComponent(subscriptionCode)}/manage/link`, {
+    const response = await fetchWithTimeout(this.fetcher, `${origin}/subscription/${encodeURIComponent(subscriptionCode)}/manage/link`, {
       method: "GET",
       headers: bearerHeaders(this.config.secretKey),
-    });
+    }, this.provider, this.config.requestTimeoutMs);
     const value = await readJson<{ status?: boolean; data?: { link?: string } }>(response, this.provider);
     if (value.status !== true || !value.data?.link) throw new IntegrationError(this.provider, "Paystack returned no subscription management link", { details: value });
     return value.data.link;
@@ -183,8 +183,9 @@ export class PaystackPaymentAdapter implements PaymentProvider {
 /**
  * Demo-only hosted checkout seam.
  *
- * The demo Worker owns the completion route and marks the licence paid only
- * after that server-side simulation. Production never registers this adapter.
+ * The demo Worker owns the completion route and marks the selected product
+ * paid only after that server-side simulation. Production never registers
+ * this adapter.
  */
 export class DemoPaymentAdapter implements PaymentProvider {
   readonly provider = "demo";

@@ -1,6 +1,6 @@
-# Veld Archive
+# Stockvel
 
-Veld Archive is a Cloudflare-native foundation for a trusted South African photo and video licensing marketplace.
+Stockvel is a Cloudflare-native foundation for a trusted South African photo and video licensing marketplace.
 
 ## Implemented phases
 
@@ -25,7 +25,7 @@ Veld Archive is a Cloudflare-native foundation for a trusted South African photo
 - Confidence-prioritized editorial review queue with server-side metadata safety checks that reject stereotype or identity-inference labels.
 - Paystack marketplace-split settlement for approved artists (with legacy payout adapters retained behind explicit provider configuration). The artist keeps copyright; WeDoCMS is the listing and checkout intermediary.
 - Optional verification-document OCR using Cloudflare Workers AI's `@cf/moondream/moondream3.1-9B-A2B`; OCR output is assistive, masks full identity/bank numbers, and always requires human/KYC-provider review.
-- Photo AI pipeline: image upload → queued Workers AI visual metadata/OCR → seller/editor correction and approval → one-time embedding → Vectorize upsert. Buyer searches query the stored vectors and never OCR-scan the repository.
+- Photo enrichment pipeline: image upload → queued Workers AI visual metadata/OCR → seller/editor correction and approval. Live buyer search is deterministic and reads only approved title/description metadata; background vector/index jobs are not part of the query path.
 - Idempotent `photo_ai_jobs` records, queue retries/dead-letter handling, scheduled recovery, vector deletion for rejected photos, and an admin re-index endpoint (`POST /api/admin/photo-index/rebuild`).
 
 Visual cards render only the approved preview URL returned by the media service. When a derivative is unavailable, the UI shows an explicit unavailable state and does not fabricate or substitute a stock image. Development-only demo fallback is removed from production bundles and production API routes block seeded demo media.
@@ -101,7 +101,7 @@ and seller photo-only opt-in (including the rejected video case).
 
 Auth0 and Supabase can run together. Configure an Auth0 SPA application with Authorization Code + PKCE and a custom API that issues RS256 access tokens. Set `VITE_AUTH0_DOMAIN`, `VITE_AUTH0_CLIENT_ID`, `VITE_AUTH0_AUDIENCE`, and the optional `VITE_AUTH0_ORGANIZATION` for the frontend. Set `AUTH_JWKS_URL`, `AUTH_ISSUER`, `AUTH_AUDIENCE`, and `AUTH_ROLES_CLAIM` as Worker variables. The tenant Management API (`https://<tenant>/api/v2/`) is not the application API audience and must not be requested by the SPA. Register the deployed app URL as an allowed callback, logout, and web-origin URL in Auth0.
 
-For Supabase, configure the Worker as the source of truth: set `SUPABASE_URL`, `SUPABASE_AUDIENCE`, `AUTH_PROVIDER=both`, and the required browser-safe `SUPABASE_ANON_KEY` secret (`wrangler secret put SUPABASE_ANON_KEY --env production`). Use either an explicit `SUPABASE_JWKS_URL` for asymmetric signing or the `SUPABASE_JWT_SECRET` Wrangler secret for this project's current legacy HS256 signing. The SPA loads `/api/auth/config` at runtime, so production and direct Worker deployments do not depend on Vite remembering to embed auth settings; `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` remain optional local fallbacks only. Supabase email/password signup, email confirmation, login, phone OTP signup/login, password recovery, and session refresh are handled by the Supabase client; the Worker verifies the Supabase JWT and exchanges it for the same application session. Phone sign-in is restricted to South African mobile numbers. Users enter a local number such as `073 712 3456`; the clients normalize it to `+27737123456` before calling Supabase, and the Worker rejects a Supabase phone claim outside the South African mobile range. Phone-only identities receive a stable internal contact address until a real contact email is collected by a later account workflow. The anon/publishable key is safe for browser use; never put a Supabase service-role key in the client or expose it from the Worker. For hosted Supabase, enable Auth > Providers > Phone and configure a supported SMS provider; the repository config enables SMS signup for local Supabase development but cannot provision hosted provider credentials. The web and native sign-in surfaces use Supabase's password recovery flow: reset requests return a privacy-preserving response, reset links return to the app, and the new password is submitted through the verified recovery session before the user signs in again. Configure the Supabase redirect allow list for the web origin and `veldarchive://auth/recovery` for native builds. Demo deployments use explicit demo authentication and never receive the production Supabase secret.
+For Supabase, configure the Worker as the source of truth: set `SUPABASE_URL`, `SUPABASE_AUDIENCE`, `AUTH_PROVIDER=both`, and the required browser-safe `SUPABASE_ANON_KEY` secret (`wrangler secret put SUPABASE_ANON_KEY --env production`). Use either an explicit `SUPABASE_JWKS_URL` for asymmetric signing or the `SUPABASE_JWT_SECRET` Wrangler secret for this project's current legacy HS256 signing. The SPA loads `/api/auth/config` at runtime, so production and direct Worker deployments do not depend on Vite remembering to embed auth settings; `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` remain optional local fallbacks only. Supabase email/password signup, email confirmation, login, phone OTP signup/login, password recovery, and session refresh are handled by the Supabase client; the Worker verifies the Supabase JWT and exchanges it for the same application session. Phone sign-in is restricted to South African mobile numbers. Users enter a local number such as `073 712 3456`; the clients normalize it to `+27737123456` before calling Supabase, and the Worker rejects a Supabase phone claim outside the South African mobile range. Phone-only identities receive a stable internal contact address until a real contact email is collected by a later account workflow. The anon/publishable key is safe for browser use; never put a Supabase service-role key in the client or expose it from the Worker. For hosted Supabase, enable Auth > Providers > Phone and configure a supported SMS provider; the repository config enables SMS signup for local Supabase development but cannot provision hosted provider credentials. The web and native sign-in surfaces use Supabase's password recovery flow: reset requests return a privacy-preserving response, reset links return to the app, and the new password is submitted through the verified recovery session before the user signs in again. Configure the Supabase redirect allow list for the web origin and `stockvel://auth/recovery` for native builds. Demo deployments use explicit demo authentication and never receive the production Supabase secret.
 
 The Worker verifies external tokens against the configured issuer/JWKS, retrieves the Auth0 `openid profile email` UserInfo profile when configured, and creates the existing HttpOnly session. Supabase identities are namespaced in `auth_subject` to prevent cross-provider collisions. For a single-organisation deployment, pre-provision `DEFAULT_ORGANIZATION_ID`; a browser-supplied organization ID is accepted only when it matches a signed claim or that configured default. Keep `AUTH_ALLOW_ORG_PROVISIONING=false` in production. The identity provider owns sign-in; D1 remains the source of truth for application roles, organization memberships, credits, licence ownership, ledger entries, and payment state. D1 `auth_security_events` records provider, outcome, subject hash context, and bounded request metadata; high-risk events are also emitted to Worker Logs and Analytics Engine.
 
@@ -209,6 +209,47 @@ second, drifting copy of all route definitions.
 
 Apply subsequent migrations in order as well; `0004_explainability_safety.sql` adds persisted metadata provenance and review status. Validate the chain with `npx wrangler d1 migrations list veld-archive --local`.
 
+## Minimal media studio
+
+Open **Media studio** from the desktop navigation. The screen is intentionally
+split into two simple paths:
+
+- **Quick photo edit** accepts one archive photo or one/more local image files.
+  Crop, resize, apply a basic filter, add optional marketing text with placement,
+  alignment, colour, style, and contrast-panel controls, then save or download PNG/JPEG.
+- **Build a campaign** lets you name the campaign, add any number of selected
+  photos, drag a small set of GrapesJS content blocks, edit the text, preview it
+  in a sandboxed iframe, and export a ZIP.
+
+The prominent top download button downloads the active edited image in quick
+photo mode, or the full campaign ZIP in campaign mode. For an archive source
+without an edit it calls the authenticated `/api/assets/:id/original` route; it
+never exposes an R2 key in the browser. Local uploads remain temporary browser
+object URLs.
+
+GrapesJS, CropperJS, Pica, and JSZip are loaded with dynamic imports. This keeps
+the one-photo path small and makes the editor seam replaceable: the campaign
+component only relies on `init`, `getHtml`, `getCss`, and `destroy`. Campaign
+export sanitizes HTML/CSS, bundles the selected or edited images, and writes
+`index.html`, `styles.css`, `campaign.json`, and `images/` into the ZIP.
+
+Run the focused export sanity checks with:
+
+```powershell
+npx vitest run src/studio-export.test.ts
+```
+
+With `npm run dev` running in another terminal, the browser smoke check covers
+the local upload, CropperJS/Pica image download, GrapesJS initialization, and
+campaign ZIP contents:
+
+```powershell
+npm run test:studio
+```
+
+The normal local commands remain `npm run dev`, `npm run typecheck`, `npm test`,
+and `npm run build`.
+
 ## Cloudflare setup
 
 1. Create a D1 database called `veld-archive` and replace `database_id` in `wrangler.jsonc`.
@@ -243,7 +284,7 @@ The code is deployable as a staged foundation, but these external controls must 
 - Configure the Auth0 Organization tenant values and map its organization IDs to the provisioned D1 `organizations` rows. The Worker now verifies Auth0 RS256/JWKS tokens and exchanges them for the existing HttpOnly session; keep the development login disabled in production.
 - Configure R2 S3 credentials for presigned PUTs, private preview objects, CORS, media-processing workers/queues, and Cloudflare Images transformations.
 - Configure Cloudflare Stream direct creator uploads, signed playback, allowed origins, customer code, and provider webhook delivery. The Worker adapter, short-lived playback-token route, idempotent webhook state mapping, and organization-scoped audit event are implemented; live provider configuration and verification remain a launch gate.
-- Optionally provision the Workers AI binding, the `veld-archive-photo-index` Vectorize index, and both photo queues. Search remains deterministic without AI; when enabled, it embeds only the buyer's query and retrieves approved photo IDs from Vectorize, while image OCR/vision runs only from upload/approval jobs.
+- Optionally provision the Workers AI binding, the `veld-archive-photo-index` Vectorize index, and both photo queues for upload-time enrichment and background indexing. Live search does not call Workers AI or Vectorize; it reads approved title/description metadata from D1.
 - OCR is separately opt-in. It stays unavailable with a `503` response until both `OCR_ENABLED=true` and an `AI` binding are configured. The model is pinned by `OCR_MODEL`; callers cannot select arbitrary models.
 - Configure Paystack checkout and a verified artist subaccount. The payment session sends the agreed percentage split to Paystack, records the allocation, and only activates a licence after the signed webhook is reconciled. See `docs/marketplace-terms.md` and `IMPORTANT.md`; no fake payment is treated as paid.
 - Configure Turnstile, audit signing keys, KYC provider secrets, WAF/rate limits, CSP, and production environment-specific bindings.

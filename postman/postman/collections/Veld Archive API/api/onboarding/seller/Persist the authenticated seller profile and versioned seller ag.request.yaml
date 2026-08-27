@@ -3,7 +3,7 @@ name: Persist the authenticated seller profile and versioned seller agreement ac
 url: "{{baseUrl}}/api/onboarding/seller"
 method: PUT
 headers:
-  Authorization: "VeldSession {{sessionToken}}"
+  Authorization: "StockvelSession {{sessionToken}}"
   X-CSRF-Token: "{{csrfToken}}"
 settings: {}
 examples: ./.resources/Persist the authenticated seller profile and versioned seller ag.resources/examples

@@ -1,4 +1,4 @@
-import { chromium } from "@playwright/test";
+import { chromium, expect } from "@playwright/test";
 import { existsSync } from "node:fs";
 
 const baseUrl = process.env.DEMO_BASE_URL ?? "http://127.0.0.1:8787";
@@ -24,10 +24,19 @@ const screens = [
 ];
 const screensByRole = {
   buyer: screens.filter(([label]) => !["Contributor insights", "Editorial review", "Governance", "WordPress"].includes(label)),
-  contributor: screens.filter(([label]) => ["Explore archive", "Search workbench", "Creator marketplace", "Contributor insights", "Community", "Account", "Rights guide", "System overview"].includes(label)),
-  editor: screens.filter(([label]) => ["Explore archive", "Search workbench", "Creator marketplace", "Contributor insights", "Editorial review", "Governance", "Community", "Account", "Rights guide", "System overview", "WordPress"].includes(label)),
+  contributor: screens.filter(([label]) => ["Explore archive", "Search workbench", "Creator marketplace", "Buyer ROI", "Contributor insights", "Community", "Account", "Rights guide", "System overview"].includes(label)),
+  editor: screens.filter(([label]) => ["Explore archive", "Search workbench", "Creator marketplace", "Buyer ROI", "Contributor insights", "Editorial review", "Governance", "Community", "Account", "Rights guide", "System overview", "WordPress"].includes(label)),
   admin: screens,
 };
+
+async function waitUntil(check, message, timeoutMs = 20_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(message);
+}
 
 function installedBrowserPath() {
   if (process.env.PLAYWRIGHT_EXECUTABLE_PATH) return process.env.PLAYWRIGHT_EXECUTABLE_PATH;
@@ -53,6 +62,7 @@ try {
     await page.getByRole("button", { name: "Enter demo" }).click();
     await page.getByRole("combobox", { name: "Switch role" }).waitFor();
     if (role === "buyer") {
+      let purchaseAssetId = "";
       const catalogResponse = await page.request.get(`${baseUrl}/api/assets`);
       if (!catalogResponse.ok()) failures.push(`catalog request returned HTTP ${catalogResponse.status()}`);
       else {
@@ -65,19 +75,37 @@ try {
           const response = await page.request.fetch(new URL(asset.previewUrl, baseUrl).toString(), { method: "HEAD" });
           if (!response.ok()) failures.push(`preview ${asset.id} returned HTTP ${response.status()}`);
         }
+        purchaseAssetId = String(expectedAssets.find((asset) => asset.title === purchaseAssetTitle)?.id ?? "");
       }
       const assetCard = page.locator('article.asset-card[role="button"]').filter({ hasText: purchaseAssetTitle }).first();
       if (await assetCard.count()) {
+        if (!purchaseAssetId) failures.push("buyer checkout asset id was not present in the catalogue");
+        const assetUrl = `${baseUrl}/?asset=${encodeURIComponent(purchaseAssetId)}&purchase=1`;
         await assetCard.click();
-        await page.getByRole("button", { name: "Purchase licence" }).click();
+        await page.getByRole("button", { name: /^(Purchase \d+ credits|Buy this asset with \d+ credits)/ }).first().click();
+        const creditAction = page.locator(".asset-purchase-panel .credit-purchase-button");
+        await creditAction.waitFor();
+        await waitUntil(async () => !(await creditAction.isDisabled()), "Credit access action did not become enabled after validation");
+        const actionLabel = await creditAction.innerText();
+        if (/^Buy \d+ credits$/.test(actionLabel)) {
+          await creditAction.click();
+          await page.waitForURL(/\/account\?credits=complete[^#]*demo=1/, { waitUntil: "domcontentloaded" });
+          await page.goto(assetUrl, { waitUntil: "domcontentloaded" });
+        }
+        await page.getByRole("dialog").waitFor();
+        const purchasePanel = page.locator(".asset-purchase-panel");
+        await purchasePanel.waitFor();
+        const purchaseAction = purchasePanel.locator(".credit-purchase-button");
+        await purchaseAction.waitFor();
+        await waitUntil(async () => !(await purchaseAction.isDisabled()), "Credit purchase action did not become enabled after validation");
+        await expect(purchasePanel.getByRole("heading", { name: /^Buy this asset with \d+ credits$/ })).toBeVisible();
+        await expect(purchasePanel.getByText(/Credits unlock downloads\/streams for/)).toBeVisible();
         await page.locator("details.purchase-terms summary").click();
         await page.locator(".purchase-terms-check input").check();
-        await page.waitForFunction(() => {
-          const button = [...document.querySelectorAll("button")].find((candidate) => candidate.textContent?.includes("Simulate purchase"));
-          return button instanceof HTMLButtonElement && !button.disabled;
-        });
-        await page.getByRole("button", { name: /Simulate purchase/ }).click();
-        await page.waitForURL(/\/account\?licence=.*payment=complete&demo=1/, { waitUntil: "domcontentloaded" });
+        await purchaseAction.click();
+        await page.getByText("Media unlocked", { exact: true }).waitFor();
+        await page.getByRole("dialog").getByRole("button", { name: "Close", exact: true }).click();
+        await page.getByRole("dialog").waitFor({ state: "detached" });
       } else {
         failures.push("buyer checkout asset was not present");
       }

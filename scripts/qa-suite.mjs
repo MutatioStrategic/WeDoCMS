@@ -11,7 +11,7 @@ const runWrites = process.env.QA_RUN_WRITES === "true" || /https?:\/\/(127\.0\.0
 const writeStoriesEnabled = runWrites && process.env.QA_SKIP_WRITES !== "true";
 const spec = parse(await readFile(new URL("../docs/openapi.yaml", import.meta.url), "utf8"));
 const openapi = await Enforcer(spec, { hideWarnings: true });
-const report = await createQaReport({ suite: "Veld Archive browser handoffs and Newman contracts", baseUrl });
+const report = await createQaReport({ suite: "Stockvel browser handoffs and Newman contracts", baseUrl });
 const allBrowserDefinitions = [
   ["Chromium", chromium],
   ["Firefox", firefox],
@@ -116,12 +116,13 @@ async function runBrowserStory(browser, browserName, featureName, expectedPaths,
       screenshots.push(file);
       return file;
     } });
+    const storyExpectedPaths = Array.isArray(outcome?.expectedPaths) ? outcome.expectedPaths : expectedPaths;
     assertNoServerErrors(logs, featureName);
-    assertContractCoverage(logs, expectedPaths, featureName);
+    assertContractCoverage(logs, storyExpectedPaths, featureName);
     report.addResult({
       featureName,
       browser: browserName,
-      backendPaths: expectedPaths,
+      backendPaths: storyExpectedPaths,
       status: "passed",
       durationMs: Date.now() - startedAt,
       screenshots,
@@ -156,7 +157,7 @@ async function exploreAndSearch({ page, logs, screenshot }) {
   await page.goto(baseUrl + "/", { waitUntil: "domcontentloaded" });
   await page.getByRole("heading", { name: /Find the image/ }).waitFor();
   await waitForResponse(logs, "GET /api/auth/session", 200);
-  await waitForResponse(logs, "GET /api/assets", 200);
+  await waitForResponse(logs, "GET /api/search", 200);
   await waitForResponse(logs, "GET /api/discovery", 200);
   await screenshot("landing");
   const input = page.getByLabel("Search photo and video").first();
@@ -187,27 +188,58 @@ async function buyerLicenceHandoff({ page, logs, screenshot }) {
   await dialog.waitFor();
   const purchasePanel = page.locator(".asset-purchase-panel");
   await purchasePanel.waitFor();
+  const purchaseButton = purchasePanel.locator(".credit-purchase-button");
+  await purchaseButton.waitFor();
+  await waitUntil(async () => !(await purchaseButton.isDisabled()), "Credit access action did not become enabled after validation");
+  let creditTopUpRequired = false;
+  if (/^Buy \d+ credits/.test(await purchaseButton.innerText())) {
+    creditTopUpRequired = true;
+    await purchaseButton.click();
+    await page.waitForURL(/\/account\?credits=complete[^#]*demo=1/, { waitUntil: "domcontentloaded" });
+    await page.goto(assetUrl, { waitUntil: "domcontentloaded" });
+    await page.getByRole("dialog").waitFor();
+    await purchasePanel.waitFor();
+    await purchaseButton.waitFor();
+    await waitUntil(async () => !(await purchaseButton.isDisabled()), "Credit purchase action did not become enabled after top-up");
+  }
   await page.locator("details.purchase-terms summary").click();
   await page.locator(".purchase-terms-check input").check();
-  const purchaseButton = page.getByRole("button", { name: /Simulate purchase/ });
-  await purchaseButton.waitFor();
-  await waitUntil(async () => !(await purchaseButton.isDisabled()), "Demo purchase did not become enabled after terms acceptance");
   await screenshot("checkout-ready");
   await purchaseButton.click();
-  await page.waitForURL(/\/account\?licence=[^&]+&payment=complete&demo=1/, { waitUntil: "domcontentloaded" });
-  assertion(new URL(page.url()).origin === new URL(baseUrl).origin, "Demo completion left the configured origin");
+  await page.getByText("Media unlocked", { exact: true }).waitFor();
+  await waitUntil(() => Boolean(responseFor(logs, "POST /api/checkout", 201) || responseFor(logs, "POST /api/checkout", 200)), "Credit-funded checkout did not return a success response");
+  await page.goto(baseUrl + "/account", { waitUntil: "domcontentloaded" });
+  assertion(new URL(page.url()).origin === new URL(baseUrl).origin, "Buyer account handoff left the configured origin");
   await page.getByText("PURCHASE HISTORY & RECEIPTS", { exact: true }).waitFor();
-  await waitForResponse(logs, "POST /api/checkout", 201);
-  await waitForResponse(logs, "POST /api/payments/{licenceId}/session", 201);
-  await waitForResponse(logs, "GET /api/demo/payments/{licenceId}/complete", 303);
   await waitForResponse(logs, "GET /api/account/lifecycle", 200);
   await waitForResponse(logs, "GET /api/my/purchases", 200);
+  await waitForResponse(logs, "GET /api/my/credits", 200);
   await waitForResponse(logs, "GET /api/subscription", 200);
   await waitForResponse(logs, "GET /api/my/free-downloads", 200);
   await screenshot("account-after-payment");
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.getByText("Proof of what your team can use", { exact: true }).waitFor();
-  return { message: "Same-origin demo payment completion, account handoff, and reload continuity completed." };
+  return {
+    expectedPaths: [
+      "POST /api/auth/demo-login",
+      "GET /api/auth/session",
+      "GET /api/search",
+      "GET /api/discovery",
+      "GET /api/lightboxes",
+      "GET /api/notifications",
+      "POST /api/checkout/validate",
+      ...(creditTopUpRequired ? ["POST /api/buyer/credits/checkout", "GET /api/demo/payments/{licenceId}/complete"] : []),
+      "POST /api/checkout",
+      "GET /api/account/lifecycle",
+      "GET /api/my/purchases",
+      "GET /api/my/credits",
+      "GET /api/subscription",
+      "GET /api/my/free-downloads",
+    ],
+    message: creditTopUpRequired
+      ? "Buyer credit top-up, credit-funded media unlock, account handoff, and reload continuity completed."
+      : "Credit-funded media unlock, account handoff, and reload continuity completed.",
+  };
 }
 
 const roleStories = [
@@ -352,11 +384,11 @@ function collectionTestScript(caseDefinition) {
   if (caseDefinition.key === "checkout") {
     lines.push("const body = pm.response.json(); pm.collectionVariables.set('licenceId', body.licenceId);");
   }
-  if (caseDefinition.key === "paymentSession") {
-    lines.push("const body = pm.response.json(); pm.collectionVariables.set('completionUrl', body.checkoutUrl); pm.test('demo provider checkout URL is returned', () => pm.expect(body.provider).to.eql('demo'));");
+  if (caseDefinition.key === "creditCheckout") {
+    lines.push("const body = pm.response.json(); pm.collectionVariables.set('creditPurchaseId', body.purchaseId); pm.test('demo provider credit checkout URL is returned', () => pm.expect(body.provider).to.eql('demo'));");
   }
-  if (caseDefinition.key === "demoCompletion") {
-    lines.push("const location = pm.response.headers.get('Location') || ''; pm.test('demo completion redirects to account', () => pm.expect(location).to.match(/\\/account(?:\\?|$)/));");
+  if (caseDefinition.key === "creditCompletion") {
+    lines.push("const location = pm.response.headers.get('Location') || ''; pm.test('demo credit completion redirects to account', () => pm.expect(location).to.match(/\\/account(?:\\?|$)/));");
   }
   lines.push("pm.collectionVariables.unset('expectedStatuses');");
   return lines;
@@ -374,11 +406,12 @@ const contractCases = [
   { key: "authenticatedSession", featureName: "Authenticated session contract", method: "GET", path: "/api/auth/session", expectedStatuses: [200] },
   { key: "licenceProducts", featureName: "Licence products contract", method: "GET", path: "/api/licence-products", expectedStatuses: [200] },
   { key: "legalAgreements", featureName: "Versioned agreements contract", method: "GET", path: "/api/legal/agreements", expectedStatuses: [200] },
-  { key: "checkoutValidation", featureName: "Licence validation contract", method: "POST", path: "/api/checkout/validate", expectedStatuses: [200], body: { assetId: purchaseAssetId, licenceType: "commercial", territory: "Worldwide", durationDays: 365 } },
-  { key: "checkout", featureName: "Licence creation contract", method: "POST", path: "/api/checkout", expectedStatuses: [200, 201], body: { assetId: purchaseAssetId, licenceType: "commercial", territory: "Worldwide", durationDays: 365, buyerAgreementVersion: "buyer-marketplace-v1", paymentAgreementVersion: "payment-split-v1", acceptBuyerTerms: true } },
-  { key: "paymentSession", featureName: "Hosted payment session contract", method: "POST", path: "/api/payments/{{licenceId}}/session", expectedStatuses: [201], body: { successUrl: baseUrl + "/account?payment=complete", cancelUrl: baseUrl + "/account?payment=cancelled" } },
-  { key: "demoCompletion", featureName: "Demo payment completion contract", method: "GET", path: "{{completionUrl}}", expectedStatuses: [303] },
+  { key: "checkoutValidation", featureName: "Licence validation contract", method: "POST", path: "/api/checkout/validate", expectedStatuses: [200], body: { assetId: purchaseAssetId, licenceType: "commercial", territory: "Worldwide", durationDays: 365, includeCustomBuying: false } },
+  { key: "creditCheckout", featureName: "Media credit checkout contract", method: "POST", path: "/api/buyer/credits/checkout", expectedStatuses: [201], body: { credits: 100, successUrl: baseUrl + "/account?credits=complete", cancelUrl: baseUrl + "/account?credits=cancelled" } },
+  { key: "creditCompletion", featureName: "Demo credit completion contract", method: "GET", path: "/api/demo/payments/{{creditPurchaseId}}/complete", expectedStatuses: [303] },
+  { key: "checkout", featureName: "Licence creation contract", method: "POST", path: "/api/checkout", expectedStatuses: [200, 201], body: { assetId: purchaseAssetId, licenceType: "commercial", territory: "Worldwide", durationDays: 365, buyerAgreementVersion: "buyer-marketplace-v2", paymentAgreementVersion: "payment-split-v2", acceptBuyerTerms: true, includeCustomBuying: false } },
   { key: "purchases", featureName: "Buyer purchase history contract", method: "GET", path: "/api/my/purchases", expectedStatuses: [200] },
+  { key: "credits", featureName: "Buyer credits contract", method: "GET", path: "/api/my/credits", expectedStatuses: [200] },
   { key: "accountLifecycle", featureName: "Account lifecycle contract", method: "GET", path: "/api/account/lifecycle", expectedStatuses: [200] },
   { key: "freeDownloads", featureName: "Introductory downloads contract", method: "GET", path: "/api/my/free-downloads", expectedStatuses: [200] },
 ];
@@ -412,7 +445,7 @@ async function runNewmanContracts() {
   console.log("[qa] start Newman / OpenAPI contracts");
   const collection = {
     info: {
-      name: "Veld Archive user-story OpenAPI contracts",
+      name: "Stockvel user-story OpenAPI contracts",
       _postman_id: "veld-archive-qa-contracts",
       schema: "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     },
@@ -420,7 +453,7 @@ async function runNewmanContracts() {
       { key: "baseUrl", value: baseUrl },
       { key: "csrfToken", value: "" },
       { key: "licenceId", value: "" },
-      { key: "completionUrl", value: "" },
+      { key: "creditPurchaseId", value: "" },
       { key: "expectedStatuses", value: "" },
     ],
     item: contractCases.map((caseDefinition) => {
@@ -532,22 +565,23 @@ try {
     }
     await runBrowserStory(browser, browserName, "Explore and search", [
       "GET /api/auth/session",
-      "GET /api/assets",
+      "GET /api/search",
       "GET /api/discovery",
     ], exploreAndSearch);
     await runBrowserStory(browser, browserName, "Buyer licence checkout handoff", [
       "POST /api/auth/demo-login",
       "GET /api/auth/session",
-      "GET /api/assets",
+      "GET /api/search",
       "GET /api/discovery",
       "GET /api/lightboxes",
       "GET /api/notifications",
       "POST /api/checkout/validate",
-      "POST /api/checkout",
-      "POST /api/payments/{licenceId}/session",
+      "POST /api/buyer/credits/checkout",
       "GET /api/demo/payments/{licenceId}/complete",
+      "POST /api/checkout",
       "GET /api/account/lifecycle",
       "GET /api/my/purchases",
+      "GET /api/my/credits",
       "GET /api/subscription",
       "GET /api/my/free-downloads",
     ], buyerLicenceHandoff);

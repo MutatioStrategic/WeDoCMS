@@ -15,7 +15,7 @@ export function buildStatementCsv(statement: AnyStatement): string {
   const payment = object(statement.paymentFlow);
   const performance = object(statement.performance);
   const rows: string[] = [
-    csvRow(["VELD ARCHIVE SELLER STATEMENT"]),
+    csvRow(["STOCKVEL SELLER STATEMENT"]),
     csvRow(["Generated", statement.generatedAt]),
     csvRow(["Currency", statement.currency]),
     csvRow(["Next payout", policy.nextScheduledPayoutDate]),
@@ -28,7 +28,7 @@ export function buildStatementCsv(statement: AnyStatement): string {
     csvRow(["Paid out", money(payout.paidOutCents)]),
     csvRow(["In flight", money(payout.inFlightCents)]),
     csvRow(["Outstanding", money(payout.outstandingCents)]),
-    csvRow(["Subscription royalty status", object(statement.veldSubscriptionRoyalty).status]),
+    csvRow(["Subscription royalty status", object(statement.stockvelSubscriptionRoyalty).status]),
     csvRow([]),
     csvRow(["MEDIA INVENTORY"]),
     csvRow(["Asset ID", "Title", "Media type", "Listing status", "Payment package", "Price"]),
@@ -88,7 +88,7 @@ export function buildStatementPdf(statement: AnyStatement): Uint8Array {
   const payment = object(statement.paymentFlow);
   const performance = object(statement.performance);
 
-  line("VELD ARCHIVE", 10, 42);
+  line("STOCKVEL", 10, 42);
   line("Seller royalty statement", 24, 42);
   line(`Generated ${text(statement.generatedAt)}  |  Currency ${text(statement.currency, "ZAR")}`, 9, 42);
   page.box(42, 670, 511, 64);

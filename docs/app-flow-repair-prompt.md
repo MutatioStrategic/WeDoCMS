@@ -1,4 +1,4 @@
-# Veld Archive app-flow repair prompt
+# Stockvel app-flow repair prompt
 
 ## What the audit found
 
@@ -46,7 +46,7 @@ The Figma deck’s intended journeys are the acceptance baseline:
 ## Reusable implementation prompt
 
 ```text
-You are repairing Veld Archive as a task-oriented application, not redesigning
+You are repairing Stockvel as a task-oriented application, not redesigning
 it as a collection of marketing pages.
 
 First inspect the repository, docs/ux-process-flows.md, security and launch

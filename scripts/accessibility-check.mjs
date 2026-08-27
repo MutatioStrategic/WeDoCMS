@@ -42,7 +42,7 @@ try {
   const browser = await chromium.launch({ headless: true, executablePath: installedBrowserPath() });
   const context = await browser.newContext();
   const page = await context.newPage();
-  await page.route("**/api/assets?**", async (route) => {
+  await page.route("**/api/search?**", async (route) => {
     await new Promise((resolve) => setTimeout(resolve, 1_100));
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ results: [{
       id: "fixture-published-preview", kind: "image", status: "published", title: "Table Mountain preview", description: "A published preview-backed archive record.", caption: "Table Mountain above Cape Town.", country: "South Africa", province: "Western Cape", city: "Cape Town", locality: "City Bowl", landmark: "Table Mountain", subjectTags: ["landscape"], culturalTags: ["South African landscape"], rightsStatus: "pending", modelReleaseStatus: "not_required", propertyReleaseStatus: "not_required", authenticityConfidence: 0.8, humanVerified: true, contributor: "Fixture archive", workflowStage: "approval", aiTags: ["mountain"], curatorNotes: "", previewUrl: "/api/assets/fixture-published-preview/media?variant=preview"
@@ -65,10 +65,11 @@ try {
   const searchPassed = report("archive search results", searchResults);
   await page.locator(".asset-card").first().click();
   await page.getByRole("dialog").waitFor();
-  await page.getByRole("button", { name: /purchase licence|sign in to purchase licence/i }).waitFor();
+  await page.getByRole("button", { name: /purchase|buy|access/i }).last().waitFor();
   const assetDialog = await scan();
   const assetDialogPassed = report("asset purchase dialog", assetDialog);
-  await page.getByRole("button", { name: "Close" }).click();
+  await page.keyboard.press("Escape");
+  await page.getByRole("dialog").waitFor({ state: "detached" });
   await page.locator(".better-nav-item").filter({ hasText: "System overview" }).click();
   const stakeholderOverview = await scan();
   const stakeholderOverviewPassed = report("stakeholder system overview", stakeholderOverview);

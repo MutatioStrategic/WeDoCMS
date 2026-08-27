@@ -57,7 +57,7 @@ if ($fallbackExit -ne 0) { throw "D1 table-scoped export failed" }
 
 $ftsRebuild = @'
 
--- Veld Archive restore hook: rebuild the FTS5 virtual table after base-table restore.
+-- Stockvel restore hook: rebuild the FTS5 virtual table after base-table restore.
 PRAGMA foreign_keys = OFF;
 CREATE VIRTUAL TABLE IF NOT EXISTS asset_search_fts USING fts5(
   document_id UNINDEXED,

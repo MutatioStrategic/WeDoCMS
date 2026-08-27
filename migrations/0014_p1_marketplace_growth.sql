@@ -165,10 +165,10 @@ CREATE TABLE IF NOT EXISTS account_security_preferences (
 );
 
 INSERT OR IGNORE INTO creator_profiles (user_id, slug, headline, bio, location, specialties_json, visibility)
-VALUES ('demo-contributor', 'veld-studio', 'Documentary photography from the ground up', 'Veld Studio documents everyday South African stories with care, context, and clear rights.', 'Cape Town, South Africa', '["documentary", "community", "landscape"]', 'public');
+VALUES ('demo-contributor', 'veld-studio', 'Documentary photography from the ground up', 'Stockvel Studio documents everyday South African stories with care, context, and clear rights.', 'Cape Town, South Africa', '["documentary", "community", "landscape"]', 'public');
 
 INSERT OR IGNORE INTO portfolio_collections (id, organization_id, owner_id, slug, title, description, cover_asset_id, visibility)
-VALUES ('portfolio-everyday-veld', 'org-demo', 'demo-contributor', 'everyday-veld', 'Everyday Veld', 'Grounded stories from daily life across the Western Cape.', 'asset-braai-cape-flats', 'public');
+VALUES ('portfolio-everyday-veld', 'org-demo', 'demo-contributor', 'everyday-veld', 'Everyday Stockvel', 'Grounded stories from daily life across the Western Cape.', 'asset-braai-cape-flats', 'public');
 INSERT OR IGNORE INTO portfolio_collection_assets (collection_id, asset_id, sort_order) VALUES
   ('portfolio-everyday-veld', 'asset-braai-cape-flats', 1),
   ('portfolio-everyday-veld', 'asset-table-mountain', 2);

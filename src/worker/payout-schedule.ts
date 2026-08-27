@@ -4,7 +4,7 @@ export type MonthlyPayoutSchedule = {
   payoutDayOfMonth: number;
 };
 
-/** Veld's published contributor payout policy: one lump sum on the 25th. */
+/** Stockvel's published contributor payout policy: one lump sum on the 25th. */
 export function monthlyPayoutSchedule(now = new Date()): MonthlyPayoutSchedule {
   const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Johannesburg", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(now);
   const value = (type: string): number => Number(parts.find((part) => part.type === type)?.value ?? 0);

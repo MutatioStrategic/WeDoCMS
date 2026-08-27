@@ -25,10 +25,10 @@ const interactions = [
     response: {
       status: 200,
       headers: { "content-type": jsonContentType },
-      body: { ok: true, service: "veld-archive-api", environment: MatchersV3.string("test") },
+      body: { ok: true, service: "stockvel-api", environment: MatchersV3.string("test") },
     },
     assertBody: (body) => {
-      if (body.ok !== true || body.service !== "veld-archive-api" || typeof body.environment !== "string") {
+      if (body.ok !== true || body.service !== "stockvel-api" || typeof body.environment !== "string") {
         throw new Error("Health response did not satisfy the consumer contract");
       }
     },
@@ -129,8 +129,8 @@ const interactions = [
 
 for (const interaction of interactions) {
   const pact = new PactV3({
-    consumer: "Veld Archive React Frontend",
-    provider: "Veld Archive API",
+    consumer: "Stockvel React Frontend",
+    provider: "Stockvel API",
     dir: pactDir,
     logLevel: process.env.PACT_LOG_LEVEL ?? "warn",
   });

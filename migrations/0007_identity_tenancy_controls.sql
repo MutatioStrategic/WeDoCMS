@@ -112,8 +112,8 @@ ALTER TABLE onboarding_tenders ADD COLUMN organization_id TEXT;
 ALTER TABLE seller_contracts ADD COLUMN organization_id TEXT;
 ALTER TABLE upload_sessions ADD COLUMN organization_id TEXT;
 
-INSERT OR IGNORE INTO users (id, email, display_name, role) VALUES ('demo-admin', 'admin@veldarchive.local', 'Veld Archive Admin', 'admin');
-INSERT OR IGNORE INTO organizations (id, name, slug, created_by) VALUES ('org-demo', 'Veld Archive Demo', 'veld-demo', 'demo-admin');
+INSERT OR IGNORE INTO users (id, email, display_name, role) VALUES ('demo-admin', 'admin@stockvel.local', 'Stockvel Admin', 'admin');
+INSERT OR IGNORE INTO organizations (id, name, slug, created_by) VALUES ('org-demo', 'Stockvel Demo', 'veld-demo', 'demo-admin');
 INSERT OR IGNORE INTO organization_memberships (id, organization_id, user_id, role) VALUES
   ('membership-demo-admin', 'org-demo', 'demo-admin', 'admin'),
   ('membership-demo-contributor', 'org-demo', 'demo-contributor', 'contributor'),

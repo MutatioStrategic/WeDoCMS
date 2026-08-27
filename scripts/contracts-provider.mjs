@@ -23,7 +23,7 @@ await mkdir(reportDir, { recursive: true });
 
 try {
   const result = await new Verifier({
-    provider: "Veld Archive API",
+    provider: "Stockvel API",
     providerBaseUrl,
     pactUrls: pactFiles,
     providerVersion: process.env.GITHUB_SHA ?? "local",

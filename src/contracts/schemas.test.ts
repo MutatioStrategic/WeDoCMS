@@ -20,6 +20,8 @@ describe("API contract Zod schemas", () => {
     expect(payload.description).toBe("");
     expect(payload.subjectTags).toEqual([]);
     expect(payload.monetizationModel).toBe("membership");
+    expect(payload.licenseCreditCost).toBe(100);
+    expect(payload.subscriptionIncluded).toBeUndefined();
     expect(payload.freeDownloadEnabled).toBe(false);
   });
 
@@ -85,7 +87,7 @@ describe("API contract Zod schemas", () => {
   });
 
   it("covers health, anonymous session, and JSON error responses", () => {
-    expect(healthResponseSchema.parse({ ok: true, service: "veld-archive-api", environment: "test" })).toBeTruthy();
+    expect(healthResponseSchema.parse({ ok: true, service: "stockvel-api", environment: "test" })).toBeTruthy();
     expect(sessionResponseSchema.parse({ authenticated: false, user: null })).toEqual({ authenticated: false, user: null });
     expect(authConfigResponseSchema.parse({ provider: "supabase", supabaseUrl: "https://project.supabase.co", publishableKey: "sb_publishable_public", redirectUrl: "https://veld-archive.pages.dev" }).provider).toBe("supabase");
     expect(authConfigResponseSchema.parse({ provider: "demo", redirectUrl: "https://demo.example.com" }).provider).toBe("demo");
@@ -118,9 +120,10 @@ describe("API contract Zod schemas", () => {
       eventId: "event-credit-1",
       type: "payment_succeeded",
       productType: "credit_purchase",
-      amountCents: 10000,
+      creditPurchaseId: "credit-purchase-1",
+      amountCents: 29900,
       currency: "ZAR",
-    }).success).toBe(false);
+    }).success).toBe(true);
     expect(streamWebhookRequestSchema.safeParse({ uid: 42, status: { state: "ready" } }).success).toBe(false);
     expect(streamWebhookRequestSchema.parse({ uid: "stream-1", status: { state: "ready" } })).toEqual({ uid: "stream-1", status: { state: "ready" } });
   });

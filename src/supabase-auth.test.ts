@@ -37,7 +37,7 @@ describe("Supabase Send Email hook payload", () => {
   it("builds a Supabase verification link without exposing the token hash in client code", () => {
     const [email] = buildAuthEmails(payload);
     expect(email.to).toBe("person@example.com");
-    expect(email.subject).toBe("Confirm your Veld Archive account");
+    expect(email.subject).toBe("Confirm your Stockvel account");
     expect(email.html).toContain("https://example.supabase.co/auth/v1/verify");
     expect(email.html).toContain("token=signed-token-hash");
     expect(email.text).toContain("Open this link to continue");
@@ -50,7 +50,7 @@ describe("Supabase Send Email hook payload", () => {
       CLOUDFLARE_ACCOUNT_ID: "account-id",
       CLOUDFLARE_EMAIL_API_TOKEN: "scoped-token",
       EMAIL_FROM: "noreply@example.com",
-      EMAIL_FROM_NAME: "Veld Archive",
+      EMAIL_FROM_NAME: "Stockvel",
     }, fetcher);
     expect(fetcher).toHaveBeenCalledWith(
       "https://api.cloudflare.com/client/v4/accounts/account-id/email/sending/send",

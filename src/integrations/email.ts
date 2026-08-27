@@ -31,7 +31,7 @@ export class CloudflareEmailAdapter implements EmailProvider {
       subject: message.subject,
       text: message.text,
       html: `<p>${message.text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll("\n", "<br />")}</p>`,
-      headers: { "X-Veld-Notification": message.idempotencyKey },
+      headers: { "X-Stockvel-Notification": message.idempotencyKey },
     });
     return { id: result.messageId ?? message.idempotencyKey, provider: this.name, accepted: true };
   }

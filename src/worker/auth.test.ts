@@ -30,6 +30,16 @@ describe("verified identity exchange", () => {
     expect(cookie).not.toContain("Domain=");
   });
 
+  it("keeps the active session host-scoped when a legacy dashboard cookie domain remains", () => {
+    const response = responseWithSession(new Response("ok"), "session.token", { APP_ENV: "production", AUTH_COOKIE_DOMAIN: "veld-archive.pages.dev" } as never);
+    const cookies = (response.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie?.() ?? [response.headers.get("Set-Cookie") ?? ""];
+    const activeCookie = cookies.find((cookie) => cookie.includes("va_session=session.token")) ?? "";
+    const legacyExpiry = cookies.find((cookie) => cookie.includes("Domain=veld-archive.pages.dev")) ?? "";
+    expect(activeCookie).toContain("Secure");
+    expect(activeCookie).not.toContain("Domain=");
+    expect(legacyExpiry).toContain("Max-Age=0");
+  });
+
   it("keeps local demo sessions usable on plain HTTP across browser engines", () => {
     const response = responseWithSession(new Response("ok"), "session.token", { APP_ENV: "demo", APP_PUBLIC_URL: "http://127.0.0.1:8788" } as never);
     const cookie = response.headers.get("Set-Cookie") ?? "";
@@ -102,9 +112,10 @@ describe("verified identity exchange", () => {
   });
 
   it("accepts native app sessions through the dedicated authorization scheme", () => {
-    expect(sessionTokenFromRequest(new Request("https://api.example.test/me", { headers: { Authorization: "VeldSession session-id.token-secret" } }))).toBe("session-id.token-secret");
+    expect(sessionTokenFromRequest(new Request("https://api.example.test/me", { headers: { Authorization: "StockvelSession session-id.token-secret" } }))).toBe("session-id.token-secret");
+    expect(sessionTokenFromRequest(new Request("https://api.example.test/me", { headers: { Authorization: "VeldSession legacy-session.token-secret" } }))).toBe("legacy-session.token-secret");
     expect(sessionTokenFromRequest(new Request("https://api.example.test/me", { headers: { Authorization: "Bearer external.jwt.token" } }))).toBeNull();
-    expect(sessionTokenFromRequest(new Request("https://api.example.test/me", { headers: { Cookie: "va_session=cookie-session.token", Authorization: "VeldSession header-session.token" } }))).toBe("cookie-session.token");
+    expect(sessionTokenFromRequest(new Request("https://api.example.test/me", { headers: { Cookie: "va_session=cookie-session.token", Authorization: "StockvelSession header-session.token" } }))).toBe("cookie-session.token");
   });
 
   it("accepts a valid HS256 identity token and rejects a tampered token", async () => {

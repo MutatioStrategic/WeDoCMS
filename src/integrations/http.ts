@@ -16,6 +16,47 @@ export class IntegrationError extends Error {
 
 export type HttpClient = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
+/**
+ * A payment session must not leave a buyer-facing request open indefinitely
+ * when the PSP or its network path is unavailable. It returns control to the
+ * caller so the buyer can see a recovery action instead of a stuck checkout.
+ */
+export const PROVIDER_REQUEST_TIMEOUT_MS = 15_000;
+
+export async function fetchWithTimeout(
+  fetcher: HttpClient,
+  input: RequestInfo | URL,
+  init: RequestInit,
+  provider: string,
+  timeoutMs = PROVIDER_REQUEST_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const upstreamSignal = init.signal;
+  const abortForUpstreamSignal = () => controller.abort(upstreamSignal?.reason);
+  if (upstreamSignal?.aborted) abortForUpstreamSignal();
+  else upstreamSignal?.addEventListener("abort", abortForUpstreamSignal, { once: true });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    return await fetcher(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (timedOut) {
+      throw new IntegrationError(provider, `Provider request timed out after ${Math.ceil(timeoutMs / 1_000)} seconds`, {
+        status: 504,
+        retryable: true,
+      });
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    upstreamSignal?.removeEventListener("abort", abortForUpstreamSignal);
+  }
+}
+
 export async function readJson<T>(response: Response, provider: string): Promise<T> {
   const text = await response.text();
   let body: unknown = undefined;

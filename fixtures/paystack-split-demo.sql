@@ -8,7 +8,7 @@ INSERT OR REPLACE INTO payout_wallets (
   verified_at, provider_verification_reference, metadata_json
 ) VALUES (
   'wallet-demo-paystack-60', 'demo-contributor', 'paystack',
-  'ACCT_demo_artist_60', 'Veld Studio', '0000', 'ZAR', 60, 'verified',
+  'ACCT_demo_artist_60', 'Stockvel Studio', '0000', 'ZAR', 60, 'verified',
   CURRENT_TIMESTAMP, 'demo-provider-verification-60', '{"fixture":true}'
 );
 

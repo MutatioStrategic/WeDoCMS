@@ -123,6 +123,9 @@ const runNpx = (args, options = {}) => process.platform === "win32"
   ? execFileSync(process.execPath, [npxCliPath, ...args], options)
   : execFileSync(npx, args, options);
 runNpx(["wrangler", "d1", "migrations", "apply", "veld-archive", "--local", "--persist-to", persistPath], { cwd: process.cwd(), stdio: "pipe" });
+runNpx(["wrangler", "d1", "execute", "veld-archive", "--local", "--persist-to", persistPath, "--command",
+  "INSERT OR IGNORE INTO buyer_credit_transactions (id, organization_id, buyer_id, transaction_type, credits, amount_cents, reference_type, reference_id, idempotency_key) VALUES ('zoho-smoke-credit', 'org-demo', 'demo-admin', 'adjustment', 1000, 0, 'smoke', 'zoho-smoke', 'zoho-smoke-credit')"],
+  { cwd: process.cwd(), stdio: "pipe" });
 const workerArgs = [
   "wrangler", "dev", "--local", "--ip", "127.0.0.1", "--port", String(workerPort), "--persist-to", persistPath,
   "--var", `APP_PUBLIC_URL:${workerUrl}`,
@@ -239,10 +242,14 @@ try {
   const buyerAgreementVersion = agreements.body?.documents?.find((document) => document?.type === "buyer")?.version;
   const paymentAgreementVersion = agreements.body?.documents?.find((document) => document?.type === "payment")?.version;
   assert(agreements.response.ok && buyerAgreementVersion && paymentAgreementVersion, "buyer and payment agreement versions were not available for checkout");
-  const checkout = await call("/api/checkout", { method: "POST", headers: mutationHeaders, body: JSON.stringify({ assetId: smokeAssetId, licenceType: "advertising", territory: "South Africa", durationDays: 90, buyerAgreementVersion, paymentAgreementVersion, acceptBuyerTerms: true }) });
+  const checkout = await call("/api/checkout", { method: "POST", headers: mutationHeaders, body: JSON.stringify({ assetId: smokeAssetId, licenceType: "advertising", territory: "South Africa", durationDays: 90, buyerAgreementVersion, paymentAgreementVersion, acceptBuyerTerms: true, includeCustomBuying: false }) });
   assert(checkout.response.status === 201 && checkout.body.licenceId, `licence checkout failed: ${checkout.response.status}`);
-  const payment = await paymentWebhook({ provider: "mock", eventId: "zoho-smoke-payment-1", type: "payment_succeeded", licenceId: checkout.body.licenceId, paymentReference: "zoho-smoke-reference-1", amountCents: checkout.body.priceCents, currency: "ZAR" });
-  assert(payment.response.ok && payment.body.accepted, `signed payment webhook failed: ${payment.response.status}`);
+  if (checkout.body.paid) {
+    assert(checkout.body.accessMode === "credits" && checkout.body.creditsSpent > 0, "credit checkout did not settle the licence");
+  } else {
+    const payment = await paymentWebhook({ provider: "mock", eventId: "zoho-smoke-payment-1", type: "payment_succeeded", licenceId: checkout.body.licenceId, paymentReference: "zoho-smoke-reference-1", amountCents: checkout.body.priceCents, currency: "ZAR" });
+    assert(payment.response.ok && payment.body.accepted, `signed payment webhook failed: ${payment.response.status}`);
+  }
 
   const crmQueue = await call(`/api/campaigns/${campaignId}/integrations/zoho/crm`, { method: "POST", headers: mutationHeaders, body: JSON.stringify({}) });
   assert([200, 202].includes(crmQueue.response.status) && crmQueue.body.jobId, `CRM route did not expose a job: ${crmQueue.response.status} ${JSON.stringify(crmQueue.body)}`);

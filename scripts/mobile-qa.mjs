@@ -35,7 +35,7 @@ try {
     await page.getByRole("button", { name: "Community", exact: true }).click();
     await expect(page.getByRole("heading", { name: /Make the archive/ })).toBeVisible();
     await page.getByRole("button", { name: "Open navigation" }).click();
-    await page.getByRole("button", { name: "Veld Archive home" }).click();
+    await page.getByRole("button", { name: "Stockvel home" }).click();
     const assetCards = page.locator("button.asset-card");
     if (await assetCards.count()) {
       await expect(assetCards.first()).toBeVisible();

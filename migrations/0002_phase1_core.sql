@@ -113,4 +113,4 @@ INSERT OR IGNORE INTO contributor_profiles (user_id, contributor_type, location,
 VALUES ('demo-contributor', 'agency', 'Cape Town, Western Cape', 'verified');
 
 INSERT OR IGNORE INTO users (id, email, display_name, role, onboarding_status)
-VALUES ('demo-admin', 'editor@veldarchive.local', 'Veld Editorial Desk', 'admin', 'approved');
+VALUES ('demo-admin', 'editor@stockvel.local', 'Stockvel Editorial Desk', 'admin', 'approved');

@@ -1,4 +1,4 @@
-# Veld Archive UX process flows
+# Stockvel UX process flows
 
 These flows define the minimum product journeys covered by browser QA. The solid path must work in the live read-only demo; authenticated write steps require the Worker and D1 resources.
 
@@ -25,16 +25,16 @@ flowchart LR
   A[Landing page] --> B[Enter a story brief]
   B --> C[Search archive]
   C --> D{Content API available?}
-  D -->|yes| E[Keyword or semantic results]
+  D -->|yes| E[Deterministic title and description results]
   D -->|no| F[Demo archive fallback]
   E --> G[Filter media type]
   F --> G
   G --> H[Open asset evidence]
-  H --> I[Inspect rights, provenance, match signals]
+  H --> I[Inspect rights, provenance, and metadata match evidence]
   I --> J[Buy/licence media or save lightbox]
 ```
 
-Video previews show a distinct `VELD ARCHIVE · PREVIEW / NOT LICENSED FOR USE`
+Video previews show a distinct `STOCKVEL · PREVIEW / NOT LICENSED FOR USE`
 watermark. The Worker never falls back to an original video for an anonymous or
 unpaid viewer; once a paid entitlement is confirmed, the authenticated viewer
 can play the original through the preview route and download it from the
@@ -62,7 +62,7 @@ flowchart TD
    confirmation whether an account exists. The app does not store reset tokens
    or passwords.
 3. The visitor follows the single-use link back to the web origin or the native
-   `veldarchive://auth/recovery` route. The app shows only the new-password form
+   `stockvel://auth/recovery` route. The app shows only the new-password form
    while Supabase holds the verified recovery session.
 4. After the password is updated, the recovery session is signed out and the
    visitor is returned to sign-in. Expired or unavailable links show the provider
@@ -81,21 +81,27 @@ flowchart TD
    Supabase project. The entered number remains available for correction and
    retry.
 4. After verification, the Worker accepts only a South African phone claim
-   and exchanges the verified Supabase identity for the normal Veld session.
+   and exchanges the verified Supabase identity for the normal Stockvel session.
 
 ## Buyer licence validation
 
-1. A signed-in buyer opens any published asset from Explore, Search, or the Buyer ROI workspace.
-2. The buyer chooses a licence type, territory, and duration, then runs the
-   server-side validation check.
-3. The Worker returns approval, rights-scope, model-release, and property-release
-   checks plus the current price. The UI shows every check before any request
-   is created.
-4. If a check fails, the buyer can change the intended use or open the
-   resolution desk. If all checks pass, the buyer reads and explicitly accepts
-   the versioned Buyer Licence and Payment Terms. The purchase action then
-   creates or reuses the pending licence contract and immediately opens hosted
-   payment; this is not a manual access request.
+1. An authenticated buyer, or a seller/editor acting as a buyer, opens any
+   published asset from Explore, Search, or the Buyer ROI workspace.
+2. The first purchase card shows the access decision in plain language:
+   **Included with your active Stockvel membership — no credits required**, or
+   **Buy this asset with X credits**. Credits unlock downloads/streams and the
+   validity starts at purchase. When the seller includes the asset in
+   membership, the buyer sees the alternative **Included with an active Stockvel
+   membership** path.
+3. The Worker checks whether the seller included the asset in the Stockvel monthly
+   membership. An active membership grants included assets without spending
+   credits. Buyers without an active membership use the seller-listed credit
+   amount for that asset; an active membership does not make a seller-excluded
+   asset free.
+4. The buyer chooses a licence type, territory, and duration only after the
+   credit access card is visible, then runs the server-side validation check.
+   The UI shows approval, rights-scope, model-release, and property-release
+   checks before a request is created.
 
 5. The account purchase history shows pending contracts with a clear “Continue
    to payment” action. Retrying the same purchase reuses the existing pending
@@ -103,17 +109,32 @@ flowchart TD
    unavailable, the pending contract remains visible and the UI explains that
    no charge was made.
 
-6. The buyer may enable Auto-approval for their own new requests by checking
+6. If the buyer has insufficient credits, the screen shows the available and
+   required balance and one **Buy X credits** action. No licence is created
+   until the credit wallet is funded and the buyer retries.
+
+7. If checks pass, the buyer reads and explicitly accepts the versioned Buyer
+   Licence and Payment Terms. Membership-included access is recorded without a
+   credit charge; non-member access atomically spends the seller-listed
+   credits and records a paid licence. Retrying remains idempotent.
+
+8. The buyer may enable Auto-approval for their own new requests by checking
    the sign-off acknowledgement and saving it. Auto-approval applies only
    after the same server-side rights and release checks pass; it does not
    bypass pricing, payment, or original-file access. The setting is auditable
    and can be revoked at any time.
 
-7. The buyer sees a purchase description for the selected licence type, the
-   territory and duration being priced, the amount or custom-quote path, and
-   the fact that a verified payment webhook is required before original access.
-   The CEO/admin ledger shows the buyer sign-off, terms version, revocation,
-   auto-approved requests, and paid versus unpaid status for the organisation.
+9. Custom buying remains available in the seller/admin listing section, but it
+   is hidden from the buyer path until the buyer enables **Include custom
+   buying** in the Search bar. An opted-in custom listing shows its seller-
+   listed credit amount and uses the same rights checks and credit checkout;
+   the buyer is not shown a set of Rand offers or negotiation controls.
+
+10. The buyer sees a purchase description for the selected licence type, the
+    territory and duration being checked, the credit amount, and the fact that
+    original access follows the recorded entitlement. The CEO/admin ledger
+    shows the buyer sign-off, terms version, revocation, auto-approved requests,
+    and paid versus unpaid status for the organisation.
 
 The unavailable-backend state explains whether a pending licence was already
 created, confirms that no charge was made, and offers a retry. A missing
@@ -141,19 +162,21 @@ published-asset state sends the buyer back to approved archive search.
 3. The membership remains pending until the signed payment webhook confirms
    payment. A confirmed payment activates the membership and records the next
    charge date; a failed payment shows an attention state.
-4. The buyer enters a whole number of credits and opens hosted checkout. Each
-   credit costs R100, and credits are added to the buyer ledger only after the
-   signed payment webhook confirms payment.
+4. The buyer sees the standard credit product first: **100 credits — 12 months
+   access**. The buyer can purchase credits through hosted checkout; credits
+   are added to the buyer ledger only after the signed payment webhook confirms
+   payment. Any Rand amount is a single optional display-only reference, never
+   the buyer-facing product price.
 5. The buyer can cancel a pending or active membership. Credit balances and
-   transaction history remain visible for future custom licences agreed with
-   artists.
+   transaction history remain visible for seller-listed media access and
+   opt-in custom buying.
 
 The unavailable-backend state does not show cached money or credit balances and
 offers a retry. Checkout routes fail closed when the payment provider is not
 configured, and payment success is never inferred from the browser redirect.
 The explicitly marked demo environment uses a server-side simulated provider
-for licence walkthroughs only; production licences still require a signed
-provider webhook before they become paid.
+for credit and licence walkthroughs only; production credit purchases still
+require a signed provider webhook before credits are added to the wallet.
 
 ## Signup, introductory photos, and access choice
 
@@ -177,12 +200,12 @@ provider webhook before they become paid.
 
 ## Contributor to publication
 
-The native Expo route begins with seller account creation by email confirmation or phone OTP. Email confirmation returns through `veldarchive://auth/confirmed`; the verified email or phone identity is exchanged for a short-lived Veld API session and a new seller account is provisioned as a contributor. Existing memberships are never upgraded from a client-provided seller intent. Phone-only accounts use the verified phone as the identity and must collect a real contact email before workflows that require email delivery.
+The native Expo route begins with seller account creation by email confirmation or phone OTP. Email confirmation returns through `stockvel://auth/confirmed`; the verified email or phone identity is exchanged for a short-lived Stockvel API session and a new seller account is provisioned as a contributor. Existing memberships are never upgraded from a client-provided seller intent. Phone-only accounts use the verified phone as the identity and must collect a real contact email before workflows that require email delivery.
 
 ```mermaid
 sequenceDiagram
   participant C as Contributor
-  participant UI as Veld UI
+  participant UI as Stockvel UI
   participant API as Worker API
   participant DB as D1
   C->>UI: Complete profile and seller tender
@@ -198,7 +221,8 @@ sequenceDiagram
   UI->>API: Save reviewed metadata revision
   Note over C,API: Later corrections never invoke AI again; retries reuse the original upload job
   C->>UI: Approve reviewed revision
-  API->>DB: Add approved revision to FTS5 and queue Vectorize upsert
+  API->>DB: Add approved revision to the title/description FTS5 search index
+  API->>DB: Keep any background vector job separate from live buyer search
   API-->>UI: Published; index current or pending
   C->>UI: Check contributor insights
 ```
@@ -211,7 +235,7 @@ When a seller submits media, the upload form asks plain-language questions about
 permission to list/licence the work, recognizable people, and private property or
 locations. “Model release” means written permission from a recognizable person
 for uses such as commercial or advertising use; it is not a seller-verification
-button. “Pending” means the evidence still needs Veld review. Sellers can report
+button. “Pending” means the evidence still needs Stockvel review. Sellers can report
 editorial-only or unresolved permissions, but only an editor/admin can mark
 rights or release evidence as verified. The same explanations remain available
 when a seller edits an existing record.
@@ -244,16 +268,46 @@ flowchart LR
   F --> H[Review, mediate, or appeal]
 ```
 
+## Buyer media studio: quick photo edit and campaign handoff
+
+```mermaid
+flowchart LR
+  A[Open Media studio] --> B[Choose an archive photo or upload local photos]
+  B --> C{Choose a workflow}
+  C -->|quick edit| D[Crop, resize, filter, and optional marketing text]
+  D --> E[Save or download PNG/JPEG]
+  C -->|campaign| F[Name campaign and add one or more photos]
+  F --> G[Drag content blocks and edit campaign text]
+  G --> H[Preview in a sandbox]
+  H --> I[Download HTML, CSS, images, and manifest as ZIP]
+  E --> J{Archive access required?}
+  J -->|yes| K[Authenticated original download]
+  J -->|no| L[Download local browser copy]
+```
+
+The campaign selection is intentionally not capped at four photos. Empty,
+preview-unavailable, and access-blocked states remain explicit. Archive
+originals use the authenticated original route; local uploads use temporary
+browser object URLs and are never written to the archive. The campaign preview
+is rendered in a sandbox and the export boundary strips scripts and unsafe
+event attributes before creating the ZIP.
+
 ## QA acceptance criteria
 
 - Every navigation control changes view or gives a clear prerequisite message.
 - Search submits on Enter and button click; suggestion chips never submit the form accidentally.
 - Search results remain useful when the read-only API is unavailable.
+- Live search uses approved title and description metadata only; exact title,
+  contains, and bounded typo-tolerant fuzzy matches remain deterministic, and
+  no semantic or image-AI result is mixed into the buyer result set.
+- A no-result response explains the empty state and may offer alternatives
+  derived from stored metadata; each alternative is an explicit, non-submitting
+  action.
 - Asset cards open a detail/evidence modal and the modal closes by close button, backdrop, and Escape.
 - Buyer checkout stays in the asset evidence flow: validation, versioned terms, hosted payment, pending retry, and webhook-confirmed delivery are all explicit.
 - Seller surfaces expose one primary upload action, preserve media/metadata on recoverable errors, and report that approval is required before search visibility.
 - Protected workflows explain sign-in and backend requirements rather than silently failing.
 - Form validation prevents incomplete submissions and successful actions show confirmation state.
-- AI may classify a visible setting such as `market_scene`; only seller, EXIF, or editor evidence may populate geographic location fields.
+- AI may classify a visible setting such as `market_scene`; only seller, EXIF, or editor evidence may populate geographic location fields. Those pixel-derived fields are not used to rank live buyer search.
 - Approval is unavailable until the current metadata revision is explicitly reviewed, and buyer search ignores stale revisions.
 - The top-admin ledger lists user-account and image approval/sign-off events with actor, subject, decision, resource, source, and integrity state.

@@ -287,23 +287,50 @@ describe("photo AI indexing", () => {
     expect(ranked[0]?.id).toBe("market");
   });
 
-  it("keeps enough D1 bind slots after the Vectorize candidate query", async () => {
-    const query = vi.fn(async () => ({ count: 0, matches: [] }));
+  it("does not invoke AI or Vectorize for a live metadata search", async () => {
+    const vectorQuery = vi.fn(async () => ({ count: 0, matches: [] }));
+    const aiRun = vi.fn(async () => ({ data: [[0.1, 0.2, 0.3]] }));
     const all = vi.fn(async () => ({ results: [] }));
     const prepare = vi.fn(() => ({ bind: vi.fn(() => ({ all })) }));
     const result = await searchPhotoIndex({
       DB: { prepare },
-      AI: { run: vi.fn(async () => ({ data: [[0.1, 0.2, 0.3]] })) },
-      PHOTO_INDEX: { query },
+      AI: { run: aiRun },
+      PHOTO_INDEX: { query: vectorQuery },
       PHOTO_INDEX_NAMESPACE: "published-photos-v1",
     } as unknown as PhotoPipelineBindings, "forest path", { kind: "image", status: "published" });
 
-    expect(query).toHaveBeenCalledWith([0.1, 0.2, 0.3], {
-      topK: 80,
-      returnMetadata: "none",
-      namespace: "published-photos-v1",
-    });
-    expect(result).toMatchObject({ usedVectorIndex: true, mode: "semantic-preview" });
+    expect(aiRun).not.toHaveBeenCalled();
+    expect(vectorQuery).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ usedVectorIndex: false, mode: "keyword" });
+    expect(result.stages.map((stage) => stage.stage)).toEqual(["metadata", "fuzzy"]);
+  });
+
+  it("keeps live relevance scoped to title and description metadata", async () => {
+    const all = vi.fn(async () => ({ results: [] }));
+    const binds: unknown[][] = [];
+    const prepare = vi.fn(() => ({ bind: vi.fn((...values: unknown[]) => { binds.push(values); return { all }; }) }));
+    await searchPhotoIndex({ DB: { prepare } } as unknown as PhotoPipelineBindings, "forest path", { kind: "image", status: "published" });
+
+    const sql = (prepare.mock.calls as unknown as unknown[][]).map(([statement]) => String(statement ?? ""));
+    expect(sql[0]).toContain("a.title");
+    expect(sql[0]).toContain("a.description");
+    expect(sql[0]).not.toContain("a.caption");
+    expect(sql[0]).not.toContain("a.ocr_text");
+    expect(sql.find((statement) => statement.includes("asset_search_fts MATCH"))).toContain("bm25(asset_search_fts, 0, 0, 0, 3.2, 1.6, 0, 0, 0, 0, 0, 0, 0, 0)");
+    expect(String(binds.find((values) => String(values[0] ?? "").includes("{title description}"))?.[0] ?? "")).toContain("{title description}");
+  });
+
+  it("rejects substring-only metadata candidates from live results", async () => {
+    const all = vi.fn(async () => ({ results: [
+      { id: "location", title: "Coastal location", description: "A quiet shoreline" },
+      { id: "cat", title: "Cat portrait", description: "A close-up portrait" },
+      { id: "cats", title: "Cats in a garden", description: "Two domestic cats outdoors" },
+    ] }));
+    const prepare = vi.fn(() => ({ bind: vi.fn(() => ({ all })) }));
+
+    const result = await searchPhotoIndex({ DB: { prepare } } as unknown as PhotoPipelineBindings, "cat", { kind: "image", status: "published" });
+
+    expect(result.rows.map((row) => row.id)).toEqual(["cat", "cats"]);
   });
 
   it("excludes demo assets from production search filters", async () => {

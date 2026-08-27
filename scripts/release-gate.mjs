@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const dist = fileURLToPath(new URL("../dist/", import.meta.url));
 const forbidden = [
-  { pattern: /Veld demo archive/i, label: "demo contributor" },
+  { pattern: /Stockvel demo archive/i, label: "demo contributor" },
   { pattern: /Demo fallback record/i, label: "demo fallback metadata" },
   { pattern: /asset-demo-/i, label: "demo asset identifier" },
   { pattern: /replace-with-(your-)?/i, label: "placeholder configuration" },

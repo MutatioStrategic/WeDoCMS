@@ -35,7 +35,7 @@ export function StakeholderDiagrams() {
     <section className="stakeholder-hero">
       <span className="section-kicker">STAKEHOLDER SYSTEM OVERVIEW</span>
       <h1>One trusted system.<br /><em>Many ways to win.</em></h1>
-      <p>Veld connects sellers, buyers, editors and payment providers around a single promise: make visual media easier to find, safer to license and more valuable to the people who create it.</p>
+      <p>Stockvel connects sellers, buyers, editors and payment providers around a single promise: make visual media easier to find, safer to license and more valuable to the people who create it.</p>
       <div className="stakeholder-jump-list" aria-label="Diagram sections">
         <a href="#system-map">System map</a><a href="#seller-journey">Seller journey</a><a href="#buyer-flow">Buyer and payout</a><a href="#trust-layer">Trust layer</a><a href="#asset-flywheel">Asset flywheel</a>
       </div>
@@ -63,7 +63,7 @@ export function StakeholderDiagrams() {
             <span className="diagram-lane-label">CLOUDFLARE CORE</span>
             <FlowNode title="Worker API" detail="One secure orchestration layer" tone="ink" />
             <div className="architecture-service-grid">
-              <FlowNode title="Discovery" detail="Keyword + semantic" tone="blue" compact />
+              <FlowNode title="Discovery" detail="Approved metadata" tone="blue" compact />
               <FlowNode title="Rights + checkout" detail="Validate before payment" tone="blue" compact />
               <FlowNode title="Media + campaigns" detail="Originals to derivatives" tone="blue" compact />
               <FlowNode title="Trust + audit" detail="Evidence and resolution" tone="blue" compact />
@@ -73,7 +73,7 @@ export function StakeholderDiagrams() {
           <div className="architecture-column">
             <span className="diagram-lane-label">DATA AND PROVIDERS</span>
             <FlowNode title="D1 + R2" detail="Application data and private media" tone="sand" compact />
-            <FlowNode title="Vectorize + queues" detail="AI search and async work" tone="sand" compact />
+            <FlowNode title="Vectorize + queues" detail="Background enrichment and async work" tone="sand" compact />
             <FlowNode title="Paystack + identity" detail="Settlement and sign-in" tone="green" compact />
             <FlowNode title="Stream + verification" detail="Video and seller checks" tone="green" compact />
           </div>
@@ -95,7 +95,7 @@ export function StakeholderDiagrams() {
           <FlowArrow />
           <FlowNode title="Earn" detail="Paystack split + insights" tone="green" />
         </div>
-        <div className="stakeholder-callout stakeholder-callout-blue"><strong>The important distinction:</strong><span>the seller remains the licensor; Veld is the listing, checkout, delivery and record-keeping intermediary.</span></div>
+        <div className="stakeholder-callout stakeholder-callout-blue"><strong>The important distinction:</strong><span>the seller remains the licensor; Stockvel is the listing, checkout, delivery and record-keeping intermediary.</span></div>
       </DiagramCard>
 
       <div id="buyer-flow" className="stakeholder-anchor" />

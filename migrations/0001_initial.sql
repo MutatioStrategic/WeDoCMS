@@ -82,10 +82,10 @@ CREATE INDEX IF NOT EXISTS idx_assets_kind ON assets(kind);
 CREATE INDEX IF NOT EXISTS idx_licences_asset ON licences(asset_id);
 
 INSERT OR IGNORE INTO users (id, email, display_name, role)
-VALUES ('demo-contributor', 'studio@veldarchive.local', 'Veld Studio', 'contributor');
+VALUES ('demo-contributor', 'studio@stockvel.local', 'Stockvel Studio', 'contributor');
 
 INSERT OR IGNORE INTO users (id, email, display_name, role)
-VALUES ('demo-buyer', 'creative@veldarchive.local', 'Demo Creative Team', 'buyer');
+VALUES ('demo-buyer', 'creative@stockvel.local', 'Demo Creative Team', 'buyer');
 
 INSERT OR IGNORE INTO assets (
   id, owner_id, kind, status, title, description, caption, province, city, locality, landmark,

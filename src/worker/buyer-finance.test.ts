@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { creditPurchaseAmountCents, isCalendarDate, nextMonthlyChargeDate } from "./buyer-finance";
 
 describe("buyer finance rules", () => {
-  it("prices each archive credit at R100", () => {
-    expect(creditPurchaseAmountCents(1)).toBe(10000);
-    expect(creditPurchaseAmountCents(25)).toBe(250000);
+  it("uses the configured provider reference for credit membership checkout", () => {
+    expect(creditPurchaseAmountCents(100)).toBe(29900);
+    expect(creditPurchaseAmountCents(200)).toBe(59800);
   });
 
   it("rejects invalid or fractional credit quantities", () => {

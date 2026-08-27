@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Auth0Provider, useAuth0, type Auth0ContextInterface } from "@auth0/auth0-react";
 import { type Session as SupabaseSession, type SupabaseClient } from "@supabase/supabase-js";
-import { archiveDomain, type AccountLifecycle, type Asset, type BuyerAnalytics, type CommunityOverview, type ContributorAnalytics, type ContributorPerformance, type CreatorProfile, type DiscoveryResponse, type LicenceProduct, type LicenceType, type MonetizationModel, type PortfolioCollection, type SavedSearch, type SearchResponse, type TakedownReason, type UserLightbox, type WorkflowStage } from "./shared";
+import { archiveDomain, MEDIA_MEMBERSHIP_CREDITS, MEDIA_MEMBERSHIP_DURATION_DAYS, mediaCreditReferenceAmountCents, mediaMembershipDurationLabel, type AccountLifecycle, type Asset, type BuyerAnalytics, type CommunityOverview, type ContributorAnalytics, type ContributorPerformance, type CreatorProfile, type DiscoveryResponse, type LicenceProduct, type LicenceType, type MonetizationModel, type PortfolioCollection, type SavedSearch, type SearchResponse, type TakedownReason, type UserLightbox, type WorkflowStage } from "./shared";
 import { friendlySupabasePhoneError } from "./phone";
 import { friendlyIdentityExchangeError, friendlySupabaseAuthError } from "./supabase-auth";
 import { getSupabaseClient } from "./supabase-client";
@@ -14,7 +14,7 @@ import { StakeholderDiagrams } from "./stakeholder-diagrams";
 import { WordPressIntegrationPanel } from "./wordpress-integration";
 import type { BrandKit, CampaignBrief, CampaignPlatform, CampaignRecommendation, CampaignStage } from "./campaign-intelligence";
 import { cropPresets, defaultEditRecipe, derivativeForPreset, fitCrop, safeZonePercent, type CropPreset, type EditRecipe } from "./campaign-editor";
-import { Icon, type IconName } from "./ui";
+import { Icon, StockvelLogo, type IconName } from "./ui";
 import { buyerAgreement, paymentDisclosure, type MarketplaceAgreement } from "./legal/agreements";
 
 declare global {
@@ -74,7 +74,8 @@ function canAccessView(view: View, role: string | undefined, authenticated: bool
   if (!authenticated) return false;
   if (role === "admin") return true;
   if (view === "account") return true;
-  if (view === "campaigns" || view === "buyer" || view === "studio") return role === "buyer";
+  if (view === "buyer") return ["buyer", "contributor", "editor"].includes(role ?? "");
+  if (view === "campaigns" || view === "studio") return role === "buyer";
   if (view === "contributor") return role === "contributor" || role === "editor";
   if (view === "review" || view === "governance" || view === "wordpress") return role === "editor";
   return false;
@@ -88,6 +89,7 @@ const configuredValue = (value: string | undefined): value is string => Boolean(
 const auth0Configured = configuredValue(auth0Domain) && configuredValue(auth0ClientId);
 const auth0Scopes = "openid profile email";
 const demoMode = import.meta.env.MODE === "demo" || import.meta.env.VITE_DEMO_MODE === "true";
+const showCurrencyReference = String(import.meta.env.VITE_SHOW_CURRENCY_REFERENCE ?? "").toLowerCase() === "true";
 const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.trim();
 const supabaseKey = ((import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string | undefined) ?? (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined))?.trim();
 const supabaseConfigured = configuredValue(supabaseUrl) && configuredValue(supabaseKey);
@@ -134,12 +136,14 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
   const [query, setQuery] = useState("");
   const [activeQuery, setActiveQuery] = useState("");
   const [assets, setAssets] = useState<Asset[]>([]);
+  const [searchSuggestions, setSearchSuggestions] = useState<string[]>([]);
   const [assetsLoading, setAssetsLoading] = useState(true);
   const [searchRequestId, setSearchRequestId] = useState(0);
   const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
   const [filter, setFilter] = useState<"all" | "image" | "video">("all");
   const [sort, setSort] = useState<"relevance" | "newest" | "popular" | "random">("relevance");
   const [orientation, setOrientation] = useState<"all" | "landscape" | "portrait" | "square">("all");
+  const [includeCustomBuying, setIncludeCustomBuying] = useState(false);
   const [notice, setNotice] = useState("Live archive results are loaded from the verified content service.");
   const [reviewItems, setReviewItems] = useState<Asset[]>([]);
   const [analyticsConsent, setAnalyticsConsent] = useState(false);
@@ -197,7 +201,7 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ ...(auth0Organization ? { organizationId: auth0Organization } : {}), ...(window.sessionStorage.getItem("veld.account-intent") === "seller" ? { accountIntent: "seller" } : {}) }),
+        body: JSON.stringify({ ...(auth0Organization ? { organizationId: auth0Organization } : {}), ...(window.sessionStorage.getItem("stockvel.account-intent") === "seller" ? { accountIntent: "seller" } : {}) }),
       }))
       .then(async (response) => {
         if (!response.ok) throw new Error("Identity exchange failed");
@@ -208,7 +212,7 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
         setSessionUser(data.user);
         setCsrfToken(data.csrfToken);
         if (data.user.role === "contributor") setView("contributor");
-        window.sessionStorage.removeItem("veld.account-intent");
+        window.sessionStorage.removeItem("stockvel.account-intent");
         setNotice(`Signed in to ${data.user.organizationName}.`);
       })
       .catch(() => {
@@ -222,7 +226,7 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
     if (!session?.access_token || supabaseExchangeAttempted.current) return;
     supabaseExchangeAttempted.current = true;
     try {
-      const accountIntent = window.sessionStorage.getItem("veld.account-intent") === "seller" || supabaseAccountIntentRef.current === "seller" ? "seller" : undefined;
+      const accountIntent = window.sessionStorage.getItem("stockvel.account-intent") === "seller" || supabaseAccountIntentRef.current === "seller" ? "seller" : undefined;
       const response = await fetch("/api/auth/exchange", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` }, body: JSON.stringify(accountIntent ? { accountIntent } : {}) });
       const data = await response.json().catch(() => null) as { user?: SessionUser; csrfToken?: string; error?: string } | null;
       if (!response.ok || !data?.user || !data.csrfToken) throw new Error(data?.error ?? "Identity exchange failed");
@@ -230,7 +234,7 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
       setCsrfToken(data.csrfToken);
       const sellerAccessGranted = data.user.role === "contributor";
       if (sellerAccessGranted) setView("contributor");
-      window.sessionStorage.removeItem("veld.account-intent");
+      window.sessionStorage.removeItem("stockvel.account-intent");
       supabaseAccountIntentRef.current = "buyer";
       setSupabaseAccountIntent("buyer");
       setSupabaseAuthOpen(false);
@@ -411,12 +415,13 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
     let loadingTimer: ReturnType<typeof setTimeout> | undefined;
     setAssetsLoading(true);
     const params = new URLSearchParams({ q: activeQuery, kind: filter, status: "published", sort, orientation });
-    fetch(`/api/assets?${params}`, { signal: controller.signal, credentials: "include" })
+    fetch(`/api/search?${params}`, { signal: controller.signal, credentials: "include" })
       .then(async (response) => { if (!response.ok) throw new Error("API unavailable"); return response.json() as Promise<SearchResponse>; })
-      .then((data) => setAssets(data.results.map((asset) => archiveDomain.withMatchExplanation(asset, activeQuery))))
+      .then((data) => { setSearchSuggestions(data.suggestions ?? []); setAssets(data.results.map((asset) => archiveDomain.withMatchExplanation(asset, activeQuery))); })
       .catch(() => {
         if (controller.signal.aborted) return;
         setAssets([]);
+        setSearchSuggestions([]);
         setNotice("The verified content service is unavailable. No fallback media is shown.");
       })
       .finally(() => {
@@ -438,6 +443,13 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
       window.history.replaceState({}, document.title, `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`);
     };
     const listedAsset = assets.find((candidate) => candidate.id === pendingAssetId);
+    if (listedAsset?.monetizationModel === "custom_quote" && !includeCustomBuying) {
+      clearAssetIntent();
+      setPendingAssetPurchase(false);
+      setPendingAssetId(null);
+      setNotice("Enable custom buying in Search to view this seller-listed credit price.");
+      return;
+    }
     if (listedAsset) {
       setSelectedAsset(listedAsset);
       clearAssetIntent();
@@ -446,6 +458,13 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
     void api(`/api/assets/${encodeURIComponent(pendingAssetId)}`).then(async (response) => {
       if (!response.ok) throw new Error("The selected asset is no longer available.");
       const restored = await response.json() as Asset;
+      if (restored.monetizationModel === "custom_quote" && !includeCustomBuying) {
+        setPendingAssetPurchase(false);
+        setPendingAssetId(null);
+        clearAssetIntent();
+        setNotice("Enable custom buying in Search to view this seller-listed credit price.");
+        return;
+      }
       setSelectedAsset(archiveDomain.withMatchExplanation(restored, activeQuery));
       clearAssetIntent();
     }).catch((error) => {
@@ -454,7 +473,7 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
       clearAssetIntent();
       setNotice(error instanceof Error ? error.message : "The selected asset could not be restored.");
     });
-  }, [activeQuery, api, assets, assetsLoading, pendingAssetId, selectedAsset]);
+  }, [activeQuery, api, assets, assetsLoading, includeCustomBuying, pendingAssetId, selectedAsset]);
 
   async function loadReviewQueue() {
     try {
@@ -471,8 +490,8 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
   function chooseSupabaseAccountIntent(intent: "buyer" | "seller"): void {
     supabaseAccountIntentRef.current = intent;
     setSupabaseAccountIntent(intent);
-    if (intent === "seller") window.sessionStorage.setItem("veld.account-intent", "seller");
-    else window.sessionStorage.removeItem("veld.account-intent");
+    if (intent === "seller") window.sessionStorage.setItem("stockvel.account-intent", "seller");
+    else window.sessionStorage.removeItem("stockvel.account-intent");
   }
 
   function navigate(nextView: View) {
@@ -551,6 +570,7 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
   function useDiscoveryQuery(value: string) {
     setQuery(value);
     setActiveQuery(value);
+    setSearchSuggestions([]);
     setAssetsLoading(true);
     setSearchRequestId((current) => current + 1);
     setView("search");
@@ -562,6 +582,7 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
     event.preventDefault();
     const value = query.trim();
     setActiveQuery(value);
+    setSearchSuggestions([]);
     setAssetsLoading(true);
     setSearchRequestId((current) => current + 1);
     trackEvent({ type: "search", query: value });
@@ -569,8 +590,16 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
     setNotice(query.trim() ? `Searching the archive for “${query.trim()}”` : "Showing the latest verified South African media");
   }
 
-  const verifiedCount = useMemo(() => assets.filter((asset) => asset.humanVerified).length, [assets]);
-  function openAsset(asset: Asset) { setSelectedAsset(asset); trackEvent({ type: "asset_view", assetId: asset.id }); }
+  const visibleAssets = useMemo(() => includeCustomBuying ? assets : assets.filter((asset) => asset.monetizationModel !== "custom_quote"), [assets, includeCustomBuying]);
+  const verifiedCount = useMemo(() => visibleAssets.filter((asset) => asset.humanVerified).length, [visibleAssets]);
+  function openAsset(asset: Asset) {
+    if (asset.monetizationModel === "custom_quote" && !includeCustomBuying) {
+      setNotice("Enable custom buying in Search to view this seller-listed credit price.");
+      return;
+    }
+    setSelectedAsset(asset);
+    trackEvent({ type: "asset_view", assetId: asset.id });
+  }
   function openBuyerSignIn(assetId?: string): void {
     chooseSupabaseAccountIntent("buyer");
     if (assetId) {
@@ -608,7 +637,7 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
       return;
     }
     if (auth0) {
-      window.sessionStorage.setItem("veld.account-intent", "seller");
+      window.sessionStorage.setItem("stockvel.account-intent", "seller");
       void auth0.loginWithRedirect({ authorizationParams: { ...(auth0Audience ? { audience: auth0Audience } : {}), ...(auth0Organization ? { organization: auth0Organization } : {}) }, appState: { returnTo: "/contributor" } });
       return;
     }
@@ -667,8 +696,8 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
     <BetterSidebar view={view} navigate={navigate} collapsed={sidebarCollapsed} mobileOpen={mobileSidebarOpen} authenticated={Boolean(sessionUser)} role={sessionUser?.role} onToggleCollapse={() => setSidebarCollapsed((value) => !value)} onCloseMobile={() => setMobileSidebarOpen(false)} />
     <header className="topbar">
       <button type="button" className="better-mobile-menu" aria-label="Open navigation" onClick={() => setMobileSidebarOpen(true)}><Icon name="menu" /></button>
-      <button className="wordmark wordmark-button" onClick={() => navigate("explore")} aria-label="Veld Archive home"><span className="mark">V</span><span>veld<span className="muted">archive</span></span></button>
-      <div className="better-context"><span>VELD ARCHIVE / WORKSPACE</span><strong>{currentViewLabel}</strong></div>
+      <button className="wordmark wordmark-button" onClick={() => navigate("explore")} aria-label="Stockvel home"><StockvelLogo /></button>
+      <div className="better-context"><span>STOCKVEL / WORKSPACE</span><strong>{currentViewLabel}</strong></div>
       <nav className="nav-links" aria-label="Primary navigation"><button onClick={() => navigate("explore")}>Explore</button><button className="stakeholder-nav-link" onClick={() => navigate("stakeholders")}>System overview <span>NEW</span></button><button className="rights-nav-link" onClick={() => navigate("rights")}>Rights guide <span>NEW</span></button><button className="campaign-nav" onClick={() => navigate("campaigns")}>Campaigns <span>3A</span></button><button onClick={() => navigate("contributors")}>Creators</button><button onClick={() => navigate("community")}>Community & collections</button><button className="studio-nav-link" onClick={() => navigate("studio")}>Media studio <span>NEW</span></button><button onClick={() => navigate("wordpress")}>WordPress <span>NEW</span></button><button onClick={() => navigate("contributor")}>Contributor insights</button><button onClick={() => navigate("buyer")}>Buyer ROI</button><button onClick={() => navigate("review")}>Editorial review</button><button className="governance-link" onClick={() => navigate("governance")}>Governance <span>NEW</span></button></nav>
       <div className={`top-actions ${demoMode ? "demo-top-actions" : ""}`}>
         {demoMode && <span className="demo-mode-pill" role="status">DEMO · no real transactions</span>}
@@ -690,27 +719,27 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
     </header>
     {supabase && supabaseAuthOpen && !sessionUser && supabaseAuthMethod === "email" && supabaseConfirmationPendingEmail && <div className="auth-resend" role="status"><span>Confirmation is still pending for this account.</span><button type="button" className="text-button" disabled={supabaseAuthBusy} onClick={() => void resendSupabaseConfirmation()}>{supabaseAuthBusy ? "Sending…" : "Resend confirmation email"}</button></div>}
     {supabase && supabaseAuthOpen && !sessionUser && supabaseAuthMode === "signup" && <p className="auth-intent-note" role="status">{supabaseAccountIntent === "seller" ? "Seller account: complete verification and payout setup before uploading media." : "Buyer account: create an account to keep your selected asset and continue to licence terms."}</p>}
-    {supabase && supabaseAuthOpen && !sessionUser && <section className="auth-panel" aria-label="Supabase authentication"><div><span className="section-kicker">SUPABASE AUTH</span><h2>{supabaseAuthMode === "signup" ? "Create your archive account." : supabaseAuthMode === "forgot" ? "Reset your password." : supabaseAuthMode === "reset" ? "Choose a new password." : "Welcome back."}</h2><p>{supabaseAuthMode === "forgot" ? "Enter your email and we’ll send a secure reset link. For your privacy, the response is the same whether an account exists." : supabaseAuthMode === "reset" ? "Your reset link is verified by Supabase. Set a new password, then sign in again." : supabaseAuthMethod === "phone" ? "Use a one-time SMS code. SMS delivery must be enabled for this Supabase project." : "Email/password authentication is handled by Supabase; Veld receives only the verified access token."}</p></div><form onSubmit={(event) => void submitSupabaseAuth(event)}>{supabaseAuthMessage && <p className={`auth-feedback ${supabaseAuthMessage.tone}`} role={supabaseAuthMessage.tone === "error" ? "alert" : "status"} aria-live="polite">{supabaseAuthMessage.text}</p>}{["signin", "signup"].includes(supabaseAuthMode) && <div className="auth-method-switch" role="group" aria-label="Verification method"><button type="button" className={supabaseAuthMethod === "email" ? "active" : ""} onClick={() => { setSupabaseAuthMethod("email"); setSupabasePhoneCodeSent(false); setSupabaseAuthMessage(null); }}>Email</button><button type="button" className={supabaseAuthMethod === "phone" ? "active" : ""} onClick={() => { setSupabaseAuthMethod("phone"); setSupabasePhoneCodeSent(false); setSupabaseAuthMessage(null); }}>SMS</button></div>}{supabaseAuthMode === "reset" ? <><label>New password<input type="password" autoComplete="new-password" minLength={8} required value={supabasePassword} onChange={(event) => setSupabasePassword(event.target.value)} /></label><label>Confirm new password<input type="password" autoComplete="new-password" minLength={8} required value={supabasePasswordConfirmation} onChange={(event) => setSupabasePasswordConfirmation(event.target.value)} /></label></> : supabaseAuthMethod === "phone" && ["signin", "signup"].includes(supabaseAuthMode) ? <>{supabaseAuthMode === "signup" && <label>Display name<input type="text" autoComplete="name" required value={supabaseDisplayName} onChange={(event) => setSupabaseDisplayName(event.target.value)} /></label>}<label>Phone number<input type="tel" autoComplete="tel" inputMode="tel" pattern="\+[1-9][0-9]{7,14}" required disabled={supabasePhoneCodeSent} value={supabasePhone} onChange={(event) => setSupabasePhone(event.target.value)} /></label>{supabasePhoneCodeSent && <label>SMS code<input type="text" autoComplete="one-time-code" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} required value={supabasePhoneCode} onChange={(event) => setSupabasePhoneCode(event.target.value)} /></label>}</> : <><label>Email<input type="email" autoComplete="email" required value={supabaseEmail} onChange={(event) => setSupabaseEmail(event.target.value)} /></label>{["signin", "signup"].includes(supabaseAuthMode) && <label>Password<input type="password" autoComplete={supabaseAuthMode === "signup" ? "new-password" : "current-password"} minLength={8} required value={supabasePassword} onChange={(event) => setSupabasePassword(event.target.value)} /></label>}</>}<div className="modal-actions"><button type="submit" className="dark-button" disabled={supabaseAuthBusy}>{supabaseAuthBusy ? "Working…" : supabaseAuthMode === "forgot" ? "Send reset link" : supabaseAuthMode === "reset" ? "Update password" : supabaseAuthMethod === "phone" ? supabasePhoneCodeSent ? "Verify SMS code" : "Send SMS code" : supabaseAuthMode === "signup" ? "Create account" : "Sign in"}</button>{supabaseAuthMode === "signin" && supabaseAuthMethod === "email" && <button type="button" className="text-button" onClick={() => { setSupabaseAuthMode("forgot"); setSupabasePassword(""); setSupabaseAuthMessage(null); }}>Forgot password?</button>}{["signin", "signup"].includes(supabaseAuthMode) && <button type="button" className="ghost-button" onClick={() => { setSupabaseAuthMode((mode) => mode === "signup" ? "signin" : "signup"); setSupabasePassword(""); setSupabasePasswordConfirmation(""); setSupabasePhoneCodeSent(false); setSupabaseAuthMessage(null); }}>{supabaseAuthMode === "signup" ? "Use existing account" : "Create an account"}</button>}{supabaseAuthMode === "forgot" && <button type="button" className="ghost-button" onClick={() => { setSupabaseAuthMode("signin"); setSupabaseAuthMessage(null); }}>Back to sign in</button>}{supabaseAuthMode === "reset" && <button type="button" className="ghost-button" onClick={() => { setSupabaseAuthMode("signin"); setSupabasePassword(""); setSupabasePasswordConfirmation(""); setSupabaseAuthMessage(null); }}>Back to sign in</button>}<button type="button" className="ghost-button" onClick={() => setSupabaseAuthOpen(false)}>Close</button></div></form></section>}
+    {supabase && supabaseAuthOpen && !sessionUser && <section className="auth-panel" aria-label="Supabase authentication"><div><span className="section-kicker">SUPABASE AUTH</span><h2>{supabaseAuthMode === "signup" ? "Create your archive account." : supabaseAuthMode === "forgot" ? "Reset your password." : supabaseAuthMode === "reset" ? "Choose a new password." : "Welcome back."}</h2><p>{supabaseAuthMode === "forgot" ? "Enter your email and we’ll send a secure reset link. For your privacy, the response is the same whether an account exists." : supabaseAuthMode === "reset" ? "Your reset link is verified by Supabase. Set a new password, then sign in again." : supabaseAuthMethod === "phone" ? "Use a one-time SMS code. SMS delivery must be enabled for this Supabase project." : "Email/password authentication is handled by Supabase; Stockvel receives only the verified access token."}</p></div><form onSubmit={(event) => void submitSupabaseAuth(event)}>{supabaseAuthMessage && <p className={`auth-feedback ${supabaseAuthMessage.tone}`} role={supabaseAuthMessage.tone === "error" ? "alert" : "status"} aria-live="polite">{supabaseAuthMessage.text}</p>}{["signin", "signup"].includes(supabaseAuthMode) && <div className="auth-method-switch" role="group" aria-label="Verification method"><button type="button" className={supabaseAuthMethod === "email" ? "active" : ""} onClick={() => { setSupabaseAuthMethod("email"); setSupabasePhoneCodeSent(false); setSupabaseAuthMessage(null); }}>Email</button><button type="button" className={supabaseAuthMethod === "phone" ? "active" : ""} onClick={() => { setSupabaseAuthMethod("phone"); setSupabasePhoneCodeSent(false); setSupabaseAuthMessage(null); }}>SMS</button></div>}{supabaseAuthMode === "reset" ? <><label>New password<input type="password" autoComplete="new-password" minLength={8} required value={supabasePassword} onChange={(event) => setSupabasePassword(event.target.value)} /></label><label>Confirm new password<input type="password" autoComplete="new-password" minLength={8} required value={supabasePasswordConfirmation} onChange={(event) => setSupabasePasswordConfirmation(event.target.value)} /></label></> : supabaseAuthMethod === "phone" && ["signin", "signup"].includes(supabaseAuthMode) ? <>{supabaseAuthMode === "signup" && <label>Display name<input type="text" autoComplete="name" required value={supabaseDisplayName} onChange={(event) => setSupabaseDisplayName(event.target.value)} /></label>}<label>Phone number<input type="tel" autoComplete="tel" inputMode="tel" pattern="\+[1-9][0-9]{7,14}" required disabled={supabasePhoneCodeSent} value={supabasePhone} onChange={(event) => setSupabasePhone(event.target.value)} /></label>{supabasePhoneCodeSent && <label>SMS code<input type="text" autoComplete="one-time-code" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} required value={supabasePhoneCode} onChange={(event) => setSupabasePhoneCode(event.target.value)} /></label>}</> : <><label>Email<input type="email" autoComplete="email" required value={supabaseEmail} onChange={(event) => setSupabaseEmail(event.target.value)} /></label>{["signin", "signup"].includes(supabaseAuthMode) && <label>Password<input type="password" autoComplete={supabaseAuthMode === "signup" ? "new-password" : "current-password"} minLength={8} required value={supabasePassword} onChange={(event) => setSupabasePassword(event.target.value)} /></label>}</>}<div className="modal-actions"><button type="submit" className="dark-button" disabled={supabaseAuthBusy}>{supabaseAuthBusy ? "Working…" : supabaseAuthMode === "forgot" ? "Send reset link" : supabaseAuthMode === "reset" ? "Update password" : supabaseAuthMethod === "phone" ? supabasePhoneCodeSent ? "Verify SMS code" : "Send SMS code" : supabaseAuthMode === "signup" ? "Create account" : "Sign in"}</button>{supabaseAuthMode === "signin" && supabaseAuthMethod === "email" && <button type="button" className="text-button" onClick={() => { setSupabaseAuthMode("forgot"); setSupabasePassword(""); setSupabaseAuthMessage(null); }}>Forgot password?</button>}{["signin", "signup"].includes(supabaseAuthMode) && <button type="button" className="ghost-button" onClick={() => { setSupabaseAuthMode((mode) => mode === "signup" ? "signin" : "signup"); setSupabasePassword(""); setSupabasePasswordConfirmation(""); setSupabasePhoneCodeSent(false); setSupabaseAuthMessage(null); }}>{supabaseAuthMode === "signup" ? "Use existing account" : "Create an account"}</button>}{supabaseAuthMode === "forgot" && <button type="button" className="ghost-button" onClick={() => { setSupabaseAuthMode("signin"); setSupabaseAuthMessage(null); }}>Back to sign in</button>}{supabaseAuthMode === "reset" && <button type="button" className="ghost-button" onClick={() => { setSupabaseAuthMode("signin"); setSupabasePassword(""); setSupabasePasswordConfirmation(""); setSupabaseAuthMessage(null); }}>Back to sign in</button>}<button type="button" className="ghost-button" onClick={() => setSupabaseAuthOpen(false)}>Close</button></div></form></section>}
     {sessionUser && <details className="notification-center"><summary>Alerts {notifications.some((item) => !item.read_at) && <span>{notifications.filter((item) => !item.read_at).length}</span>}</summary><div><strong>In-app alerts</strong>{notifications.length ? notifications.slice(0, 8).map((item) => <article className={item.read_at ? "read" : ""} key={item.id}><h3>{item.title}</h3><p>{item.body}</p><small>{new Date(item.created_at).toLocaleDateString("en-ZA")}</small>{!item.read_at && <button type="button" onClick={() => void markNotificationRead(item.id)}>Mark read</button>}</article>) : <p>No alerts yet. Saved-search matches will appear here.</p>}</div></details>}
     {!analyticsConsent && <button className="privacy-consent" onClick={() => setAnalyticsConsent(true)}>Allow anonymous demand insights</button>}
 
-    {view === "explore" && <ExploreView query={query} setQuery={setQuery} runSearch={runSearch} assets={assets} filter={filter} setFilter={setFilter} sort={sort} setSort={setSort} orientation={orientation} setOrientation={setOrientation} verifiedCount={verifiedCount} notice={notice} onOpen={openAsset} authenticated={Boolean(sessionUser)} discovery={discovery} onUseQuery={useDiscoveryQuery} onSaveSearch={saveCurrentSearch} onDeleteSearch={deleteSavedSearch} />}
-    {view === "search" && <SearchResultsView query={query} setQuery={setQuery} activeQuery={activeQuery} runSearch={runSearch} assets={assets} assetsLoading={assetsLoading} filter={filter} setFilter={setFilter} sort={sort} setSort={setSort} orientation={orientation} setOrientation={setOrientation} notice={notice} onOpen={openAsset} />}
+    {view === "explore" && <ExploreView query={query} setQuery={setQuery} runSearch={runSearch} assets={visibleAssets} filter={filter} setFilter={setFilter} sort={sort} setSort={setSort} orientation={orientation} setOrientation={setOrientation} includeCustomBuying={includeCustomBuying} setIncludeCustomBuying={setIncludeCustomBuying} verifiedCount={verifiedCount} notice={notice} onOpen={openAsset} authenticated={Boolean(sessionUser)} discovery={discovery} onUseQuery={useDiscoveryQuery} onSaveSearch={saveCurrentSearch} onDeleteSearch={deleteSavedSearch} />}
+    {view === "search" && <SearchResultsView query={query} setQuery={setQuery} activeQuery={activeQuery} runSearch={runSearch} assets={visibleAssets} assetsLoading={assetsLoading} suggestions={searchSuggestions} onUseQuery={useDiscoveryQuery} filter={filter} setFilter={setFilter} sort={sort} setSort={setSort} orientation={orientation} setOrientation={setOrientation} includeCustomBuying={includeCustomBuying} setIncludeCustomBuying={setIncludeCustomBuying} notice={notice} onOpen={openAsset} />}
     {view === "campaigns" && <CampaignWorkspace api={api} onNotice={setNotice} onOpen={openAsset} role={sessionUser?.role} />}
     {view === "contributors" && <CreatorMarketplace onOpen={openAsset} />}
     {view === "contributor" && <><ContributorFlowHeader onUpload={() => document.getElementById("contributor-upload")?.scrollIntoView({ behavior: "smooth", block: "start" })} /><AnalyticsDashboard role="contributor" /><MarketplaceLegalDocuments api={api} /><SellerVerificationPanel api={api} onNotice={setNotice} /><div id="contributor-upload"><ContributorWorkspace api={api} onNotice={setNotice} /></div><div id="contributor-library"><ContributorAssetLibrary api={api} onNotice={setNotice} /></div></>}
-    {view === "buyer" && <><BuyerFlowHeader onSearch={() => navigate("search")} onCampaigns={() => navigate("campaigns")} onAccount={() => navigate("account")} /><AnalyticsDashboard role="buyer" onOpenAccount={() => navigate("account")} /><BuyerFinancePanel api={api} onNotice={setNotice} /></>}
+    {view === "buyer" && <><BuyerFlowHeader onSearch={() => navigate("search")} onCampaigns={sessionUser?.role === "buyer" || sessionUser?.role === "admin" ? () => navigate("campaigns") : undefined} onAccount={() => navigate("account")} /><AnalyticsDashboard role="buyer" onOpenAccount={() => navigate("account")} /><BuyerFinancePanel api={api} onNotice={setNotice} role={sessionUser?.role} account={sessionUser} /></>}
     {view === "review" && <ReviewWorkspace items={reviewItems} api={api} onNotice={setNotice} onReload={loadReviewQueue} />}
     {view === "governance" && <><MarketplaceLegalDocuments api={api} /><GovernanceWorkspace api={api} onNotice={setNotice} isAdmin={sessionUser?.role === "admin"} /></>}
     {view === "community" && <CommunityWorkspace api={api} onNotice={setNotice} sessionUser={sessionUser} />}
-    {view === "account" && <><BuyerSubscriptionPanel api={api} onNotice={setNotice} /><AccountWorkspace api={api} auth0={auth0} onNotice={setNotice} buyer={sessionUser?.role === "buyer" || sessionUser?.role === "admin"} /></>}
-    {view === "studio" && <StudioWorkspace assets={assets} onNotice={setNotice} />}
+    {view === "account" && <>{["buyer", "contributor", "editor", "admin"].includes(sessionUser?.role ?? "") && <BuyerSubscriptionPanel api={api} onNotice={setNotice} account={sessionUser} />}<AccountWorkspace api={api} auth0={auth0} onNotice={setNotice} buyer={["buyer", "contributor", "editor", "admin"].includes(sessionUser?.role ?? "")} /></>}
+    {view === "studio" && <StudioWorkspace assets={assets} api={api} onNotice={setNotice} />}
     {view === "rights" && <RightsGuide />}
     {view === "stakeholders" && <StakeholderDiagrams />}
     {view === "wordpress" && <WordPressIntegrationPanel api={api} onNotice={setNotice} />}
 
-    <footer><button className="wordmark wordmark-button" onClick={() => navigate("explore")}><span className="mark">V</span><span>veld<span className="muted">archive</span></span></button><button className="footer-guide-link" onClick={() => navigate("rights")}>Rights guide ↗</button><button className="footer-guide-link" onClick={() => navigate("stakeholders")}>System overview ↗</button><span>© 2026 Veld Archive · South Africa</span><span>Context before category.</span></footer>
-    {selectedAsset && <AssetModal asset={selectedAsset} api={api} autoOpenPurchase={pendingAssetPurchase} onClose={() => { setSelectedAsset(null); setPendingAssetPurchase(false); }} onNotice={setNotice} onRequireSignIn={openBuyerSignIn} authenticated={Boolean(sessionUser)} lightboxes={lightboxes} onCreateLightbox={createLightbox} onSaveToLightbox={saveToLightbox} onDownload={downloadFreePhoto} />}
+    <footer><button className="wordmark wordmark-button" onClick={() => navigate("explore")}><StockvelLogo /></button><button className="footer-guide-link" onClick={() => navigate("rights")}>Rights guide ↗</button><button className="footer-guide-link" onClick={() => navigate("stakeholders")}>System overview ↗</button><span>© 2026 Stockvel · South Africa</span><span>Context before category.</span></footer>
+    {selectedAsset && <AssetModal asset={selectedAsset} api={api} autoOpenPurchase={pendingAssetPurchase} includeCustomBuying={includeCustomBuying} onClose={() => { setSelectedAsset(null); setPendingAssetPurchase(false); }} onNotice={setNotice} onRequireSignIn={openBuyerSignIn} authenticated={Boolean(sessionUser)} lightboxes={lightboxes} onCreateLightbox={createLightbox} onSaveToLightbox={saveToLightbox} onDownload={downloadFreePhoto} />}
   </div>;
 }
 
@@ -726,7 +755,7 @@ function BetterSidebar({ view, navigate, collapsed, mobileOpen, authenticated, r
       onMouseLeave={() => setHoverExpanded(false)}
     >
       <div className="better-sidebar-brand">
-        <button type="button" className="wordmark wordmark-button" onClick={() => { navigate("explore"); onCloseMobile(); }} aria-label="Veld Archive home"><span className="mark">V</span><span className="better-brand-name">veld<span className="muted">archive</span></span></button>
+        <button type="button" className="wordmark wordmark-button" onClick={() => { navigate("explore"); onCloseMobile(); }} aria-label="Stockvel home"><StockvelLogo /></button>
         <button type="button" className="better-collapse-button" aria-label={collapsed ? "Expand navigation" : "Collapse navigation"} onClick={onToggleCollapse}><Icon name="chevron" className={collapsed ? "is-rotated" : ""} /></button>
       </div>
       <button type="button" className="better-command-button" onClick={() => { navigate("search"); onCloseMobile(); }}><Icon name="search" /><span>Search archive</span><kbd><Icon name="command" size={12} /> K</kbd></button>
@@ -741,26 +770,30 @@ function BetterSidebar({ view, navigate, collapsed, mobileOpen, authenticated, r
   </>;
 }
 
-function ExploreView({ query, setQuery, runSearch, assets, filter, setFilter, sort, setSort, orientation, setOrientation, verifiedCount, notice, onOpen, authenticated, discovery, onUseQuery, onSaveSearch, onDeleteSearch }: { query: string; setQuery: (value: string) => void; runSearch: (event: React.FormEvent) => void; assets: Asset[]; filter: "all" | "image" | "video"; setFilter: (value: "all" | "image" | "video") => void; sort: "relevance" | "newest" | "popular" | "random"; setSort: (value: "relevance" | "newest" | "popular" | "random") => void; orientation: "all" | "landscape" | "portrait" | "square"; setOrientation: (value: "all" | "landscape" | "portrait" | "square") => void; verifiedCount: number; notice: string; onOpen: (asset: Asset) => void; authenticated: boolean; discovery: DiscoveryResponse; onUseQuery: (value: string) => void; onSaveSearch: (frequency: SavedSearch["alertFrequency"]) => Promise<void>; onDeleteSearch: (id: string) => Promise<void> }) {
+function CustomBuyingToggle({ enabled, onChange }: { enabled: boolean; onChange: (value: boolean) => void }) {
+  return <label className="custom-buying-toggle"><input type="checkbox" checked={enabled} onChange={(event) => onChange(event.target.checked)} /><span><strong>Include custom buying</strong><small>Shows seller-listed credit amounts.</small></span></label>;
+}
+
+function ExploreView({ query, setQuery, runSearch, assets, filter, setFilter, sort, setSort, orientation, setOrientation, includeCustomBuying, setIncludeCustomBuying, verifiedCount, notice, onOpen, authenticated, discovery, onUseQuery, onSaveSearch, onDeleteSearch }: { query: string; setQuery: (value: string) => void; runSearch: (event: React.FormEvent) => void; assets: Asset[]; filter: "all" | "image" | "video"; setFilter: (value: "all" | "image" | "video") => void; sort: "relevance" | "newest" | "popular" | "random"; setSort: (value: "relevance" | "newest" | "popular" | "random") => void; orientation: "all" | "landscape" | "portrait" | "square"; setOrientation: (value: "all" | "landscape" | "portrait" | "square") => void; includeCustomBuying: boolean; setIncludeCustomBuying: (value: boolean) => void; verifiedCount: number; notice: string; onOpen: (asset: Asset) => void; authenticated: boolean; discovery: DiscoveryResponse; onUseQuery: (value: string) => void; onSaveSearch: (frequency: SavedSearch["alertFrequency"]) => Promise<void>; onDeleteSearch: (id: string) => Promise<void> }) {
   const suggestions = ["A real wood-fire braai in the Cape Flats", "A verified Table Mountain landscape at golden hour", "Right-hand-drive road footage in the Garden Route"];
   return <main id="top">
-    <section className="hero"><div className="eyebrow"><span className="pulse" /> The trusted South African visual archive</div><h1>Find the image<br /><em>behind the story.</em></h1><p className="hero-copy">Authentic photography and film for brands that care where a story comes from. Veld Archive is deliberately focused on photo and video; audio and music are outside the product scope.</p><form className="search-box" onSubmit={runSearch}><span className="search-icon" aria-hidden="true"><Icon name="search" size={18} /></span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Describe the story you need to tell…" aria-label="Search photo and video" /><button type="submit">Search archive <span>↗</span></button></form><div className="suggestion-row">{suggestions.map((suggestion) => <button type="button" key={suggestion} className="suggestion" onClick={() => onUseQuery(suggestion)}>{suggestion} <span>→</span></button>)}</div></section>
+    <section className="hero"><div className="eyebrow"><span className="pulse" /> The trusted South African visual archive</div><h1>Find the image<br /><em>behind the story.</em></h1><p className="hero-copy">Authentic photography and film for brands that care where a story comes from. Stockvel is deliberately focused on photo and video; audio and music are outside the product scope.</p><form className="search-box" onSubmit={runSearch}><span className="search-icon" aria-hidden="true"><Icon name="search" size={18} /></span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Describe the story you need to tell…" aria-label="Search photo and video" /><button type="submit">Search archive <span>↗</span></button></form><CustomBuyingToggle enabled={includeCustomBuying} onChange={setIncludeCustomBuying} /><div className="suggestion-row">{suggestions.map((suggestion) => <button type="button" key={suggestion} className="suggestion" onClick={() => onUseQuery(suggestion)}>{suggestion} <span>→</span></button>)}</div></section>
     <section className="trust-strip"><div><strong>01</strong><span>Context-first metadata</span></div><div><strong>02</strong><span>Rights you can trust</span></div><div><strong>03</strong><span>Creators paid fairly</span></div><div className="trust-note">Built for the places we know.</div></section>
-    <DiscoveryShelf discovery={discovery} authenticated={authenticated} activeQuery={query} onUseQuery={onUseQuery} onOpen={onOpen} onSaveSearch={onSaveSearch} onDeleteSearch={onDeleteSearch} />
-     <section className="explore-section"><div className="section-heading"><div><span className="section-kicker">CURATED FROM THE GROUND UP</span><h2>The latest from <em>here.</em></h2></div><div className="result-note">{notice}</div></div><div className="toolbar"><div className="filter-tabs" role="tablist" aria-label="Media type">{(["all", "image", "video"] as const).map((value) => <button key={value} type="button" role="tab" aria-selected={filter === value} className={filter === value ? "active" : ""} onClick={() => setFilter(value)}>{value === "all" ? "All media" : value === "image" ? "Photography" : "Film & video"}</button>)}</div><label className="toolbar-select">Sort<select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="relevance">Most relevant</option><option value="newest">Newest</option><option value="popular">Popular</option><option value="random">Surprise me</option></select></label><label className="toolbar-select">Orientation<select value={orientation} onChange={(event) => setOrientation(event.target.value as typeof orientation)}><option value="all">Any orientation</option><option value="landscape">Landscape</option><option value="portrait">Portrait</option><option value="square">Square</option></select></label><div className="verified-stat"><span className="verified-dot" />{verifiedCount} human-verified results</div></div><div className="explainability-note"><strong>Search evidence is visible.</strong><span>Open a result to inspect the fields used, match confidence, and verification status.</span><span className="ai-badge">AI + HUMAN REVIEW</span></div><div className="asset-grid">{assets.length ? assets.map((asset, index) => <AssetCard key={asset.id} asset={asset} index={index} onOpen={onOpen} />) : <div className="empty-state">No assets matched this brief yet. Try a location, landmark, or cultural context.</div>}</div></section>
+    <DiscoveryShelf discovery={discovery} authenticated={authenticated} activeQuery={query} includeCustomBuying={includeCustomBuying} onUseQuery={onUseQuery} onOpen={onOpen} onSaveSearch={onSaveSearch} onDeleteSearch={onDeleteSearch} />
+    <section className="explore-section"><div className="section-heading"><div><span className="section-kicker">CURATED FROM THE GROUND UP</span><h2>The latest from <em>here.</em></h2></div><div className="result-note">{notice}</div></div><div className="toolbar"><div className="filter-tabs" role="tablist" aria-label="Media type">{(["all", "image", "video"] as const).map((value) => <button key={value} type="button" role="tab" aria-selected={filter === value} className={filter === value ? "active" : ""} onClick={() => setFilter(value)}>{value === "all" ? "All media" : value === "image" ? "Photography" : "Film & video"}</button>)}</div><label className="toolbar-select">Sort<select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="relevance">Most relevant</option><option value="newest">Newest</option><option value="popular">Popular</option><option value="random">Surprise me</option></select></label><label className="toolbar-select">Orientation<select value={orientation} onChange={(event) => setOrientation(event.target.value as typeof orientation)}><option value="all">Any orientation</option><option value="landscape">Landscape</option><option value="portrait">Portrait</option><option value="square">Square</option></select></label><div className="verified-stat"><span className="verified-dot" />{verifiedCount} human-verified results</div></div><div className="explainability-note"><strong>Search evidence is visible.</strong><span>Open a result to inspect the fields used, match confidence, and verification status.</span><span className="ai-badge">METADATA + HUMAN REVIEW</span></div><div className="asset-grid">{assets.length ? assets.map((asset, index) => <AssetCard key={asset.id} asset={asset} index={index} onOpen={onOpen} />) : <div className="empty-state">No assets matched this brief yet. Try a location, landmark, or cultural context.</div>}</div></section>
     <ModerationQueue assets={assets} onReview={onOpen} />
-    <section className="manifesto"><div className="manifesto-label">WHY VELD</div><div><h2>South Africa is not a<br /><em>stock category.</em></h2><p>Every place has a texture. Every community has a point of view. Veld gives the people who make the work more control over how it is found, licensed, and remembered.</p></div></section>
+    <section className="manifesto"><div className="manifesto-label">WHY STOCKVEL</div><div><h2>South Africa is not a<br /><em>stock category.</em></h2><p>Every place has a texture. Every community has a point of view. Stockvel gives the people who make the work more control over how it is found, licensed, and remembered.</p></div></section>
   </main>;
 }
 
 const searchSteps = [
   "Reading the story brief",
-  "Searching verified archive records",
-  "Checking place, rights, and context",
-  "Ranking the closest visual matches",
+  "Searching approved metadata",
+  "Checking title and description evidence",
+  "Ranking deterministic matches",
 ];
 
-function SearchResultsView({ query, setQuery, activeQuery, runSearch, assets, assetsLoading, filter, setFilter, sort, setSort, orientation, setOrientation, notice, onOpen }: { query: string; setQuery: (value: string) => void; activeQuery: string; runSearch: (event: React.FormEvent) => void; assets: Asset[]; assetsLoading: boolean; filter: "all" | "image" | "video"; setFilter: (value: "all" | "image" | "video") => void; sort: "relevance" | "newest" | "popular" | "random"; setSort: (value: "relevance" | "newest" | "popular" | "random") => void; orientation: "all" | "landscape" | "portrait" | "square"; setOrientation: (value: "all" | "landscape" | "portrait" | "square") => void; notice: string; onOpen: (asset: Asset) => void }) {
+function SearchResultsView({ query, setQuery, activeQuery, runSearch, assets, assetsLoading, suggestions, onUseQuery, filter, setFilter, sort, setSort, orientation, setOrientation, includeCustomBuying, setIncludeCustomBuying, notice, onOpen }: { query: string; setQuery: (value: string) => void; activeQuery: string; runSearch: (event: React.FormEvent) => void; assets: Asset[]; assetsLoading: boolean; suggestions: string[]; onUseQuery: (value: string) => void; filter: "all" | "image" | "video"; setFilter: (value: "all" | "image" | "video") => void; sort: "relevance" | "newest" | "popular" | "random"; setSort: (value: "relevance" | "newest" | "popular" | "random") => void; orientation: "all" | "landscape" | "portrait" | "square"; setOrientation: (value: "all" | "landscape" | "portrait" | "square") => void; includeCustomBuying: boolean; setIncludeCustomBuying: (value: boolean) => void; notice: string; onOpen: (asset: Asset) => void }) {
   const [step, setStep] = useState(0);
 
   useEffect(() => {
@@ -777,13 +810,16 @@ function SearchResultsView({ query, setQuery, activeQuery, runSearch, assets, as
     ? `Searching the archive for “${activeQuery || "the latest verified media"}”`
     : notice.startsWith("The verified content service is unavailable")
       ? notice
-      : `${assets.length} verified result${assets.length === 1 ? "" : "s"} found.`;
+      : activeQuery && !assets.length
+        ? `No approved metadata matches found for "${activeQuery}".`
+        : `${assets.length} verified result${assets.length === 1 ? "" : "s"} found.`;
 
   return <main className="search-results-page" id="search-results">
     <section className="search-results-intro">
       <div className="search-results-eyebrow"><span className="pulse" /> Archive search / live trace</div>
       <h1>Finding the visual story<br /><em>behind your brief.</em></h1>
       <form className="search-box" onSubmit={runSearch}><span className="search-icon" aria-hidden="true"><Icon name="search" size={18} /></span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Describe the story you need to tell…" aria-label="Search photo and video" /><button type="submit" disabled={assetsLoading}>{assetsLoading ? "Searching…" : "Search again"} <span>↗</span></button></form>
+      <CustomBuyingToggle enabled={includeCustomBuying} onChange={setIncludeCustomBuying} />
       <div className="search-status" role="status" aria-live="polite" aria-busy={assetsLoading}><span className={`search-status-dot${isComplete ? " complete" : ""}`} /><span>{resultMessage}</span></div>
     </section>
 
@@ -792,7 +828,7 @@ function SearchResultsView({ query, setQuery, activeQuery, runSearch, assets, as
         <div className="search-progress-heading"><span className="section-kicker">SEARCH PROCESS</span><strong>{isComplete ? "Complete" : `${progress}%`}</strong></div>
         <div className="search-progress-track" aria-hidden="true"><span style={{ width: `${progress}%` }} /></div>
         <ol className="search-step-list">{searchSteps.map((label, index) => <li key={label} className={index < step || isComplete ? "done" : index === step ? "current" : ""}><span>{index < step || isComplete ? "✓" : String(index + 1).padStart(2, "0")}</span><strong>{label}</strong>{index === step && !isComplete && <small>Working through indexed records</small>}</li>)}</ol>
-        <p className="search-provenance"><strong>What is being checked?</strong> Published records, stored previews, human verification, location context, rights status, and the language of your brief.</p>
+        <p className="search-provenance"><strong>What is being checked?</strong> Approved records, stored previews, human verification, rights status, and the title and description written for each asset.</p>
       </aside>
       <section className="search-trace-panel" aria-labelledby="trace-heading">
         <div className="search-trace-heading"><div><span className="section-kicker">CANDIDATE MEDIA</span><h2 id="trace-heading">{isComplete ? "Candidate records checked" : "Images being checked"} <em>{isComplete ? "first." : "now."}</em></h2></div><span className="trace-count">{traceAssets.length} candidate{traceAssets.length === 1 ? "" : "s"} in view</span></div>
@@ -802,6 +838,7 @@ function SearchResultsView({ query, setQuery, activeQuery, runSearch, assets, as
 
     <section className="search-matches" aria-labelledby="matches-heading">
       <div className="section-heading"><div><span className="section-kicker">RANKED MATCHES</span><h2 id="matches-heading">The closest <em>stories.</em></h2></div><span className="result-note">Open a result to inspect the metadata, verification, and rights evidence behind its ranking.</span></div>
+      {!assetsLoading && !assets.length && suggestions.length > 0 && <div className="metadata-suggestions" aria-label="Metadata search suggestions"><span>Try a metadata-derived query:</span>{suggestions.map((suggestion) => <button type="button" key={suggestion} onClick={() => onUseQuery(suggestion)}>{suggestion} <span>â†’</span></button>)}</div>}
       <div className="toolbar"><div className="filter-tabs" role="tablist" aria-label="Media type">{(["all", "image", "video"] as const).map((value) => <button key={value} type="button" role="tab" aria-selected={filter === value} className={filter === value ? "active" : ""} onClick={() => setFilter(value)}>{value === "all" ? "All media" : value === "image" ? "Photography" : "Film & video"}</button>)}</div><label className="toolbar-select">Sort<select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="relevance">Most relevant</option><option value="newest">Newest</option><option value="popular">Popular</option><option value="random">Surprise me</option></select></label><label className="toolbar-select">Orientation<select value={orientation} onChange={(event) => setOrientation(event.target.value as typeof orientation)}><option value="all">Any orientation</option><option value="landscape">Landscape</option><option value="portrait">Portrait</option><option value="square">Square</option></select></label><div className="verified-stat"><span className="verified-dot" />{assets.filter((asset) => asset.humanVerified).length} human-verified results</div></div>
       <div className="asset-grid" aria-busy={assetsLoading}>{assetsLoading ? <div className="empty-state" role="status">Ranking the checked candidates…</div> : assets.length ? assets.map((asset, index) => <AssetCard key={asset.id} asset={asset} index={index} onOpen={onOpen} />) : <div className="empty-state">No records matched this brief closely enough. Try a location, landmark, or cultural context.</div>}</div>
     </section>
@@ -814,13 +851,14 @@ function SearchTraceCard({ asset, index, onOpen, loading }: { asset: Asset; inde
   return <button type="button" className={`search-trace-card${loading ? " is-loading" : ""}`} onClick={() => onOpen(asset)} aria-label={`Inspect ${asset.title} while searching`}><div className={`search-trace-visual visual-${(index % 3) + 1} ${asset.kind}`}>{available && asset.kind === "image" && <img src={asset.previewUrl!} alt="" loading="lazy" onError={() => setFailed(true)} />}{available && asset.kind === "video" && <video src={asset.previewUrl!} muted playsInline preload="metadata" onError={() => setFailed(true)} />}{!available && <span className="search-trace-placeholder">Preview queued</span>}<span className="search-trace-scan" aria-hidden="true" /><span className="search-trace-kind">{asset.kind === "video" ? "FILM" : "PHOTO"}</span><span className="search-trace-place">{asset.landmark ?? asset.locality ?? asset.city}</span></div><div className="search-trace-copy"><strong>{asset.title}</strong><small>{loading ? "Checking metadata…" : "Match candidate"}</small></div></button>;
 }
 
-function DiscoveryShelf({ discovery, authenticated, activeQuery, onUseQuery, onOpen, onSaveSearch, onDeleteSearch }: { discovery: DiscoveryResponse; authenticated: boolean; activeQuery: string; onUseQuery: (value: string) => void; onOpen: (asset: Asset) => void; onSaveSearch: (frequency: SavedSearch["alertFrequency"]) => Promise<void>; onDeleteSearch: (id: string) => Promise<void> }) {
+function DiscoveryShelf({ discovery, authenticated, activeQuery, includeCustomBuying, onUseQuery, onOpen, onSaveSearch, onDeleteSearch }: { discovery: DiscoveryResponse; authenticated: boolean; activeQuery: string; includeCustomBuying: boolean; onUseQuery: (value: string) => void; onOpen: (asset: Asset) => void; onSaveSearch: (frequency: SavedSearch["alertFrequency"]) => Promise<void>; onDeleteSearch: (id: string) => Promise<void> }) {
   const [frequency, setFrequency] = useState<SavedSearch["alertFrequency"]>("weekly");
-  if (!discovery.trending.length && !discovery.recommendations.length && !discovery.savedSearches.length && !authenticated) return null;
+  const recommendations = discovery.recommendations.filter((item) => includeCustomBuying || item.asset.monetizationModel !== "custom_quote");
+  if (!discovery.trending.length && !recommendations.length && !discovery.savedSearches.length && !authenticated) return null;
   return <section className="discovery-shelf" aria-labelledby="discovery-title"><div className="section-heading"><div><span className="section-kicker">DISCOVERY, WITH A MEMORY</span><h2 id="discovery-title">Find what is moving <em>now.</em></h2></div>{authenticated && <div className="save-search-control"><select aria-label="Saved search alert frequency" value={frequency} onChange={(event) => setFrequency(event.target.value as SavedSearch["alertFrequency"])}><option value="none">No alerts</option><option value="daily">Daily in-app alert</option><option value="weekly">Weekly in-app alert</option></select><button type="button" className="outline-button" disabled={activeQuery.trim().length < 2} onClick={() => void onSaveSearch(frequency)}>Save this search</button></div>}</div>
     {discovery.trending.length > 0 && <div className="trending-searches" aria-label="Trending searches"><strong>Trending searches</strong>{discovery.trending.map((item) => <button type="button" key={item.query} onClick={() => onUseQuery(item.query)}><span>{item.query}</span><small>{item.searchCount} searches</small></button>)}</div>}
     {discovery.savedSearches.length > 0 && <div className="saved-search-list"><strong>Your saved searches</strong>{discovery.savedSearches.map((item) => <div key={item.id}><button type="button" onClick={() => onUseQuery(item.query)}><span>{item.name}</span><small>{item.mediaKind} · {item.alertFrequency === "none" ? "alerts off" : `${item.alertFrequency} alerts`}</small></button><button type="button" className="remove-saved-search" aria-label={`Remove ${item.name}`} onClick={() => void onDeleteSearch(item.id)}>×</button></div>)}</div>}
-    {discovery.recommendations.length > 0 && <div className="recommendation-block"><div><strong>{discovery.personalized ? "Recommended from your saved interests" : "Recommended from the latest verified work"}</strong><small>Recommendations use saved searches and lightboxes—not hidden identity or device profiling.</small></div><div className="asset-grid">{discovery.recommendations.slice(0, 4).map((item, index) => <div className="recommendation-item" key={item.asset.id}><AssetCard asset={item.asset} index={index + 6} onOpen={onOpen} /><p>{item.reason}</p></div>)}</div></div>}
+    {recommendations.length > 0 && <div className="recommendation-block"><div><strong>{discovery.personalized ? "Recommended from your saved interests" : "Recommended from the latest verified work"}</strong><small>Recommendations use saved searches and lightboxes—not hidden identity or device profiling.</small></div><div className="asset-grid">{recommendations.slice(0, 4).map((item, index) => <div className="recommendation-item" key={item.asset.id}><AssetCard asset={item.asset} index={index + 6} onOpen={onOpen} /><p>{item.reason}</p></div>)}</div></div>}
   </section>;
 }
 
@@ -859,6 +897,32 @@ function GovernanceWorkspaceLegacy({ api, onNotice }: { api: (path: string, init
 
 function formatZar(cents: number): string { return new Intl.NumberFormat("en-ZA", { style: "currency", currency: "ZAR", maximumFractionDigits: 0 }).format(cents / 100); }
 
+function formatCredits(credits: number): string {
+  return `${Math.max(0, Math.round(credits)).toLocaleString("en-ZA")} credits`;
+}
+
+function formatCurrencyReference(cents: number): string {
+  return `R${Math.round(cents / 100).toLocaleString("en-ZA")}`;
+}
+
+function mediaCreditReferenceLine(credits: number, enabled = showCurrencyReference): string | null {
+  return enabled ? `Display only: ${formatCredits(credits)} ≈ ${formatCurrencyReference(mediaCreditReferenceAmountCents(credits))}` : null;
+}
+
+async function openCreditCheckout(api: (path: string, init?: RequestInit) => Promise<Response>, checkoutUrl: string, provider?: string): Promise<void> {
+  if (provider !== "demo") {
+    window.location.assign(checkoutUrl);
+    return;
+  }
+  const completion = await api(checkoutUrl, { method: "GET" });
+  const completedUrl = new URL(completion.url, window.location.origin);
+  if (!completion.ok || completedUrl.pathname !== "/account" || completedUrl.searchParams.get("credits") !== "complete" || completedUrl.searchParams.get("demo") !== "1") {
+    const completed = await completion.json().catch(() => ({})) as { error?: string };
+    throw new Error(completed.error ?? "Demo credit purchase could not be completed.");
+  }
+  window.location.assign(completedUrl.toString());
+}
+
 function monetizationLabel(model: MonetizationModel = "membership"): string {
   if (model === "individual_license") return "Individual licence";
   if (model === "custom_quote") return "Custom quote";
@@ -867,16 +931,17 @@ function monetizationLabel(model: MonetizationModel = "membership"): string {
 
 function assetPricingLabel(asset: Asset): string {
   if (asset.freeDownloadEnabled) return "Free intro download";
-  const model = asset.monetizationModel ?? "membership";
-  return model === "individual_license" && asset.licensePriceCents ? `${formatZar(asset.licensePriceCents)} / year` : monetizationLabel(model);
+  const credits = Number(asset.licenseCreditCost ?? MEDIA_MEMBERSHIP_CREDITS);
+  const duration = mediaMembershipDurationLabel(MEDIA_MEMBERSHIP_DURATION_DAYS);
+  return asset.monetizationModel === "custom_quote" ? `Custom buying · ${formatCredits(credits)} / ${duration}` : `${formatCredits(credits)} / ${duration}`;
 }
 
 function FlowSteps({ steps }: { steps: string[] }) {
   return <ol className={`flow-steps flow-steps-${steps.length}`}>{steps.map((step, index) => <li key={step}><span>{String(index + 1).padStart(2, "0")}</span><strong>{step}</strong>{index < steps.length - 1 && <b aria-hidden="true">→</b>}</li>)}</ol>;
 }
 
-function BuyerFlowHeader({ onSearch, onCampaigns, onAccount }: { onSearch: () => void; onCampaigns: () => void; onAccount: () => void }) {
-  return <section className="flow-home" aria-labelledby="buyer-flow-title"><div className="flow-home-copy"><span className="section-kicker">BUYER WORKSPACE</span><h1 id="buyer-flow-title">From search intent to controlled delivery.</h1><p>Find a verified asset, inspect its evidence, accept the current terms, pay securely, and return here when the signed payment webhook unlocks delivery.</p><div className="flow-home-actions"><button type="button" className="dark-button" onClick={onSearch}>Find media <span>↗</span></button><button type="button" className="outline-button" onClick={onCampaigns}>Open campaigns</button><button type="button" className="ghost-button" onClick={onAccount}>Account & licences</button></div></div><FlowSteps steps={["Search", "Inspect", "Validate", "Request", "Pay", "Deliver"]} /></section>;
+function BuyerFlowHeader({ onSearch, onCampaigns, onAccount }: { onSearch: () => void; onCampaigns?: () => void; onAccount: () => void }) {
+  return <section className="flow-home" aria-labelledby="buyer-flow-title"><div className="flow-home-copy"><span className="section-kicker">BUYER WORKSPACE</span><h1 id="buyer-flow-title">From search intent to controlled delivery.</h1><p>Find a verified asset, inspect its evidence, then use active membership access or the seller-listed credit amount to unlock it.</p><div className="flow-home-actions"><button type="button" className="dark-button" onClick={onSearch}>Find media <span>↗</span></button>{onCampaigns && <button type="button" className="outline-button" onClick={onCampaigns}>Open campaigns</button>}<button type="button" className="ghost-button" onClick={onAccount}>Account & licences</button></div></div><FlowSteps steps={["Search", "Inspect", "Access", "Deliver"]} /></section>;
 }
 
 function ContributorFlowHeader({ onUpload }: { onUpload: () => void }) {
@@ -903,38 +968,51 @@ function AnalyticsDashboard({ role, onOpenAccount }: { role: "contributor" | "bu
   if (subscriptionRequired) return <section className="analytics-page"><div className="empty-state"><span className="section-kicker">BUYER SUBSCRIPTION</span><h2>Subscribe to unlock Buyer ROI</h2><p>Your subscription is the access control for campaign performance and licence reporting.</p><button className="dark-button" onClick={onOpenAccount}>Open subscription</button></div></section>;
   if (!data) return <section className="analytics-page"><div className="empty-state">Analytics are unavailable. No cached or placeholder figures are shown.</div></section>;
 
-  if (data.role === "contributor") return <section className="analytics-page"><div className="workspace-intro"><span className="section-kicker">CONTRIBUTOR SIGNALS · {data.range}</span><h1>Make what the<br /><em>brief is asking for.</em></h1><p>Demand is shown in aggregate so you can spot opportunity without tracking individual buyers.</p></div><div className="metric-grid"><MetricCard label="Archive searches" value={data.summary.searches.toLocaleString()} detail="for your context and tags" /><MetricCard label="Asset views" value={data.summary.views.toLocaleString()} detail="on your published work" /><MetricCard label="Demand change" value={`+${data.summary.demandChange}%`} detail="compared with prior period" tone="green" /><MetricCard label="Saved to briefs" value={data.summary.saves.toLocaleString()} detail="lightbox saves" /></div><div className="analytics-columns"><article className="analytics-card analytics-wide"><div className="card-heading"><div><span className="section-kicker">SEARCH TRENDS</span><h2>What buyers are looking for</h2></div><span className="status-pill cool">Aggregate only</span></div><MetricBars points={data.searchTrends} /></article><article className="analytics-card"><span className="section-kicker">POPULAR TAGS</span><h2>Context with pull</h2><div className="rank-list">{data.popularTags.map((tag, index) => <div className="rank-row" key={tag.label}><span className="rank-number">0{index + 1}</span><strong>{tag.label}</strong><span>{tag.value}</span></div>)}</div></article><article className="analytics-card"><span className="section-kicker">GEOGRAPHIC DEMAND</span><h2>Where the brief is</h2><div className="rank-list">{data.geographicDemand.map((place) => <div className="place-row" key={place.label}><div><strong>{place.label}</strong><small>{place.detail}</small></div><span className="demand-pill">{place.value}</span></div>)}</div></article></div><div className="opportunity-grid">{data.opportunities.map((item) => <article className={`opportunity-card ${item.tone}`} key={item.title}><span className="section-kicker">OPPORTUNITY</span><h3>{item.title}</h3><p>{item.detail}</p></article>)}</div><p className="privacy-note">Privacy note: Veld stores daily counters, coarse place labels, and approved asset context only. No IP address, device fingerprint, cookie, or raw search history is used for these signals.</p></section>;
+  if (data.role === "contributor") return <section className="analytics-page"><div className="workspace-intro"><span className="section-kicker">CONTRIBUTOR SIGNALS · {data.range}</span><h1>Make what the<br /><em>brief is asking for.</em></h1><p>Demand is shown in aggregate so you can spot opportunity without tracking individual buyers.</p></div><div className="metric-grid"><MetricCard label="Archive searches" value={data.summary.searches.toLocaleString()} detail="for your context and tags" /><MetricCard label="Asset views" value={data.summary.views.toLocaleString()} detail="on your published work" /><MetricCard label="Demand change" value={`+${data.summary.demandChange}%`} detail="compared with prior period" tone="green" /><MetricCard label="Saved to briefs" value={data.summary.saves.toLocaleString()} detail="lightbox saves" /></div><div className="analytics-columns"><article className="analytics-card analytics-wide"><div className="card-heading"><div><span className="section-kicker">SEARCH TRENDS</span><h2>What buyers are looking for</h2></div><span className="status-pill cool">Aggregate only</span></div><MetricBars points={data.searchTrends} /></article><article className="analytics-card"><span className="section-kicker">POPULAR TAGS</span><h2>Context with pull</h2><div className="rank-list">{data.popularTags.map((tag, index) => <div className="rank-row" key={tag.label}><span className="rank-number">0{index + 1}</span><strong>{tag.label}</strong><span>{tag.value}</span></div>)}</div></article><article className="analytics-card"><span className="section-kicker">GEOGRAPHIC DEMAND</span><h2>Where the brief is</h2><div className="rank-list">{data.geographicDemand.map((place) => <div className="place-row" key={place.label}><div><strong>{place.label}</strong><small>{place.detail}</small></div><span className="demand-pill">{place.value}</span></div>)}</div></article></div><div className="opportunity-grid">{data.opportunities.map((item) => <article className={`opportunity-card ${item.tone}`} key={item.title}><span className="section-kicker">OPPORTUNITY</span><h3>{item.title}</h3><p>{item.detail}</p></article>)}</div><p className="privacy-note">Privacy note: Stockvel stores daily counters, coarse place labels, and approved asset context only. No IP address, device fingerprint, cookie, or raw search history is used for these signals.</p></section>;
 
-  return <section className="analytics-page"><div className="workspace-intro"><span className="section-kicker">BUYER PERFORMANCE · {data.range}</span><h1>Know what your<br /><em>licence made possible.</em></h1><p>See campaign delivery and attributed results beside the exact assets your team licensed.</p></div><div className="metric-grid"><MetricCard label="Campaign spend" value={formatZar(data.summary.spendCents)} detail="licensed asset spend" /><MetricCard label="Licensed assets" value={data.summary.licensedAssets.toString()} detail="with campaign attribution" /><MetricCard label="Attributed ROI" value={`+${data.summary.roi}%`} detail="conversion value proxy" tone="green" /><MetricCard label="Conversions" value={data.summary.conversions.toLocaleString()} detail={`${data.summary.impressions.toLocaleString()} impressions`} /></div><div className="analytics-columns buyer-columns"><article className="analytics-card analytics-wide"><div className="card-heading"><div><span className="section-kicker">DELIVERY TREND</span><h2>Campaign impressions</h2></div><span className="status-pill cool">Licensed assets only</span></div><MetricBars points={data.performance} tone="green" /></article><article className="analytics-card"><span className="section-kicker">CAMPAIGNS</span><h2>Asset-level ROI</h2><div className="campaign-list">{data.campaigns.map((campaign) => <div className="campaign-row" key={campaign.id}><div><strong>{campaign.name}</strong><small>{campaign.assetTitle}</small></div><b>+{campaign.roi}%</b><span>{formatZar(campaign.spendCents)}</span></div>)}</div></article></div><div className="campaign-table">{data.campaigns.map((campaign) => <article className="campaign-detail" key={campaign.id}><div><span className="section-kicker">LICENSED ASSET</span><h3>{campaign.assetTitle}</h3><p>{campaign.name} · {campaign.status}</p></div><div><strong>{campaign.impressions.toLocaleString()}</strong><small>impressions</small></div><div><strong>{campaign.conversions.toLocaleString()}</strong><small>conversions</small></div><div><strong>+{campaign.roi}%</strong><small>attributed ROI</small></div></article>)}</div><p className="privacy-note">ROI is tied to licences in D1 and campaign events from your authenticated workspace. Conversion value is a configurable reporting assumption until your ad platform is connected.</p></section>;
+  return <section className="analytics-page"><div className="workspace-intro"><span className="section-kicker">BUYER PERFORMANCE · {data.range}</span><h1>Know what your<br /><em>licence made possible.</em></h1><p>See campaign delivery and attributed results beside the exact assets your team licensed.</p></div><div className="metric-grid"><MetricCard label="Credits used" value={formatCredits(data.summary.creditsUsed)} detail="licensed media access" /><MetricCard label="Licensed assets" value={data.summary.licensedAssets.toString()} detail="with campaign attribution" /><MetricCard label="Attributed ROI" value={`+${data.summary.roi}%`} detail="conversion-to-credit proxy" tone="green" /><MetricCard label="Conversions" value={data.summary.conversions.toLocaleString()} detail={`${data.summary.impressions.toLocaleString()} impressions`} /></div><div className="analytics-columns buyer-columns"><article className="analytics-card analytics-wide"><div className="card-heading"><div><span className="section-kicker">DELIVERY TREND</span><h2>Campaign impressions</h2></div><span className="status-pill cool">Licensed assets only</span></div><MetricBars points={data.performance} tone="green" /></article><article className="analytics-card"><span className="section-kicker">CAMPAIGNS</span><h2>Asset-level ROI</h2><div className="campaign-list">{data.campaigns.map((campaign) => <div className="campaign-row" key={campaign.id}><div><strong>{campaign.name}</strong><small>{campaign.assetTitle}</small></div><b>+{campaign.roi}%</b><span>{formatCredits(campaign.creditsUsed)}</span></div>)}</div></article></div><div className="campaign-table">{data.campaigns.map((campaign) => <article className="campaign-detail" key={campaign.id}><div><span className="section-kicker">LICENSED ASSET</span><h3>{campaign.assetTitle}</h3><p>{campaign.name} · {campaign.status}</p></div><div><strong>{campaign.impressions.toLocaleString()}</strong><small>impressions</small></div><div><strong>{campaign.conversions.toLocaleString()}</strong><small>conversions</small></div><div><strong>+{campaign.roi}%</strong><small>attributed ROI</small></div></article>)}</div><p className="privacy-note">ROI is tied to credit-based licences in D1 and campaign events from your authenticated workspace. Conversion value is a configurable reporting assumption until your ad platform is connected.</p></section>;
 }
 
 type BuyerFinancePlan = { id: "monthly" | "annual"; amountCents: number; currency: string; interval: string };
 type BuyerFinanceSnapshot = {
   subscription: { configured: boolean; plans: BuyerFinancePlan[]; plan: { amountCents: number; currency: string; interval: string } | null; subscription: Record<string, unknown> | null; sourceOfTruth: string };
   purchases: Array<Record<string, unknown>>;
-  credits: { oneCreditCents: number; balanceCredits: number; transactions: Array<Record<string, unknown>>; pendingPurchases: Array<Record<string, unknown>> };
+  credits: { creditPackCredits?: number; creditPackDurationDays?: number; balanceCredits: number; transactions: Array<Record<string, unknown>>; pendingPurchases: Array<Record<string, unknown>>; showCurrencyReference?: boolean; referenceAmountCents?: number };
 };
+
+function PaymentAccountDetails({ account }: { account: Pick<SessionUser, "displayName" | "id" | "email"> | null }) {
+  if (!account) return null;
+  return <section className="payment-account-details" aria-labelledby="payment-account-details-title">
+    <div className="card-heading"><div><span className="section-kicker">PAYMENT ACCOUNT</span><h3 id="payment-account-details-title">Details used for checkout</h3></div><span className="status-pill cool">Authenticated</span></div>
+    <div className="payment-account-fields">
+      <div><span>Name</span><strong>{account.displayName}</strong></div>
+      <div><span>Account ID</span><strong>{account.id}</strong></div>
+      <div><span>Paystack login account</span><strong>{account.email}</strong></div>
+    </div>
+    <small className="payment-account-note">Paystack uses this authenticated account email for payment checkout and receipts. No Paystack secret or dashboard credential is shown here.</small>
+  </section>;
+}
 
 function formatBuyerPurchaseDate(value: unknown): string {
   const date = new Date(String(value ?? ""));
   return Number.isNaN(date.getTime()) ? String(value ?? "") : new Intl.DateTimeFormat("en-ZA", { dateStyle: "medium" }).format(date);
 }
 
-function BuyerFinancePanel({ api, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
+function BuyerFinancePanel({ api, onNotice, role, account }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void; role?: string; account: Pick<SessionUser, "displayName" | "id" | "email"> | null }) {
   const [snapshot, setSnapshot] = useState<BuyerFinanceSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [selectedPlan, setSelectedPlan] = useState<"monthly" | "annual">("monthly");
-  const [creditQuantity, setCreditQuantity] = useState("1");
-  const [busy, setBusy] = useState<"subscription" | "credits" | null>(null);
+  const [busy, setBusy] = useState(false);
+  const canViewMembership = role === "buyer" || role === "admin";
 
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const responses = await Promise.all([api("/api/my/purchases"), api("/api/my/credits"), api("/api/subscription")]);
-      if (responses.some((response) => !response.ok)) throw new Error("Buyer finance data unavailable");
-      const [purchaseData, creditData, subscriptionData] = await Promise.all(responses.map((response) => response.json()));
+      const responses = await Promise.all([api("/api/my/purchases"), api("/api/my/credits"), canViewMembership ? api("/api/subscription") : Promise.resolve(null)]);
+      if (!responses[0].ok || !responses[1].ok || (responses[2] && !responses[2].ok)) throw new Error("Buyer finance data unavailable");
+      const [purchaseData, creditData] = await Promise.all([responses[0].json(), responses[1].json()]);
+      const subscriptionData = responses[2] ? await responses[2].json() : { configured: false, plans: [], plan: null, subscription: null, sourceOfTruth: "Membership controls are available from a buyer account." };
       const purchasePayload = purchaseData as { results?: unknown };
       const creditPayload = creditData as BuyerFinanceSnapshot["credits"];
       const nextSubscription = subscriptionData as BuyerFinanceSnapshot["subscription"];
@@ -943,66 +1021,50 @@ function BuyerFinancePanel({ api, onNotice }: { api: (path: string, init?: Reque
         credits: creditPayload,
         subscription: nextSubscription,
       });
-      if (nextSubscription.plans.length && !nextSubscription.plans.some((plan) => plan.id === selectedPlan)) setSelectedPlan(nextSubscription.plans[0].id);
     } catch {
       setSnapshot(null);
       setError("Buyer payment details are unavailable. No cached balances or purchase records are shown.");
     } finally {
       setLoading(false);
     }
-  }, [api, selectedPlan]);
+  }, [api, canViewMembership]);
 
   useEffect(() => { void load(); }, [load]);
 
-  async function startSubscription(event: React.FormEvent): Promise<void> {
-    event.preventDefault();
-    setBusy("subscription");
-    try {
-      const response = await api("/api/subscription/session", { method: "POST", body: JSON.stringify({ plan: selectedPlan, successUrl: `${window.location.origin}/account?subscription=complete`, cancelUrl: `${window.location.origin}/account?subscription=cancelled` }) });
-      const body = await response.json().catch(() => ({})) as { checkoutUrl?: string; error?: string };
-      if (!response.ok || !body.checkoutUrl) throw new Error(body.error ?? "Subscription checkout is unavailable");
-      window.location.assign(body.checkoutUrl);
-    } catch (failure) {
-      onNotice(failure instanceof Error ? failure.message : "Subscription checkout is unavailable. No recurring payment was created.");
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function buyCredits(event: React.FormEvent): Promise<void> {
-    event.preventDefault();
-    const quantity = Number(creditQuantity);
-    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 1000) { onNotice("Enter a whole number of credits between 1 and 1,000."); return; }
-    setBusy("credits");
+  async function buyCredits(): Promise<void> {
+    const quantity = snapshot?.credits.creditPackCredits ?? MEDIA_MEMBERSHIP_CREDITS;
+    setBusy(true);
     try {
       const response = await api("/api/buyer/credits/checkout", { method: "POST", body: JSON.stringify({ credits: quantity, successUrl: `${window.location.origin}/account?bundle=complete`, cancelUrl: `${window.location.origin}/account?bundle=cancelled` }) });
-      const body = await response.json().catch(() => ({})) as { checkoutUrl?: string; error?: string };
+      const body = await response.json().catch(() => ({})) as { checkoutUrl?: string; provider?: string; error?: string };
       if (!response.ok || !body.checkoutUrl) throw new Error(body.error ?? "Credit checkout is unavailable");
-      window.location.assign(body.checkoutUrl);
+      await openCreditCheckout(api, body.checkoutUrl, body.provider);
     } catch (failure) {
       onNotice(failure instanceof Error ? failure.message : "Credit checkout is unavailable. Credits are added only after verified payment.");
     } finally {
-      setBusy(null);
+      setBusy(false);
     }
   }
 
   const subscription = snapshot?.subscription.subscription;
   const subscriptionStatus = String(subscription?.status ?? "not_started");
   const subscriptionBusy = ["pending", "active", "non-renewing", "attention"].includes(subscriptionStatus);
-  const selectedPlanData = snapshot?.subscription.plans.find((plan) => plan.id === selectedPlan);
-  const creditTotal = (Number(creditQuantity) || 0) * (snapshot?.credits.oneCreditCents ?? 10000);
+  const creditPackageCredits = snapshot?.credits.creditPackCredits ?? MEDIA_MEMBERSHIP_CREDITS;
+  const creditPackageDurationDays = snapshot?.credits.creditPackDurationDays ?? MEDIA_MEMBERSHIP_DURATION_DAYS;
+  const creditDuration = mediaMembershipDurationLabel(creditPackageDurationDays);
+  const referenceLine = mediaCreditReferenceLine(creditPackageCredits, showCurrencyReference && (snapshot?.credits.showCurrencyReference ?? true));
+  const paidPurchaseCount = snapshot?.purchases.filter((item) => ["paid", "payment_succeeded", "success"].includes(String(item.status))).length ?? 0;
 
   return <section id="buyer-finance" className="buyer-finance" aria-labelledby="buyer-finance-title">
     <div className="card-heading"><div><span className="section-kicker">BUYER ACCOUNT / PAYMENTS</span><h2 id="buyer-finance-title">Your purchase history and <em>buying power.</em></h2></div><span className="status-pill cool">Live account data</span></div>
-    {loading && <div className="empty-state" role="status">Loading your purchase history, membership, and credits...</div>}
+    <PaymentAccountDetails account={account} />
+    {loading && <div className="empty-state" role="status">Loading your purchase history and credits{canViewMembership ? ", membership" : ""}...</div>}
     {!loading && error && <div className="buyer-finance-error" role="alert"><span>{error}</span><button type="button" className="outline-button" onClick={() => void load()}>Try again</button></div>}
     {!loading && !error && snapshot && <>
-      <div className="metric-grid buyer-finance-metrics"><MetricCard label="Purchases recorded" value={snapshot.purchases.length.toString()} detail="licences, credits, and membership" /><MetricCard label="Available credits" value={snapshot.credits.balanceCredits.toLocaleString()} detail="1 credit = R100" tone={snapshot.credits.balanceCredits ? "green" : "rust"} /><MetricCard label="Membership" value={subscriptionStatus === "active" ? "Active" : subscriptionStatus.replaceAll("-", " ")} detail={snapshot.subscription.plan ? `${formatZar(snapshot.subscription.plan.amountCents)} / ${snapshot.subscription.plan.interval}` : "Paystack plan not configured"} tone={subscriptionStatus === "active" ? "green" : "rust"} /><MetricCard label="Paid history" value={formatZar(snapshot.purchases.filter((item) => ["paid", "payment_succeeded", "success"].includes(String(item.status))).reduce((sum, item) => sum + Number(item.amountCents ?? 0), 0))} detail="verified completed payments" /></div>
-      <div className="buyer-finance-columns">
-        <article className="buyer-finance-card"><div className="card-heading"><div><span className="section-kicker">MONTHLY MEMBERSHIP</span><h3>Keep access ready for the next brief.</h3></div><span className="status-pill warm">Paystack recurring</span></div><p className="buyer-finance-copy">Choose a configured monthly or annual plan. Membership remains pending until Paystack confirms the payment by signed webhook.</p>{subscriptionBusy ? <div className="buyer-finance-status"><strong>{subscriptionStatus.replaceAll("-", " ")}</strong><span>{subscription?.next_payment_date ? `Next payment: ${formatBuyerPurchaseDate(subscription.next_payment_date)}` : "Payment provider confirmation is still required before access changes."}</span></div> : snapshot.subscription.configured && snapshot.subscription.plans.length ? <form className="buyer-finance-form" onSubmit={(event) => void startSubscription(event)}><div className="buyer-plan-options" role="radiogroup" aria-label="Membership plan">{snapshot.subscription.plans.map((plan) => <label key={plan.id} className={selectedPlan === plan.id ? "selected" : ""}><input type="radio" name="buyer-plan" value={plan.id} checked={selectedPlan === plan.id} onChange={() => setSelectedPlan(plan.id)} /><span><strong>{plan.id === "annual" ? "Annual" : "Monthly"}</strong><small>{formatZar(plan.amountCents)} / {plan.interval}</small></span></label>)}</div><button type="submit" className="dark-button" disabled={busy !== null}>{busy === "subscription" ? "Opening checkout..." : `Start ${selectedPlanData?.id ?? "monthly"} membership`}</button></form> : <div className="buyer-finance-status"><strong>Not configured</strong><span>The recurring Paystack plan is not configured for this deployment. No payment can be created.</span></div>}</article>
-        <article className="buyer-finance-card"><div className="card-heading"><div><span className="section-kicker">ARCHIVE CREDITS</span><h3>Buy credits for artist quotes.</h3></div><span className="status-pill cool">R100 / credit</span></div><p className="buyer-finance-copy">Credits are added to your account only after verified payment and can be used toward custom licences agreed with artists.</p><form className="buyer-finance-form buyer-credit-form" onSubmit={(event) => void buyCredits(event)}><label htmlFor="buyer-credit-quantity">Credits to buy<input id="buyer-credit-quantity" type="number" min="1" max="1000" step="1" value={creditQuantity} onChange={(event) => setCreditQuantity(event.target.value)} required /></label><div className="buyer-finance-total"><span>1 credit = R100</span><strong>{formatZar(creditTotal)}</strong></div><button type="submit" className="dark-button" disabled={busy !== null}>{busy === "credits" ? "Opening checkout..." : "Buy credits"}</button></form><div className="buyer-finance-balance"><strong>{snapshot.credits.balanceCredits.toLocaleString()}</strong><span>credits available for future custom licences</span></div></article>
-      </div>
-      <article className="buyer-finance-card buyer-purchase-history"><div className="card-heading"><div><span className="section-kicker">ALL PURCHASES</span><h3>Everything bought on this account.</h3></div><span className="status-pill cool">{snapshot.purchases.length} record{snapshot.purchases.length === 1 ? "" : "s"}</span></div>{snapshot.purchases.length ? <div className="purchase-history-list">{snapshot.purchases.map((purchase) => <div className="purchase-history-row" key={`${String(purchase.kind)}:${String(purchase.id)}`}><div><strong>{String(purchase.title)}</strong><small>{String(purchase.details)} - {formatBuyerPurchaseDate(purchase.createdAt)}</small></div><b className={`purchase-status ${String(purchase.status)}`}>{String(purchase.status).replaceAll("_", " ")}</b><span>{formatZar(Number(purchase.amountCents ?? 0))}</span></div>)}</div> : <div className="empty-state">No purchases are recorded yet. Completed licences, credits, and membership payments will appear here.</div>}</article>
+      <article className="buyer-finance-card credit-membership-card" aria-labelledby="credit-membership-title"><div className="card-heading"><div><span className="section-kicker">MEDIA CREDIT MEMBERSHIP</span><h3 id="credit-membership-title">Buy {formatCredits(creditPackageCredits)} — access this media for {creditDuration}.</h3></div><span className="status-pill cool">Credit access</span></div><p className="buyer-finance-copy">Credits unlock downloads/streams. Valid for {creditDuration} from purchase.</p><div className="credit-membership-price"><strong>Price: {formatCredits(creditPackageCredits)}</strong>{referenceLine ? <small>{referenceLine}</small> : null}</div><button type="button" className="dark-button" disabled={busy} onClick={() => void buyCredits()}>{busy ? "Opening checkout..." : `Purchase ${formatCredits(creditPackageCredits)}`}</button><div className="buyer-finance-balance"><strong>{formatCredits(snapshot.credits.balanceCredits)}</strong><span>available to unlock media access</span></div></article>
+      <div className="metric-grid buyer-finance-metrics"><MetricCard label="Purchases recorded" value={snapshot.purchases.length.toString()} detail="credit memberships and access" /><MetricCard label="Available credits" value={formatCredits(snapshot.credits.balanceCredits)} detail={`${formatCredits(creditPackageCredits)} unlocks ${creditDuration} access`} tone={snapshot.credits.balanceCredits ? "green" : "rust"} /><MetricCard label="Membership" value={subscriptionBusy ? "Active" : "Credit access"} detail={`${formatCredits(creditPackageCredits)} / ${creditDuration}`} tone={subscriptionBusy ? "green" : "rust"} /><MetricCard label="Paid history" value={paidPurchaseCount.toString()} detail="verified completed purchases" /></div>
+      {canViewMembership && subscriptionBusy && <div className="buyer-finance-status"><strong>Existing membership: {subscriptionStatus.replaceAll("-", " ")}</strong><span>{subscription?.next_payment_date ? `Next payment: ${formatBuyerPurchaseDate(subscription.next_payment_date)}` : "Credit memberships remain valid for the stated access duration."}</span></div>}
+      <article className="buyer-finance-card buyer-purchase-history"><div className="card-heading"><div><span className="section-kicker">ALL PURCHASES</span><h3>Everything bought on this account.</h3></div><span className="status-pill cool">{snapshot.purchases.length} record{snapshot.purchases.length === 1 ? "" : "s"}</span></div>{snapshot.purchases.length ? <div className="purchase-history-list">{snapshot.purchases.map((purchase) => { const credits = Number(purchase.creditCost ?? purchase.credits ?? 0); return <div className="purchase-history-row" key={`${String(purchase.kind)}:${String(purchase.id)}`}><div><strong>{String(purchase.title)}</strong><small>{credits > 0 ? `${formatCredits(credits)} · ` : ""}{String(purchase.details)} · {formatBuyerPurchaseDate(purchase.createdAt)}</small></div><b className={`purchase-status ${String(purchase.status)}`}>{String(purchase.status).replaceAll("_", " ")}</b></div>; })}</div> : <div className="empty-state">No purchases are recorded yet. Completed credit memberships and media access will appear here.</div>}</article>
     </>}
   </section>;
 }
@@ -1453,16 +1515,18 @@ function CreatorMarketplace({ onOpen }: { onOpen: (asset: Asset) => void }) {
   const [query, setQuery] = useState(""); const [results, setResults] = useState<CreatorProfile[]>([]); const [selected, setSelected] = useState<{ profile: CreatorProfile; assets: Asset[]; collections: PortfolioCollection[] } | null>(null);
   useEffect(() => { const controller = new AbortController(); const params = new URLSearchParams(query ? { q: query } : {}); void fetch(`/api/creators?${params}`, { signal: controller.signal }).then(async (response) => response.ok ? response.json() as Promise<{ results: CreatorProfile[] }> : { results: [] }).then((data) => setResults(data.results)).catch(() => setResults([])); return () => controller.abort(); }, [query]);
   useEffect(() => { const slug = window.location.pathname.match(/^\/creators\/([a-z0-9-]+)$/)?.[1]; if (slug) void openCreator(slug); }, []);
-  useEffect(() => { document.title = selected ? `${selected.profile.name} | Veld Archive` : "Creators | Veld Archive"; if (selected) { const meta = document.querySelector('meta[name="description"]') ?? document.head.appendChild(Object.assign(document.createElement("meta"), { name: "description" })); meta.setAttribute("content", selected.profile.headline || selected.profile.bio); } }, [selected]);
+  useEffect(() => { document.title = selected ? `${selected.profile.name} | Stockvel` : "Creators | Stockvel"; if (selected) { const meta = document.querySelector('meta[name="description"]') ?? document.head.appendChild(Object.assign(document.createElement("meta"), { name: "description" })); meta.setAttribute("content", selected.profile.headline || selected.profile.bio); } }, [selected]);
   async function openCreator(slug: string) { const response = await fetch(`/api/creators/${slug}`); if (!response.ok) return; setSelected(await response.json() as { profile: CreatorProfile; assets: Asset[]; collections: PortfolioCollection[] }); window.history.replaceState(null, "", `/creators/${slug}`); }
   return <main className="marketplace-page"><section className="marketplace-hero"><span className="section-kicker">CONTRIBUTOR MARKETPLACE</span><h1>Find the people<br /><em>behind the work.</em></h1><p>Search public contributor portfolios by place, practice, and subject.</p><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search creators, places, specialties" aria-label="Search creators" /></section>{selected ? <section className="creator-profile"><button className="text-button" onClick={() => { setSelected(null); window.history.replaceState(null, "", "/creators"); }}>← All creators</button><span className="section-kicker">{selected.profile.location}</span><h2>{selected.profile.name}</h2><h3>{selected.profile.headline}</h3><p>{selected.profile.bio}</p><div className="tag-list">{selected.profile.specialties.map((tag) => <span key={tag}>{tag}</span>)}</div><div className="creator-stats"><span>{selected.profile.assetCount} published records</span><span>{selected.profile.publishedImageCount} published photos</span><span>{selected.profile.collectionCount} public collections</span>{selected.profile.reviewCount > 0 && <span className="review-stat">{selected.profile.reviewCount} held for review</span>}</div><div className="creator-flow" aria-label="Creator publication flow"><strong>PHOTO FLOW</strong><span>Owned upload</span><b>→</b><span>Metadata + rights review</span><b>→</b><span>Published only after approval</span></div>{selected.profile.reviewCount > 0 && <p className="creator-review-note"><strong>{selected.profile.reviewCount} record{selected.profile.reviewCount === 1 ? " is" : "s are"} not public yet.</strong> They remain private to the contributor and editorial team until the required context and rights review is complete.</p>}<h3>Portfolio collections</h3><div className="collection-grid">{selected.collections.map((collection) => <article key={collection.id}><span className="section-kicker">COLLECTION</span><h4>{collection.title}</h4><p>{collection.description}</p><small>{collection.assetCount} assets</small></article>)}</div><h3>More from this artist</h3><p className="creator-grid-note">Published records below are sourced from {selected.profile.name}; each card carries its attributed owner and verification state.</p><div className="asset-grid">{selected.assets.map((asset, index) => <AssetCard key={asset.id} asset={asset} index={index} onOpen={onOpen} />)}</div></section> : <section className="creator-grid">{results.map((creator) => <button className="creator-card" key={creator.id} onClick={() => void openCreator(creator.slug)}><span className="creator-avatar">{creator.name.slice(0, 1)}</span><span className="section-kicker">{creator.location || "South Africa"}</span><h2>{creator.name}</h2><p>{creator.headline}</p><div>{creator.specialties.map((tag) => <small key={tag}>{tag}</small>)}</div><b>{creator.assetCount} assets · {creator.collectionCount} collections →</b></button>)}{results.length === 0 && <div className="empty-state">No public contributors matched that search.</div>}</section>}</main>;
 }
 
-function BuyerSubscriptionPanel({ api, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
+function BuyerSubscriptionPanel({ api, onNotice, account }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void; account: Pick<SessionUser, "displayName" | "id" | "email"> | null }) {
   const [data, setData] = useState<{ configured: boolean; hasAccess: boolean; sourceOfTruth: string; plans: Array<{ id: "monthly" | "annual"; amountCents: number; currency: string; interval: string }>; plan: { amountCents: number; currency: string; interval: string } | null; subscription: Record<string, unknown> | null; payments: Array<Record<string, unknown>>; free: { limit: number; used: number; remaining: number }; credits: { balanceCredits: number } } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
   const [selectedPlan, setSelectedPlan] = useState<"monthly" | "annual">("monthly");
+
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
@@ -1481,35 +1545,52 @@ function BuyerSubscriptionPanel({ api, onNotice }: { api: (path: string, init?: 
       setLoading(false);
     }
   }, [api]);
+
   useEffect(() => { void load(); }, [load]);
+
+  async function buyCredits(): Promise<void> {
+    setBusy(true);
+    try {
+      const response = await api("/api/buyer/credits/checkout", { method: "POST", body: JSON.stringify({ credits: MEDIA_MEMBERSHIP_CREDITS, successUrl: `${window.location.origin}/account?bundle=complete`, cancelUrl: `${window.location.origin}/account?bundle=cancelled` }) });
+      const body = await response.json().catch(() => ({})) as { checkoutUrl?: string; provider?: string; error?: string };
+      if (!response.ok || !body.checkoutUrl) throw new Error(body.error ?? "Credit checkout is unavailable.");
+      await openCreditCheckout(api, body.checkoutUrl, body.provider);
+    } catch (failure) {
+      onNotice(failure instanceof Error ? failure.message : "Credit checkout is unavailable. Credits are added only after verified payment.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function startSubscription(): Promise<void> {
-    const response = await api("/api/subscription/session", {
-      method: "POST",
-      body: JSON.stringify({ plan: selectedPlan, successUrl: `${window.location.origin}/account?subscription=complete`, cancelUrl: `${window.location.origin}/account?subscription=cancelled` }),
-    });
+    const response = await api("/api/subscription/session", { method: "POST", body: JSON.stringify({ plan: selectedPlan, successUrl: `${window.location.origin}/account?subscription=complete`, cancelUrl: `${window.location.origin}/account?subscription=cancelled` }) });
     const body = await response.json().catch(() => ({})) as { checkoutUrl?: string; error?: string };
-    if (!response.ok || !body.checkoutUrl) { onNotice(body.error ?? "Paystack could not start the subscription checkout."); return; }
+    if (!response.ok || !body.checkoutUrl) { onNotice(body.error ?? "The recurring membership checkout could not be opened."); return; }
     window.location.assign(body.checkoutUrl);
   }
 
-  async function buyBundle(credits: number): Promise<void> {
-    const response = await api("/api/buyer/credits/checkout", { method: "POST", body: JSON.stringify({ credits, successUrl: `${window.location.origin}/account?bundle=complete`, cancelUrl: `${window.location.origin}/account?bundle=cancelled` }) });
-    const body = await response.json().catch(() => ({})) as { checkoutUrl?: string; error?: string };
-    if (!response.ok || !body.checkoutUrl) { onNotice(body.error ?? "The download bundle checkout could not be opened."); return; }
-    window.location.assign(body.checkoutUrl);
-  }
   async function manageSubscription(): Promise<void> {
     const response = await api("/api/subscription/manage-link", { method: "POST" });
     const body = await response.json().catch(() => ({})) as { manageUrl?: string; error?: string };
-    if (!response.ok || !body.manageUrl) { onNotice(body.error ?? "Paystack could not open subscription management."); return; }
+    if (!response.ok || !body.manageUrl) { onNotice(body.error ?? "Subscription management could not be opened."); return; }
     window.location.assign(body.manageUrl);
   }
-  if (loading) return <article className="buyer-subscription-card"><span className="section-kicker">BUYER SUBSCRIPTION</span><h2>Loading billing status…</h2></article>;
-  if (error || !data) return <article className="buyer-subscription-card" role="alert"><span className="section-kicker">BUYER SUBSCRIPTION</span><h2>Billing status is unavailable.</h2><p>{error || "Try again to load the live account balance."}</p><button type="button" className="outline-button" onClick={() => void load()}>Try again</button></article>;
+
+  if (loading) return <article className="buyer-subscription-card"><span className="section-kicker">BUYER ACCESS</span><h2>Loading access status…</h2></article>;
+  if (error || !data) return <article className="buyer-subscription-card" role="alert"><span className="section-kicker">BUYER ACCESS</span><h2>Access status is unavailable.</h2><p>{error || "Try again to load the live account balance."}</p><button type="button" className="outline-button" onClick={() => void load()}>Try again</button></article>;
+
   const subscription = data.subscription;
   const status = String(subscription?.status ?? "not_started");
   const canStart = data.configured && (!subscription || ["cancelled", "completed"].includes(status));
-  return <article className="buyer-subscription-card"><div className="card-heading"><div><span className="section-kicker">BUYER ACCESS</span><h2>Try the archive before you subscribe</h2></div><span className={`status-pill ${status === "active" ? "cool" : ""}`}>{status.replaceAll("-", " ")}</span></div><div className="free-download-offer"><strong>{data.free.remaining} free photo download{data.free.remaining === 1 ? "" : "s"} remaining</strong><span>Registered buyers get {data.free.limit} artist-approved photos once, before any payment. Paid download credits: {data.credits.balanceCredits}. No card is needed to claim the allowance.</span></div><div className="subscription-plan-choices"><div><span className="section-kicker">UNLIMITED ACCESS</span><h3>Choose monthly or annual</h3><small>Unlimited downloads from artists who participate in membership access.</small></div>{data.plans.map((plan) => <label key={plan.id} className={`subscription-plan-option ${selectedPlan === plan.id ? "selected" : ""}`}><input type="radio" name="buyer-plan" value={plan.id} checked={selectedPlan === plan.id} onChange={() => setSelectedPlan(plan.id)} /><span><strong>{plan.id === "annual" ? "Annual" : "Monthly"}</strong><b>{formatZar(plan.amountCents)}</b><small>{plan.id === "annual" ? "per year" : "per month"}</small></span></label>)}</div>{data.plans.length === 0 && <p>The recurring Paystack plans are not configured for this deployment.</p>}{canStart && data.plans.length > 0 && <button className="dark-button" onClick={() => void startSubscription()}>Start {selectedPlan} unlimited access ↗</button>}{Boolean(subscription?.provider_subscription_code) && ["active", "non-renewing", "attention"].includes(status) && <button className="ghost-button" onClick={() => void manageSubscription()}>Manage billing with Paystack</button>}{status === "pending" && <small>Checkout was started. This account becomes active only after Paystack confirms payment by webhook.</small>}{status === "attention" && <small>Paystack reported a billing issue. Update the card through Paystack before access is changed.</small>}<div className="download-bundle-offer"><div><span className="section-kicker">ON-DEMAND BUNDLES</span><h3>Buy downloads once-off</h3><small>Use credits when you do not need a recurring plan. One credit unlocks one original photo or video licence.</small></div><div className="bundle-options">{[1, 5, 10].map((credits) => <button key={credits} className="outline-button" onClick={() => void buyBundle(credits)}>{credits} download{credits === 1 ? "" : "s"} · {formatZar(credits * 10000)}</button>)}</div></div>{data.free.remaining === 0 && <small>Your introductory allowance is used. A bundle or unlimited plan is the next access step.</small>}{Boolean(subscription?.next_payment_date) && <small>Next payment: {new Date(String(subscription?.next_payment_date)).toLocaleDateString("en-ZA")}</small>}{data.payments.length > 0 && <div className="subscription-payment-list"><strong>Paystack transaction history</strong>{data.payments.slice(0, 5).map((payment) => <div key={String(payment.provider_event_id)}><span>{String(payment.event_type)}</span><small>{String(payment.status)} · {String(payment.provider_reference ?? payment.invoice_code ?? "Paystack event")}</small><b>{payment.amount_cents ? formatZar(Number(payment.amount_cents)) : "—"}</b></div>)}</div>}<small className="privacy-note">Source of truth: {data.sourceOfTruth}. We only mirror signed Paystack webhook events and references.</small></article>;
+  const referenceLine = mediaCreditReferenceLine(MEDIA_MEMBERSHIP_CREDITS);
+
+  return <article className="buyer-subscription-card"><div className="card-heading"><div><span className="section-kicker">BUYER ACCESS</span><h2>Buy media access with credits.</h2></div><span className={`status-pill ${status === "active" ? "cool" : ""}`}>{status.replaceAll("-", " ")}</span></div>
+    <PaymentAccountDetails account={account} />
+    <section className="credit-membership-card account-credit-card" aria-labelledby="account-credit-title"><div className="card-heading"><div><span className="section-kicker">MEDIA CREDIT MEMBERSHIP</span><h3 id="account-credit-title">Buy {formatCredits(MEDIA_MEMBERSHIP_CREDITS)} — access this media for {mediaMembershipDurationLabel(MEDIA_MEMBERSHIP_DURATION_DAYS)}.</h3></div><span className="status-pill cool">Credit access</span></div><p className="buyer-finance-copy">Credits unlock downloads/streams. Valid for {mediaMembershipDurationLabel(MEDIA_MEMBERSHIP_DURATION_DAYS)} from purchase.</p><div className="credit-membership-price"><strong>Price: {formatCredits(MEDIA_MEMBERSHIP_CREDITS)}</strong>{referenceLine ? <small>{referenceLine}</small> : null}</div><button type="button" className="dark-button" disabled={busy} onClick={() => void buyCredits()}>{busy ? "Opening checkout…" : `Purchase ${formatCredits(MEDIA_MEMBERSHIP_CREDITS)}`}</button><div className="buyer-finance-balance"><strong>{formatCredits(data.credits.balanceCredits)}</strong><span>available to unlock media access</span></div></section>
+    <div className="free-download-offer"><strong>{data.free.remaining} free photo download{data.free.remaining === 1 ? "" : "s"} remaining</strong><span>Registered buyers get {data.free.limit} artist-approved photos once, before any payment. Credits are used for paid media access.</span></div>
+      <details className="secondary-membership-options"><summary>Manage recurring membership (optional)</summary><div><p>Recurring membership remains available for buyers who want unlimited participating-artist access. Amounts are confirmed by the secure payment provider; seller allocation is based on verified usage.</p><div className="subscription-plan-choices"><div><span className="section-kicker">RECURRING ACCESS</span><h3>Choose a billing interval</h3><small>Monthly and annual plans are kept separate from seller-listed credit prices.</small></div>{data.plans.map((plan) => <label key={plan.id} className={`subscription-plan-option ${selectedPlan === plan.id ? "selected" : ""}`}><input type="radio" name="buyer-plan" value={plan.id} checked={selectedPlan === plan.id} onChange={() => setSelectedPlan(plan.id)} /><span><strong>{plan.id === "annual" ? "Annual membership" : "Monthly membership"}</strong><small>{plan.id === "annual" ? "Billed yearly by the provider" : "Billed monthly by the provider"}</small></span></label>)}</div>{data.plans.length === 0 && <p>The recurring membership plans are not configured for this deployment.</p>}{canStart && data.plans.length > 0 && <button type="button" className="outline-button" onClick={() => void startSubscription()}>Start {selectedPlan} membership</button>}{Boolean(subscription?.provider_subscription_code) && ["active", "non-renewing", "attention"].includes(status) && <button type="button" className="ghost-button" onClick={() => void manageSubscription()}>Manage recurring membership</button>}{status === "pending" && <small>Checkout was started. This account becomes active only after the provider confirms payment by webhook.</small>}{status === "attention" && <small>The provider reported a billing issue. Update billing before access changes.</small>}</div></details>
+    {data.free.remaining === 0 && <small>Your introductory allowance is used. Buy credits when you need media access.</small>}{Boolean(subscription?.next_payment_date) && <small>Next recurring payment: {new Date(String(subscription?.next_payment_date)).toLocaleDateString("en-ZA")}</small>}{data.payments.length > 0 && <details className="subscription-payment-list"><summary>Payment history</summary>{data.payments.slice(0, 5).map((payment) => <div key={String(payment.provider_event_id)}><span>{String(payment.event_type)}</span><small>{String(payment.status)} · {String(payment.provider_reference ?? payment.invoice_code ?? "Provider event")}</small></div>)}</details>}<small className="privacy-note">Source of truth: {data.sourceOfTruth}. We mirror verified provider events and references; buyer prices are shown as credits.</small>
+  </article>;
 }
 
 function AccountWorkspace({ api, auth0, onNotice, buyer }: { api: (path: string, init?: RequestInit) => Promise<Response>; auth0?: Auth0Bridge; onNotice: (notice: string) => void; buyer: boolean }) {
@@ -1599,7 +1680,8 @@ function AccountWorkspace({ api, auth0, onNotice, buyer }: { api: (path: string,
         const status = String(purchase.status);
         const licenceId = String(purchase.referenceId ?? purchase.id);
         const assetId = typeof purchase.assetId === "string" ? purchase.assetId : "";
-        return <article key={String(purchase.id)}><div><strong>{String(purchase.title)}</strong><small>{String(purchase.details)} · {status.replaceAll("_", " ")}</small></div><span>{formatZar(Number(purchase.amountCents))}</span>{kind === "licence" && status === "paid" && assetId ? <button type="button" className="outline-button" onClick={() => void downloadLicence(assetId)}>Download</button> : kind === "licence" && status === "pending" ? <button type="button" className="dark-button" disabled={paymentBusyId === licenceId} onClick={() => void continueToPayment(licenceId)}>{paymentBusyId === licenceId ? "Opening checkout…" : "Continue to payment"}</button> : <small className="purchase-state">{status.replaceAll("_", " ")}</small>}</article>;
+        const purchaseCredits = Number(purchase.creditCost ?? purchase.credits ?? 0);
+        return <article key={String(purchase.id)}><div><strong>{String(purchase.title)}</strong><small>{purchaseCredits > 0 ? `${formatCredits(purchaseCredits)} · ` : ""}{String(purchase.details)} · {status.replaceAll("_", " ")}</small></div><span>{purchaseCredits > 0 ? formatCredits(purchaseCredits) : "Recorded purchase"}</span>{kind === "licence" && status === "paid" && assetId ? <button type="button" className="outline-button" onClick={() => void downloadLicence(assetId)}>Download</button> : kind === "licence" && status === "pending" ? <button type="button" className="dark-button" disabled={paymentBusyId === licenceId} onClick={() => void continueToPayment(licenceId)}>{paymentBusyId === licenceId ? "Opening checkout…" : "Continue to payment"}</button> : <small className="purchase-state">{status.replaceAll("_", " ")}</small>}</article>;
       }) : <p>{buyer ? "No purchases yet. Open an approved archive asset to start an automatic licence purchase." : "No licence receipts are recorded for this workspace yet."}</p>}
     </section>
   </main>;
@@ -1761,14 +1843,19 @@ function GovernanceWorkspaceContent({ api, onNotice }: { api: (path: string, ini
 
   async function checkout() {
     if (!selected || !validation) return;
-    if (selected.monetizationModel === "custom_quote") { onNotice("Custom quote selected. No payment was created; contact the contributor for pricing."); return; }
     const accepted = buyerTermsAccepted || window.confirm("Please read the Buyer Licence and Payment Terms shown on this page. Continue only if you accept the selected licence, Paystack payment split disclosure, and limited rights-enforcement disclosure.");
     if (!accepted) return;
     setBuyerTermsAccepted(true);
     try {
-      const response = await api("/api/checkout", { method: "POST", body: JSON.stringify({ assetId: selected.id, licenceType, territory: "Worldwide", durationDays: 365, buyerAgreementVersion: "buyer-marketplace-v1", paymentAgreementVersion: "payment-split-v1", acceptBuyerTerms: accepted }) });
-      const created = await response.json().catch(() => ({})) as { licenceId?: string; error?: string };
+      const response = await api("/api/checkout", { method: "POST", body: JSON.stringify({ assetId: selected.id, licenceType, territory: "Worldwide", durationDays: 365, buyerAgreementVersion: buyerAgreement.version, paymentAgreementVersion: paymentDisclosure.version, acceptBuyerTerms: accepted, includeCustomBuying: selected.monetizationModel === "custom_quote" }) });
+      const created = await response.json().catch(() => ({})) as { licenceId?: string; error?: string; paid?: boolean; accessMode?: "subscription" | "credits"; creditsSpent?: number; creditCost?: number };
       if (!response.ok || !created.licenceId) throw new Error(created.error ?? "Licence could not be created");
+      if (created.paid) {
+        onNotice(created.accessMode === "subscription"
+          ? "Media unlocked with the active Stockvel membership. No credits were used."
+          : `Media unlocked using ${created.creditsSpent ?? created.creditCost ?? 0} credits.`);
+        return;
+      }
       const payment = await api(`/api/payments/${encodeURIComponent(created.licenceId)}/session`, { method: "POST", body: JSON.stringify({ successUrl: `${window.location.origin}/account?licence=${encodeURIComponent(created.licenceId)}&payment=complete`, cancelUrl: `${window.location.origin}/account?licence=${encodeURIComponent(created.licenceId)}&payment=cancelled` }) });
       const session = await payment.json().catch(() => ({})) as { checkoutUrl?: string; error?: string };
       if (!payment.ok || !session.checkoutUrl) throw new Error(session.error ?? "Paystack checkout could not be created");
@@ -1805,41 +1892,45 @@ function GovernanceDetail({ asset, licenceType, setLicenceType, validation, onAc
     <div className="draft-status" role="status" aria-live="polite">{dirty ? "Unsaved metadata changes" : "All metadata changes saved"}</div>
     <div className="release-evidence"><div><span className="section-kicker">CONTRIBUTOR RELEASES</span><h3>Evidence cross-check</h3></div><div className="evidence-grid"><Evidence label="Model release" status={asset.modelReleaseStatus} /><Evidence label="Property release" status={asset.propertyReleaseStatus} /></div></div>
     <div className="governance-actions">{!approved && <><button className="outline-button" onClick={() => onAction("run_ai_tagging", { aiTags: ["South Africa", asset.city ?? "location", asset.kind, "context pending"] })}>Run AI tagging ↗</button><button className="dark-button" disabled={!dirty || !corrections.title} onClick={() => onAction("save_correction", corrections)}>Save correction ↗</button><button className="approve-button" disabled={!corrections.title} onClick={() => onAction("approve")}>Approve asset ✓</button></>}{approved && <span className="approved-copy"><span className="verified-dot"></span> Approval recorded; checkout gate is active.</span>}</div>
-    <div className={`checkout-guard ${validation.allowed ? "clear" : "blocked"}`}><div><span className="section-kicker">PRE-CHECKOUT GATE</span><h3>Licence rules <em>before</em> payment.</h3><p>Requested licence is checked against approval, rights scope, and contributor releases.</p><p className="pricing-note">Seller access: <strong>{assetPricingLabel(asset)}</strong></p></div><div className="checkout-controls"><label>Requested licence<select value={licenceType} onChange={(event) => setLicenceType(event.target.value as LicenceType)}>{licences.map((licence) => <option key={licence} value={licence}>{licence[0].toUpperCase() + licence.slice(1)}</option>)}</select></label><button className={validation.allowed && asset.monetizationModel !== "custom_quote" ? "approve-button" : "blocked-button"} onClick={onCheckout}>{validation.allowed && asset.monetizationModel !== "custom_quote" ? "Continue to checkout ↗" : asset.monetizationModel === "custom_quote" ? "Request custom quote" : "Checkout blocked"}</button></div><div className="checkout-checks">{validation.checks.map((check) => <div key={check.label}><span className={check.passed ? "check-pass" : "check-fail"}>{check.passed ? "✓" : "×"}</span><span><strong>{check.label}</strong><small>{check.detail}</small></span></div>)}</div></div>
+    <div className={`checkout-guard ${validation.allowed ? "clear" : "blocked"}`}><div><span className="section-kicker">PRE-CHECKOUT GATE</span><h3>Licence rules <em>before</em> payment.</h3><p>Requested licence is checked against approval, rights scope, and contributor releases.</p><p className="pricing-note">Seller access: <strong>{assetPricingLabel(asset)}</strong></p></div><div className="checkout-controls"><label>Requested licence<select value={licenceType} onChange={(event) => setLicenceType(event.target.value as LicenceType)}>{licences.map((licence) => <option key={licence} value={licence}>{licence[0].toUpperCase() + licence.slice(1)}</option>)}</select></label><button className={validation.allowed ? "approve-button" : "blocked-button"} onClick={onCheckout}>{validation.allowed ? `Continue with ${formatCredits(Number(asset.licenseCreditCost ?? MEDIA_MEMBERSHIP_CREDITS))}` : "Checkout blocked"}</button></div><div className="checkout-checks">{validation.checks.map((check) => <div key={check.label}><span className={check.passed ? "check-pass" : "check-fail"}>{check.passed ? "✓" : "×"}</span><span><strong>{check.label}</strong><small>{check.detail}</small></span></div>)}</div></div>
   </article>;
 }
 
 function Evidence({ label, status }: { label: string; status: Asset["modelReleaseStatus"] }) { return <div className="evidence-row"><span className={`evidence-icon ${status}`}>{status === "verified" ? "✓" : status === "pending" ? "!" : "—"}</span><span><strong>{label}</strong><small>{status === "verified" ? "Document verified" : status === "not_required" ? "Not required" : status === "pending" ? "Evidence needs review" : "No document attached"}</small></span><b>{status.replace("_", " ")}</b></div>; }
 
-function AssetPricingFields({ asset, setAsset }: { asset: { monetizationModel: MonetizationModel; licensePriceZar: string; artistLicenseKey: string; artistLicenseUrl: string; artistLicenseTerms: string; freeDownloadEnabled: boolean; kind?: string }; setAsset: (asset: any) => void }) {
-  return <div className="asset-pricing-fields"><label>How should this asset be sold?<select value={asset.monetizationModel} onChange={(event) => setAsset({ ...asset, monetizationModel: event.target.value as MonetizationModel })}><option value="membership">Membership access</option><option value="individual_license">Sell an individual licence</option><option value="custom_quote">Custom quote for premium work</option></select></label>{asset.kind !== "video" && <label className="checkbox-row"><input type="checkbox" checked={asset.freeDownloadEnabled} onChange={(event) => setAsset({ ...asset, freeDownloadEnabled: event.target.checked })} /> Include this photo in the introductory free-download offer<small className="field-help">You choose the images. Only published, rights-approved photos are eligible; each buyer can download up to 3 once.</small></label>}{asset.monetizationModel === "individual_license" && <label>Annual licence price (ZAR)<input required min="1" step="0.01" type="number" value={asset.licensePriceZar} onChange={(event) => setAsset({ ...asset, licensePriceZar: event.target.value })} placeholder="e.g. 2500" /><small className="field-help">Your price is used for a standard one-year licence. Rights and releases still need editorial approval.</small></label>}<label>Artist licence<select value={asset.artistLicenseKey} onChange={(event) => setAsset({ ...asset, artistLicenseKey: event.target.value })}><option value="custom">Custom image licence</option><option value="cc_by_4_0">Creative Commons BY 4.0</option><option value="cc_by_sa_4_0">Creative Commons BY-SA 4.0</option><option value="mit">MIT (only if intentionally chosen)</option><option value="other">Other established licence</option></select></label>{asset.artistLicenseKey !== "custom" && <label>Licence proof URL<input required type="text" inputMode="url" value={asset.artistLicenseUrl} onChange={(event) => setAsset({ ...asset, artistLicenseUrl: event.target.value })} onBlur={() => { if (!asset.artistLicenseUrl.trim()) return; try { setAsset({ ...asset, artistLicenseUrl: archiveDomain.normalizeHttpUrl(asset.artistLicenseUrl) }); } catch { /* createAsset reports the actionable validation message. */ } }} placeholder="www.example.com/proof" /><small className="field-help">You can enter www.example.com/proof; https:// is added automatically.</small></label>}<label>Licence version / terms<textarea required={asset.artistLicenseKey === "custom" || asset.artistLicenseKey === "other"} value={asset.artistLicenseTerms} onChange={(event) => setAsset({ ...asset, artistLicenseTerms: event.target.value })} placeholder="State the exact permission, restrictions, attribution and enforcement terms." /></label>{asset.monetizationModel === "custom_quote" && <small className="field-help">Buyers will be asked to contact you for a bespoke price instead of checking out immediately.</small>}</div>;
+function AssetPricingFields({ asset, setAsset }: { asset: { monetizationModel: MonetizationModel; licenseCreditCost: number; subscriptionIncluded: boolean; artistLicenseKey: string; artistLicenseUrl: string; artistLicenseTerms: string; freeDownloadEnabled: boolean; kind?: string }; setAsset: (asset: any) => void }) {
+  function changeMonetizationModel(value: string) {
+    const monetizationModel = value as MonetizationModel;
+    setAsset({ ...asset, monetizationModel, subscriptionIncluded: monetizationModel === "custom_quote" ? false : asset.subscriptionIncluded });
+  }
+  return <div className="asset-pricing-fields"><section className="seller-pricing-block" aria-labelledby="seller-credit-price-title"><span className="section-kicker">BUYER CREDIT PRICING</span><h3 id="seller-credit-price-title">List access in credits</h3><p className="field-help">Buyers see this amount as the price for one year of media access. No Rand price is shown in the buyer flow.</p>{asset.monetizationModel !== "custom_quote" && <label>Credit amount<input required min="1" max="100000" step="1" type="number" value={asset.licenseCreditCost} onChange={(event) => setAsset({ ...asset, licenseCreditCost: Number(event.target.value) })} /><small className="field-help">Example: 100 credits — 12 months access.</small></label>}<label className="checkbox-row pricing-choice"><input type="checkbox" disabled={asset.monetizationModel === "custom_quote"} checked={asset.monetizationModel !== "custom_quote" && asset.subscriptionIncluded} onChange={(event) => setAsset({ ...asset, subscriptionIncluded: event.target.checked })} /> Include this media in the Stockvel monthly membership<small className="field-help">Active Stockvel members use this media without credits. Buyers without an active membership use the seller-listed credit amount.{asset.monetizationModel === "custom_quote" ? " Custom buying is always outside the membership." : ""}</small></label></section><details className="custom-buying-section" open={asset.monetizationModel === "custom_quote"}><summary>Custom buying (optional)</summary><div><p className="field-help">Keep custom pricing separate from the standard listing. Buyers see it only after they enable “Include custom buying” in Search, and they still pay with credits.</p><label>Buyer access mode<select value={asset.monetizationModel} onChange={(event) => changeMonetizationModel(event.target.value)}><option value="membership">Standard credit access</option><option value="custom_quote">Custom buying — opt-in credit price</option>{asset.monetizationModel === "individual_license" && <option value="individual_license">Legacy individual listing</option>}</select></label>{asset.monetizationModel === "custom_quote" && <label>Custom credit amount<input required min="1" max="100000" step="1" type="number" value={asset.licenseCreditCost} onChange={(event) => setAsset({ ...asset, licenseCreditCost: Number(event.target.value) })} /><small className="field-help">This seller-listed credit amount is shown only in the opt-in custom buying view.</small></label>}</div></details>{asset.kind !== "video" && <label className="checkbox-row"><input type="checkbox" checked={asset.freeDownloadEnabled} onChange={(event) => setAsset({ ...asset, freeDownloadEnabled: event.target.checked })} /> Include this photo in the introductory free-download offer<small className="field-help">You choose the images. Only published, rights-approved photos are eligible; each buyer can download up to 3 once.</small></label>}<label>Artist licence<select value={asset.artistLicenseKey} onChange={(event) => setAsset({ ...asset, artistLicenseKey: event.target.value })}><option value="custom">Custom image licence</option><option value="cc_by_4_0">Creative Commons BY 4.0</option><option value="cc_by_sa_4_0">Creative Commons BY-SA 4.0</option><option value="mit">MIT (only if intentionally chosen)</option><option value="other">Other established licence</option></select></label>{asset.artistLicenseKey !== "custom" && <label>Licence proof URL<input required type="text" inputMode="url" value={asset.artistLicenseUrl} onChange={(event) => setAsset({ ...asset, artistLicenseUrl: event.target.value })} onBlur={() => { if (!asset.artistLicenseUrl.trim()) return; try { setAsset({ ...asset, artistLicenseUrl: archiveDomain.normalizeHttpUrl(asset.artistLicenseUrl) }); } catch { /* createAsset reports the actionable validation message. */ } }} placeholder="www.example.com/proof" /><small className="field-help">You can enter www.example.com/proof; https:// is added automatically.</small></label>}<label>Licence version / terms<textarea required={asset.artistLicenseKey === "custom" || asset.artistLicenseKey === "other"} value={asset.artistLicenseTerms} onChange={(event) => setAsset({ ...asset, artistLicenseTerms: event.target.value })} placeholder="State the exact permission, restrictions, attribution and enforcement terms." /></label></div>;
 }
 
 type SellerEvidenceDraft = Pick<Asset, "rightsStatus" | "modelReleaseStatus" | "propertyReleaseStatus">;
 
 function SellerRightsFields({ value, onChange }: { value: SellerEvidenceDraft; onChange: (key: keyof SellerEvidenceDraft, value: SellerEvidenceDraft[keyof SellerEvidenceDraft]) => void }) {
   return <section className="seller-rights-fields" aria-label="Rights and permissions">
-    <div className="card-heading"><span className="section-kicker">RIGHTS & PERMISSIONS</span><span className="status-pill warm">Veld reviews</span></div>
+    <div className="card-heading"><span className="section-kicker">RIGHTS & PERMISSIONS</span><span className="status-pill warm">Stockvel reviews</span></div>
     <h3>Tell us what you know about permissions.</h3>
     <p className="field-help rights-intro">You keep copyright. These answers help us route the record for review; they do not publish or verify the rights themselves.</p>
     <label>Permission to list and license<select value={value.rightsStatus} onChange={(event) => onChange("rightsStatus", event.target.value as SellerEvidenceDraft["rightsStatus"])}>
       <option value="pending">I own or am authorised to license it — review needed</option>
       <option value="editorial_only">Editorial use only — no commercial use</option>
       <option value="restricted">Permission or restrictions need review</option>
-      {value.rightsStatus === "verified" && <option value="verified" disabled>Verified by Veld — read only</option>}
+      {value.rightsStatus === "verified" && <option value="verified" disabled>Verified by Stockvel — read only</option>}
     </select><small className="field-help">Choose editorial-only when the work may be shown for news, documentary, or other editorial context but not commercial promotion.</small></label>
     <div className="two-fields">
       <label>Recognizable people<select value={value.modelReleaseStatus} onChange={(event) => onChange("modelReleaseStatus", event.target.value as SellerEvidenceDraft["modelReleaseStatus"])}>
         <option value="unknown">Not sure yet</option>
         <option value="not_required">No recognizable people</option>
         <option value="pending">People shown — permission evidence needs review</option>
-        {value.modelReleaseStatus === "verified" && <option value="verified" disabled>Verified by Veld — read only</option>}
+        {value.modelReleaseStatus === "verified" && <option value="verified" disabled>Verified by Stockvel — read only</option>}
       </select><small className="field-help">A model release is written permission from a recognizable person for certain uses, especially commercial or advertising use.</small></label>
       <label>Private property or location<select value={value.propertyReleaseStatus} onChange={(event) => onChange("propertyReleaseStatus", event.target.value as SellerEvidenceDraft["propertyReleaseStatus"])}>
         <option value="unknown">Not sure yet</option>
         <option value="not_required">No private-property permission needed</option>
         <option value="pending">Permission evidence needs review</option>
-        {value.propertyReleaseStatus === "verified" && <option value="verified" disabled>Verified by Veld — read only</option>}
+        {value.propertyReleaseStatus === "verified" && <option value="verified" disabled>Verified by Stockvel — read only</option>}
       </select><small className="field-help">Use this for a private building, venue, artwork, or other place where the intended licence may need permission.</small></label>
     </div>
     <p className="field-help rights-review-note">If a release or permission is needed, submit the record and keep the supporting evidence ready. An editor will confirm it before publication or commercial licensing.</p>
@@ -1928,7 +2019,7 @@ function SellerVerificationPanel({ api, onNotice }: { api: (path: string, init?:
 
 function ContributorWorkspace({ api, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
   const [form, setForm] = useState({ bio: "", organisationName: "", location: "", contributorType: "individual", equipment: "", portfolioUrl: "", acceptTerms: false, termsVersion: "" });
-  const [asset, setAsset] = useState({ kind: "image", title: "", description: "", caption: "", city: "", province: "", locality: "", landmark: "", subjectTags: "", culturalTags: "", rightsStatus: "pending" as Asset["rightsStatus"], modelReleaseStatus: "unknown" as Asset["modelReleaseStatus"], propertyReleaseStatus: "unknown" as Asset["propertyReleaseStatus"], monetizationModel: "membership" as MonetizationModel, licensePriceZar: "", artistLicenseKey: "custom", artistLicenseVersion: "", artistLicenseUrl: "", artistLicenseTerms: "", freeDownloadEnabled: false });
+  const [asset, setAsset] = useState({ kind: "image", title: "", description: "", caption: "", city: "", province: "", locality: "", landmark: "", subjectTags: "", culturalTags: "", rightsStatus: "pending" as Asset["rightsStatus"], modelReleaseStatus: "unknown" as Asset["modelReleaseStatus"], propertyReleaseStatus: "unknown" as Asset["propertyReleaseStatus"], monetizationModel: "membership" as MonetizationModel, licenseCreditCost: MEDIA_MEMBERSHIP_CREDITS, subscriptionIncluded: true, artistLicenseKey: "custom", artistLicenseVersion: "", artistLicenseUrl: "", artistLicenseTerms: "", freeDownloadEnabled: false });
   const [file, setFile] = useState<File | null>(null);
   const [seller, setSeller] = useState({ sellerType: "individual", legalName: "", phone: "", ageConfirmed: false, identityDocumentType: "sa_id", bankAccountName: "", registeredName: "", cipcRegistrationNumber: "", representativeName: "", representativeAuthority: false, beneficialOwnerRequired: false, copyrightDeclaration: false, taxResponsibilityDeclaration: false, contributorAgreement: false, termsVersion: "", signerName: "", signatureReference: "", provider: "paystack", providerAccountId: "", accountHolderName: "", accountLast4: "", branchLast4: "" });
   const [turnstileToken, setTurnstileToken] = useState("");
@@ -1943,7 +2034,7 @@ function ContributorWorkspace({ api, onNotice }: { api: (path: string, init?: Re
   async function createAsset(event: React.FormEvent) {
     event.preventDefault(); setSaving(true);
     try {
-      const payload = { ...asset, subjectTags: asset.subjectTags.split(",").map((tag) => tag.trim()).filter(Boolean), culturalTags: asset.culturalTags.split(",").map((tag) => tag.trim()).filter(Boolean), artistLicenseUrl: asset.artistLicenseUrl.trim() ? archiveDomain.normalizeHttpUrl(asset.artistLicenseUrl) : "", licensePriceCents: asset.monetizationModel === "individual_license" && asset.licensePriceZar ? Math.round(Number(asset.licensePriceZar) * 100) : null };
+      const payload = { ...asset, subjectTags: asset.subjectTags.split(",").map((tag) => tag.trim()).filter(Boolean), culturalTags: asset.culturalTags.split(",").map((tag) => tag.trim()).filter(Boolean), artistLicenseUrl: asset.artistLicenseUrl.trim() ? archiveDomain.normalizeHttpUrl(asset.artistLicenseUrl) : "", licensePriceCents: null };
       const createdResponse = await api("/api/assets", { method: "POST", body: JSON.stringify(payload) });
       if (!createdResponse.ok) throw new Error();
       const created = await createdResponse.json() as { id: string };
@@ -1995,7 +2086,8 @@ type ContributorMetadataDraft = {
   modelReleaseStatus: Asset["modelReleaseStatus"];
   propertyReleaseStatus: Asset["propertyReleaseStatus"];
   monetizationModel: MonetizationModel;
-  licensePriceZar: string;
+  licenseCreditCost: number;
+  subscriptionIncluded: boolean;
   artistLicenseKey: NonNullable<Asset["artistLicenseKey"]>;
   artistLicenseVersion: string;
   artistLicenseUrl: string;
@@ -2020,7 +2112,8 @@ function contributorMetadataDraft(asset: Asset): ContributorMetadataDraft {
     modelReleaseStatus: asset.modelReleaseStatus,
     propertyReleaseStatus: asset.propertyReleaseStatus,
     monetizationModel: asset.monetizationModel ?? "membership",
-    licensePriceZar: asset.licensePriceCents == null ? "" : (asset.licensePriceCents / 100).toFixed(2),
+    licenseCreditCost: Number(asset.licenseCreditCost ?? MEDIA_MEMBERSHIP_CREDITS),
+    subscriptionIncluded: asset.subscriptionIncluded ?? asset.monetizationModel === "membership",
     artistLicenseKey: asset.artistLicenseKey ?? "custom",
     artistLicenseVersion: asset.artistLicenseVersion ?? "",
     artistLicenseUrl: asset.artistLicenseUrl ?? "",
@@ -2077,10 +2170,10 @@ function ContributorAssetLibrary({ api, onNotice }: { api: (path: string, init?:
     setSaving(true);
     try {
       const original = assets.find((asset) => asset.id === draft.id);
-      const originalLicensePrice = original?.licensePriceCents == null ? "" : (original.licensePriceCents / 100).toFixed(2);
       const licensingChanged = Boolean(original && (
         draft.monetizationModel !== (original.monetizationModel ?? "membership") ||
-        draft.licensePriceZar !== originalLicensePrice ||
+        draft.licenseCreditCost !== Number(original.licenseCreditCost ?? MEDIA_MEMBERSHIP_CREDITS) ||
+        draft.subscriptionIncluded !== (original.subscriptionIncluded ?? original.monetizationModel === "membership") ||
         draft.artistLicenseKey !== (original.artistLicenseKey ?? "custom") ||
         draft.artistLicenseVersion !== (original.artistLicenseVersion ?? "") ||
         draft.artistLicenseUrl !== (original.artistLicenseUrl ?? "") ||
@@ -2106,7 +2199,9 @@ function ContributorAssetLibrary({ api, onNotice }: { api: (path: string, init?:
           freeDownloadEnabled: draft.freeDownloadEnabled,
           ...(licensingChanged ? {
             monetizationModel: draft.monetizationModel,
-            licensePriceCents: draft.monetizationModel === "individual_license" && draft.licensePriceZar.trim() ? Math.round(Number(draft.licensePriceZar) * 100) : null,
+            licenseCreditCost: draft.licenseCreditCost,
+            subscriptionIncluded: draft.subscriptionIncluded,
+            licensePriceCents: null,
             artistLicenseKey: draft.artistLicenseKey,
             artistLicenseVersion: draft.artistLicenseVersion || null,
             artistLicenseUrl: draft.artistLicenseUrl || null,
@@ -2136,7 +2231,7 @@ function ContributorAssetLibrary({ api, onNotice }: { api: (path: string, init?:
     {!error && reviewCount > 0 && <div className="contributor-review-banner" role="status"><Icon name="shield" /><div><strong>{reviewCount} record{reviewCount === 1 ? " needs" : "s need"} your review before publishing.</strong><span>Metadata can be edited now, but these records remain private until rights, context, and editorial checks are complete.</span></div></div>}
     {loading && !assets.length ? <div className="empty-state contributor-assets-empty">Loading your owned assets…</div> : !assets.length ? <div className="empty-state contributor-assets-empty"><Icon name="image" /><strong>No uploaded photos yet.</strong><span>Submit a record above and it will appear here for future metadata updates.</span></div> : <div className="contributor-assets-layout">
       <div className="contributor-asset-list" aria-label="Your uploaded assets">{assets.map((asset) => <button type="button" className={`contributor-asset-row ${selectedId === asset.id ? "active" : ""}`} key={asset.id} onClick={() => selectAsset(asset)}><span className="contributor-asset-thumb"><Icon name={asset.kind === "image" ? "image" : "workflow"} /></span><span className="contributor-asset-copy"><strong>{asset.title || "Untitled asset"}</strong><small>{asset.city || asset.country || "Location not set"} · {asset.status.replaceAll("_", " ")}</small></span><Icon name="chevron" size={15} /></button>)}</div>
-       {draft && <form className="workspace-card contributor-metadata-editor" onSubmit={(event) => void saveMetadata(event)} aria-label={`Edit metadata for ${draft.title || "asset"}`}><div className="card-heading"><span className="section-kicker">SELLER-OWNED RECORD</span><span className={`status-pill ${assets.find((asset) => asset.id === draft.id)?.status === "published" ? "cool" : "warm"}`}>{assets.find((asset) => asset.id === draft.id)?.status.replaceAll("_", " ")}</span></div><h3>{draft.title || "Edit asset"}</h3><p className="metadata-editor-note">These fields are yours to maintain. Editorial review still controls publication and search visibility.</p><label>Title<input required maxLength={180} value={draft.title} onChange={(event) => updateDraft("title", event.target.value)} /></label><label>Description<textarea required maxLength={4000} value={draft.description} onChange={(event) => updateDraft("description", event.target.value)} placeholder="Describe what is actually visible and the story context you can verify." /></label><label>Caption<textarea maxLength={2000} value={draft.caption} onChange={(event) => updateDraft("caption", event.target.value)} placeholder="A concise caption for buyers and editors." /></label><div className="two-fields"><label>Province<input value={draft.province} onChange={(event) => updateDraft("province", event.target.value)} /></label><label>City<input value={draft.city} onChange={(event) => updateDraft("city", event.target.value)} /></label></div><div className="two-fields"><label>Locality<input value={draft.locality} onChange={(event) => updateDraft("locality", event.target.value)} /></label><label>Landmark<input value={draft.landmark} onChange={(event) => updateDraft("landmark", event.target.value)} /></label></div><label>Subject tags<input value={draft.subjectTags} onChange={(event) => updateDraft("subjectTags", event.target.value)} placeholder="people, food, community" /><small className="field-help">Separate tags with commas.</small></label><label>Cultural context tags<input value={draft.culturalTags} onChange={(event) => updateDraft("culturalTags", event.target.value)} placeholder="Only add context you can evidence" /><small className="field-help">Avoid identity or cultural claims that cannot be supported; these are checked before saving.</small></label><SellerRightsFields value={draft} onChange={(key, value) => updateDraft(key, value)} /><div className="two-fields"><label>Listing access<select value={draft.monetizationModel} onChange={(event) => updateDraft("monetizationModel", event.target.value as MonetizationModel)}><option value="membership">Membership</option><option value="individual_license">Individual licence</option><option value="custom_quote">Custom quote</option></select></label>{draft.monetizationModel === "individual_license" && <label>Price in ZAR<input type="number" min="1" step="0.01" value={draft.licensePriceZar} onChange={(event) => updateDraft("licensePriceZar", event.target.value)} /></label>}</div><details className="metadata-license-details"><summary>Artist licence evidence</summary><div><label>Licence key<input value={draft.artistLicenseKey} onChange={(event) => updateDraft("artistLicenseKey", event.target.value as NonNullable<Asset["artistLicenseKey"]>)} /></label><label>Version<input value={draft.artistLicenseVersion} onChange={(event) => updateDraft("artistLicenseVersion", event.target.value)} /></label><label>Proof URL<input type="url" value={draft.artistLicenseUrl} onChange={(event) => updateDraft("artistLicenseUrl", event.target.value)} /></label><label>Licence terms<textarea value={draft.artistLicenseTerms} onChange={(event) => updateDraft("artistLicenseTerms", event.target.value)} placeholder="Required when changing to a custom or other licence." /></label></div></details><div className="metadata-editor-footer"><span>Last saved records remain auditable.</span><button type="submit" className="dark-button" disabled={saving || !draft.title.trim() || !draft.description.trim()}>{saving ? "Saving metadata…" : "Save metadata"} <Icon name="arrow" size={15} /></button></div></form>}
+      {draft && <form className="workspace-card contributor-metadata-editor" onSubmit={(event) => void saveMetadata(event)} aria-label={`Edit metadata for ${draft.title || "asset"}`}><div className="card-heading"><span className="section-kicker">SELLER-OWNED RECORD</span><span className={`status-pill ${assets.find((asset) => asset.id === draft.id)?.status === "published" ? "cool" : "warm"}`}>{assets.find((asset) => asset.id === draft.id)?.status.replaceAll("_", " ")}</span></div><h3>{draft.title || "Edit asset"}</h3><p className="metadata-editor-note">These fields are yours to maintain. Editorial review still controls publication and search visibility.</p><label>Title<input required maxLength={180} value={draft.title} onChange={(event) => updateDraft("title", event.target.value)} /></label><label>Description<textarea required maxLength={4000} value={draft.description} onChange={(event) => updateDraft("description", event.target.value)} placeholder="Describe what is actually visible and the story context you can verify." /></label><label>Caption<textarea maxLength={2000} value={draft.caption} onChange={(event) => updateDraft("caption", event.target.value)} placeholder="A concise caption for buyers and editors." /></label><div className="two-fields"><label>Province<input value={draft.province} onChange={(event) => updateDraft("province", event.target.value)} /></label><label>City<input value={draft.city} onChange={(event) => updateDraft("city", event.target.value)} /></label></div><div className="two-fields"><label>Locality<input value={draft.locality} onChange={(event) => updateDraft("locality", event.target.value)} /></label><label>Landmark<input value={draft.landmark} onChange={(event) => updateDraft("landmark", event.target.value)} /></label></div><label>Subject tags<input value={draft.subjectTags} onChange={(event) => updateDraft("subjectTags", event.target.value)} placeholder="people, food, community" /><small className="field-help">Separate tags with commas.</small></label><label>Cultural context tags<input value={draft.culturalTags} onChange={(event) => updateDraft("culturalTags", event.target.value)} placeholder="Only add context you can evidence" /><small className="field-help">Avoid identity or cultural claims that cannot be supported; these are checked before saving.</small></label><SellerRightsFields value={draft} onChange={(key, value) => updateDraft(key, value)} /><section className="seller-pricing-block metadata-pricing-block" aria-labelledby="metadata-credit-price-title"><span className="section-kicker">BUYER CREDIT PRICING</span><h4 id="metadata-credit-price-title">Seller-listed access</h4><label>Credit amount<input required min="1" max="100000" step="1" type="number" value={draft.licenseCreditCost} onChange={(event) => updateDraft("licenseCreditCost", Number(event.target.value))} /><small className="field-help">Buyers see credits, not Rand prices.</small></label><label className="checkbox-row pricing-choice"><input type="checkbox" disabled={draft.monetizationModel === "custom_quote"} checked={draft.monetizationModel !== "custom_quote" && draft.subscriptionIncluded} onChange={(event) => updateDraft("subscriptionIncluded", event.target.checked)} /> Include this media in the Stockvel monthly membership<small className="field-help">Active Stockvel members use this media without credits. Buyers without an active membership use the seller-listed credit amount.{draft.monetizationModel === "custom_quote" ? " Custom buying is always outside the membership." : ""}</small></label><details className="custom-buying-section" open={draft.monetizationModel === "custom_quote"}><summary>Custom buying (optional)</summary><p className="field-help">This listing is shown only when a buyer enables custom buying in Search.</p><label>Buyer access mode<select value={draft.monetizationModel} onChange={(event) => { const monetizationModel = event.target.value as MonetizationModel; updateDraft("monetizationModel", monetizationModel); if (monetizationModel === "custom_quote") updateDraft("subscriptionIncluded", false); }}><option value="membership">Standard credit access</option><option value="custom_quote">Custom buying — opt-in credit price</option>{draft.monetizationModel === "individual_license" && <option value="individual_license">Legacy individual listing</option>}</select></label></details></section><details className="metadata-license-details"><summary>Artist licence evidence</summary><div><label>Licence key<input value={draft.artistLicenseKey} onChange={(event) => updateDraft("artistLicenseKey", event.target.value as NonNullable<Asset["artistLicenseKey"]>)} /></label><label>Version<input value={draft.artistLicenseVersion} onChange={(event) => updateDraft("artistLicenseVersion", event.target.value)} /></label><label>Proof URL<input type="url" value={draft.artistLicenseUrl} onChange={(event) => updateDraft("artistLicenseUrl", event.target.value)} /></label><label>Licence terms<textarea value={draft.artistLicenseTerms} onChange={(event) => updateDraft("artistLicenseTerms", event.target.value)} placeholder="Required when changing to a custom or other licence." /></label></div></details><div className="metadata-editor-footer"><span>Last saved records remain auditable.</span><button type="submit" className="dark-button" disabled={saving || !draft.title.trim() || !draft.description.trim()}>{saving ? "Saving metadata…" : "Save metadata"} <Icon name="arrow" size={15} /></button></div></form>}
     </div>}
   </section>;
 }
@@ -2154,13 +2249,16 @@ function ReviewWorkspace({ items, api, onNotice, onReload }: { items: Asset[]; a
 
 function AssetPreview({ asset, className }: { asset: Asset; className: string }) {
   const [failed, setFailed] = useState(false);
+  useEffect(() => { setFailed(false); }, [asset.id, asset.previewUrl]);
   const available = Boolean(asset.previewUrl) && !failed;
   return <div className={className}>{available && asset.kind === "image" && <img src={asset.previewUrl!} alt="" loading="lazy" onError={() => setFailed(true)} />}{available && asset.kind === "video" && <video src={asset.previewUrl!} muted playsInline preload="metadata" onError={() => setFailed(true)} />}{!available && <div className="media-unavailable" role="img" aria-label="Licensed preview unavailable"><span>Preview unavailable</span><small>No substitute image is shown.</small></div>}<div className="visual-overlay"><span>{asset.kind === "video" ? "▶" : "PHOTO"}</span><span>{asset.kind === "video" && asset.mediaDurationSeconds ? `${Math.ceil(asset.mediaDurationSeconds)}s` : asset.mediaWidth ? `${asset.mediaWidth}px` : "LICENSED"}</span></div><div className="visual-place">{asset.landmark ?? asset.locality ?? asset.city}</div></div>;
 }
 
 function AssetCard({ asset, index, onOpen }: { asset: Asset; index: number; onOpen: (asset: Asset) => void }) {
   const explanation = asset.matchExplanation ?? archiveDomain.buildMatchExplanation(asset);
-  return <article className={`asset-card card-${index + 1}`} role="button" aria-label={`Open ${asset.title}`} onClick={() => onOpen(asset)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onOpen(asset); } }}><AssetPreview asset={asset} className={`asset-visual visual-${index + 1} ${asset.kind}`} /><div className="asset-info"><div><h3>{asset.title}</h3><p>{asset.city}, {asset.province}</p><small className="asset-contributor">By {asset.contributor}</small><span className={`confidence-chip ${archiveDomain.confidenceLabel(explanation.matchConfidence)}`}>{archiveDomain.percent(explanation.matchConfidence)}% match</span><small className="asset-pricing-label">{assetPricingLabel(asset)}</small></div><span className={`status-dot ${asset.humanVerified ? "verified" : "review"}`} title={asset.humanVerified ? "Human verified" : "Needs editor review"} /></div></article>;
+  const metadataScore = asset.metadata_score == null ? null : Math.round(asset.metadata_score);
+  const metadataLabel = asset.match_type ? `${asset.match_type} · ${asset.matched_field ?? "metadata"}` : null;
+  return <article className={`asset-card card-${index + 1}`} role="button" aria-label={`Open ${asset.title}`} onClick={() => onOpen(asset)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onOpen(asset); } }}><AssetPreview asset={asset} className={`asset-visual visual-${index + 1} ${asset.kind}`} /><div className="asset-info"><div><h3>{asset.title}</h3><p>{asset.city}, {asset.province}</p><small className="asset-contributor">By {asset.contributor}</small>{metadataLabel && <small className="metadata-match-label">{metadataLabel}</small>}<span className={`confidence-chip ${archiveDomain.confidenceLabel(metadataScore == null ? explanation.matchConfidence : metadataScore / 100)}`}>{metadataScore == null ? `${archiveDomain.percent(explanation.matchConfidence)}% match` : `${metadataScore}% metadata match`}</span><small className="asset-pricing-label">{assetPricingLabel(asset)}</small></div><span className={`status-dot ${asset.humanVerified ? "verified" : "review"}`} title={asset.humanVerified ? "Human verified" : "Needs editor review"} /></div></article>;
 }
 
 function AssetModalLegacy({ asset, onClose, onNotice }: { asset: Asset; onClose: () => void; onNotice: (notice: string) => void }) { /*
@@ -2178,17 +2276,28 @@ type AssetCheckoutValidation = {
   allowed: boolean;
   checks: Array<{ label: string; passed: boolean; detail: string }>;
   blockingReasons: string[];
+  creditCost: number;
+  creditsRequired?: boolean;
+  creditBalance?: number | null;
+  accessMode?: "subscription" | "credits";
+  subscriptionIncluded?: boolean;
+  subscriptionActive?: boolean;
+  referenceAmountCents?: number | null;
+  showCurrencyReference?: boolean;
   priceCents: number | null;
   currency: string;
   licence: { label: string; summary: string; usage: string; releaseNote: string };
   monetizationModel: MonetizationModel;
   purchase: { paymentRequired: boolean; paymentStatus: string; originalAccess: string };
+  paid?: boolean;
+  purchaseStatus?: string;
 };
 
-function AssetModal({ asset, api, autoOpenPurchase = false, onClose, onNotice: notify, onRequireSignIn, authenticated, lightboxes, onCreateLightbox, onSaveToLightbox, onDownload }: {
+function AssetModal({ asset, api, autoOpenPurchase = false, includeCustomBuying, onClose, onNotice: notify, onRequireSignIn, authenticated, lightboxes, onCreateLightbox, onSaveToLightbox, onDownload }: {
   asset: Asset;
   api: (path: string, init?: RequestInit) => Promise<Response>;
   autoOpenPurchase?: boolean;
+  includeCustomBuying: boolean;
   onClose: () => void;
   onNotice: (notice: string) => void;
   onRequireSignIn: (assetId?: string) => void;
@@ -2210,6 +2319,7 @@ function AssetModal({ asset, api, autoOpenPurchase = false, onClose, onNotice: n
   const [termsViewed, setTermsViewed] = useState(false);
   const [termsAccepted, setTermsAccepted] = useState(false);
   const [purchaseBusy, setPurchaseBusy] = useState(false);
+  const [purchaseComplete, setPurchaseComplete] = useState(false);
   const [purchaseError, setPurchaseError] = useState("");
   const [saveOpen, setSaveOpen] = useState(false);
   const [newName, setNewName] = useState("");
@@ -2237,7 +2347,7 @@ function AssetModal({ asset, api, autoOpenPurchase = false, onClose, onNotice: n
     try {
       const response = await api("/api/checkout/validate", {
         method: "POST",
-        body: JSON.stringify({ assetId: asset.id, licenceType, territory, durationDays }),
+        body: JSON.stringify({ assetId: asset.id, licenceType, territory, durationDays, includeCustomBuying }),
       });
       const body = await response.json().catch(() => ({})) as Partial<AssetCheckoutValidation> & { error?: string };
       if (!response.ok || !body.checks || !body.licence) throw new Error(body.error ?? "Licence validation is unavailable.");
@@ -2251,12 +2361,12 @@ function AssetModal({ asset, api, autoOpenPurchase = false, onClose, onNotice: n
       setPurchaseError(error instanceof Error ? error.message : "Licence validation is unavailable.");
       return null;
     }
-  }, [api, asset.id, durationDays, licenceType, territory]);
+  }, [api, asset.id, durationDays, includeCustomBuying, licenceType, territory]);
 
   useEffect(() => {
-    if (!purchaseOpen || !authenticated || model === "custom_quote") return;
+    if (!purchaseOpen || !authenticated) return;
     void validateLicence();
-  }, [authenticated, model, purchaseOpen, validateLicence]);
+  }, [authenticated, purchaseOpen, validateLicence]);
 
   async function createAndSave(event: React.FormEvent) {
     event.preventDefault();
@@ -2275,8 +2385,34 @@ function AssetModal({ asset, api, autoOpenPurchase = false, onClose, onNotice: n
   function openPurchase(): void {
     if (asset.freeDownloadEnabled) { void onDownload(asset); return; }
     if (!authenticated) { onRequireSignIn(asset.id); return; }
-    if (model === "custom_quote") { notify("This asset uses a custom quote and cannot be purchased automatically. Contact the contributor for pricing."); return; }
+    if (model === "custom_quote" && !includeCustomBuying) { notify("Enable custom buying in Search to view this seller-listed credit price."); return; }
     setPurchaseOpen((open) => !open);
+  }
+
+  async function buyCreditsForAsset(): Promise<void> {
+    if (!authenticated) { onRequireSignIn(asset.id); return; }
+    setPurchaseBusy(true);
+    setPurchaseError("");
+    try {
+      const response = await api("/api/buyer/credits/checkout", {
+        method: "POST",
+        body: JSON.stringify({
+          credits: creditCost,
+          successUrl: `${window.location.origin}/account?credits=complete&asset=${encodeURIComponent(asset.id)}`,
+          cancelUrl: `${window.location.origin}/account?credits=cancelled&asset=${encodeURIComponent(asset.id)}`,
+        }),
+      });
+      const body = await response.json().catch(() => ({})) as { checkoutUrl?: string; provider?: string; error?: string };
+      if (!response.ok || !body.checkoutUrl) throw new Error(body.error ?? "Credit checkout could not be opened.");
+      notify(`Opening secure checkout for ${formatCredits(creditCost)}.`);
+      await openCreditCheckout(api, body.checkoutUrl, body.provider);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "Credit checkout could not be opened.";
+      setPurchaseError(reason);
+      notify(reason);
+    } finally {
+      setPurchaseBusy(false);
+    }
   }
 
   async function purchaseLicence(): Promise<void> {
@@ -2301,11 +2437,24 @@ function AssetModal({ asset, api, autoOpenPurchase = false, onClose, onNotice: n
           buyerAgreementVersion: buyerAgreement.version,
           paymentAgreementVersion: paymentDisclosure.version,
           acceptBuyerTerms: true,
+          includeCustomBuying,
         }),
       });
-      const created = await response.json().catch(() => ({})) as { licenceId?: string; error?: string; blockingReasons?: string[] };
-      if (!response.ok || !created.licenceId) throw new Error(created.blockingReasons?.[0] ?? created.error ?? "The licence could not be created.");
+      const created = await response.json().catch(() => ({})) as { licenceId?: string; error?: string; code?: string; blockingReasons?: string[]; paid?: boolean; accessMode?: "subscription" | "credits"; creditsSpent?: number; creditCost?: number };
+      if (!response.ok) {
+        if (created.code === "insufficient_credits") {
+          setPurchaseError(created.error ?? `You need ${formatCredits(creditCost)} before unlocking this media.`);
+          return;
+        }
+        throw new Error(created.blockingReasons?.[0] ?? created.error ?? "The licence could not be created.");
+      }
+      if (!created.licenceId) throw new Error("The licence could not be created.");
       licenceId = created.licenceId;
+      if (created.paid) {
+        setPurchaseComplete(true);
+        notify(created.accessMode === "subscription" ? "Media unlocked with your active Stockvel membership. No credits were used." : `Media unlocked using ${formatCredits(created.creditsSpent ?? created.creditCost ?? creditCost)}.`);
+        return;
+      }
       const payment = await api(`/api/payments/${encodeURIComponent(licenceId)}/session`, {
         method: "POST",
         body: JSON.stringify({
@@ -2341,44 +2490,57 @@ function AssetModal({ asset, api, autoOpenPurchase = false, onClose, onNotice: n
     }
   }
 
+  const creditCost = validation?.creditCost ?? archiveDomain.mediaLicenceCreditCost(365, Number(asset.licenseCreditCost ?? MEDIA_MEMBERSHIP_CREDITS));
+  const creditDuration = mediaMembershipDurationLabel(durationDays);
+  const referenceLine = mediaCreditReferenceLine(creditCost, showCurrencyReference && (validation?.showCurrencyReference ?? true));
   const purchaseLabel = asset.freeDownloadEnabled
     ? authenticated ? "Download free photo" : "Create an account for free downloads"
-    : model === "custom_quote" ? "Request custom quote"
-    : authenticated ? "Purchase licence"
-    : "Sign in to purchase licence";
+    : authenticated ? `Buy this asset with ${formatCredits(creditCost)}`
+    : `Sign in to buy this asset with ${formatCredits(creditCost)}`;
   const licenceOptions: LicenceType[] = ["editorial", "commercial", "advertising", "social", "broadcast", "exclusive"];
   const statusLabel = validationState === "loading" ? "Checking…" : validationState === "error" ? "Unavailable" : validation?.allowed ? "Ready" : validation ? "Blocked" : "Not checked";
+  const membershipIncluded = validation?.subscriptionIncluded ?? asset.subscriptionIncluded ?? model === "membership";
+  const activeMembership = validation?.accessMode === "subscription";
+  const creditShortfall = Boolean(validation?.allowed && validation?.accessMode === "credits" && Number(validation.creditBalance ?? 0) < creditCost);
+  const accessHero = activeMembership ? "Included with an active Stockvel membership" : `Buy this asset with ${formatCredits(creditCost)}`;
+  const accessCopy = activeMembership
+    ? "Your active Stockvel membership includes this media. No credits are required for this access."
+    : membershipIncluded
+      ? `This asset has two access paths: included with an active Stockvel membership, or buy this asset with ${formatCredits(creditCost)}. Credits unlock downloads/streams for ${creditDuration} from purchase.`
+      : `This asset is not included with Stockvel membership. Buy this asset with ${formatCredits(creditCost)}. Credits unlock downloads/streams for ${creditDuration} from purchase.`;
+  const accessPrice = activeMembership ? "Price: 0 credits for active members" : `Price: ${formatCredits(creditCost)}`;
+  const actionLabel = purchaseComplete ? "Media unlocked" : activeMembership ? "Unlock with membership" : creditShortfall ? `Buy ${formatCredits(creditCost)}` : `Buy this asset with ${formatCredits(creditCost)}`;
 
   return <div className="modal-backdrop" role="presentation" onClick={onClose}>
     <div className="asset-modal" role="dialog" aria-modal="true" aria-labelledby="asset-title" onClick={(event) => event.stopPropagation()}>
       <button ref={closeButtonRef} className="close-button" onClick={onClose} aria-label="Close">×</button>
-      <div className={`modal-visual ${asset.kind}`}><span>{asset.kind === "video" ? "▶" : "V"}</span></div>
+      <AssetPreview asset={asset} className={`modal-visual ${asset.kind}`} />
       <div className="modal-copy">
         <span className="section-kicker">{asset.kind === "video" ? "FILM & VIDEO" : "PHOTOGRAPHY"} · {asset.city}</span>
         <h2 id="asset-title">{asset.title}</h2>
         <p>{asset.caption || asset.description}</p>
         <div className="tag-list">{asset.culturalTags.map((tag) => <span key={tag}>{tag}</span>)}</div>
-        <div className="match-box"><div className="card-heading"><span className="section-kicker">WHY THIS MATCHED</span><strong>{archiveDomain.percent(explanation.matchConfidence)}% {archiveDomain.confidenceLabel(explanation.matchConfidence)}</strong></div>{explanation.signals.slice(0, 3).map((signal) => <p key={signal.label}><b>{signal.label}:</b> {signal.detail}</p>)}<small>{explanation.metadataReviewNote}</small></div>
+        <div className="match-box"><div className="card-heading"><span className="section-kicker">WHY THIS MATCHED</span><strong>{asset.metadata_score == null ? `${archiveDomain.percent(explanation.matchConfidence)}% ${archiveDomain.confidenceLabel(explanation.matchConfidence)}` : `${Math.round(asset.metadata_score)}% metadata`}</strong></div>{explanation.signals.slice(0, 3).map((signal) => <p key={signal.label}><b>{signal.label}:</b> {signal.detail}</p>)}<small>{explanation.metadataReviewNote}</small>{asset.match_type && <div className="metadata-evidence"><span><b>{asset.match_type}</b> in <b>{asset.matched_field ?? "metadata"}</b><i>source: {asset.source_id ?? asset.id}</i></span>{asset.match_snippet && <small>“{asset.match_snippet}”</small>}</div>}</div>
         <div className="rights-summary"><span>Rights: <b>{asset.rightsStatus}</b></span><span>Authenticity: <b>{archiveDomain.percent(asset.authenticityConfidence)}%</b></span><span>Access: <b>{assetPricingLabel(asset)}</b></span></div>
-        <div className="modal-actions"><button type="button" className="dark-button" onClick={openPurchase}>{purchaseLabel} <span>↗</span></button><button type="button" className="ghost-button" onClick={() => authenticated ? setSaveOpen((open) => !open) : notify("Sign in to save assets to a private lightbox.")}>{saveOpen ? "Close lightbox" : "Save to lightbox"}</button></div>
+        <div className="modal-actions"><button type="button" className="dark-button" onClick={openPurchase}>{purchaseOpen ? "Close credit access" : purchaseLabel} <span>↗</span></button><button type="button" className="ghost-button" onClick={() => authenticated ? setSaveOpen((open) => !open) : notify("Sign in to save assets to a private lightbox.")}>{saveOpen ? "Close lightbox" : "Save to lightbox"}</button></div>
 
         {purchaseOpen && <section className="asset-purchase-panel" aria-labelledby="asset-purchase-title">
-          <div className="card-heading"><div><span className="section-kicker">AUTOMATIC LICENCE PURCHASE</span><h3 id="asset-purchase-title">Buy this asset with a recorded contract.</h3></div><span className={`purchase-status ${validation?.allowed ? "ready" : ""}`}>{statusLabel}</span></div>
-          <p className="purchase-intro">Choose the intended use below. Veld checks the published record and rights evidence before creating the licence; payment still opens through the configured provider.</p>
+          <article className="credit-membership-card asset-credit-card"><div className="card-heading"><div><span className="section-kicker">{activeMembership ? "STOCKVEL MEMBERSHIP ACCESS" : model === "custom_quote" ? "CUSTOM BUYING · OPT-IN" : "MEDIA CREDIT ACCESS"}</span><h3 id="asset-purchase-title">{accessHero}</h3></div><span className={`purchase-status ${purchaseComplete || validation?.allowed ? "ready" : ""}`}>{purchaseComplete ? "Unlocked" : statusLabel}</span></div><p className="buyer-finance-copy">{accessCopy}</p><div className="credit-membership-price"><strong>{accessPrice}</strong>{referenceLine && !activeMembership ? <small>{referenceLine}</small> : null}</div>{creditShortfall && <small className="credit-shortfall">Available: {formatCredits(Number(validation?.creditBalance ?? 0))}. Required: {formatCredits(creditCost)}.</small>}<button type="button" className="dark-button credit-purchase-button" onClick={() => void (creditShortfall ? buyCreditsForAsset() : purchaseLicence())} disabled={purchaseComplete || purchaseBusy || validationState === "loading" || !validation?.allowed}>{purchaseBusy ? "Preparing secure checkout…" : actionLabel}</button></article>
+          {!creditShortfall && <><p className="purchase-intro">Choose the intended use below. The seller-listed credit amount stays fixed while Stockvel checks the published record and rights evidence before creating the licence.</p>
           <div className="asset-purchase-controls">
             <label>Licence type<select value={licenceType} onChange={(event) => { setLicenceType(event.target.value as LicenceType); setTermsAccepted(false); }}>{licenceOptions.map((option) => <option key={option} value={option}>{option[0].toUpperCase() + option.slice(1)}</option>)}</select></label>
             <label>Territory<select value={territory} onChange={(event) => { setTerritory(event.target.value); setTermsAccepted(false); }}><option>Worldwide</option><option>South Africa</option><option>Southern Africa</option></select></label>
             <label>Duration<select value={durationDays} onChange={(event) => { setDurationDays(Number(event.target.value)); setTermsAccepted(false); }}><option value={30}>30 days</option><option value={90}>90 days</option><option value={365}>1 year</option><option value={730}>2 years</option></select></label>
           </div>
-          {validation?.licence && <div className="purchase-description"><div><span className="section-kicker">SELECTED LICENCE</span><strong>{validation.licence.label}</strong><p>{validation.licence.summary}</p></div><div><span className="section-kicker">PRICE</span><strong>{validation.priceCents === null ? "Custom quote" : formatZar(validation.priceCents)}</strong><p>{validation.priceCents === null ? "The contributor must confirm pricing." : "No charge is made until secure checkout is opened."}</p></div></div>}
+          {validation?.licence && <div className="purchase-description"><div><span className="section-kicker">SELECTED LICENCE</span><strong>{validation.licence.label}</strong><p>{validation.licence.summary}</p></div><div><span className="section-kicker">CREDIT ACCESS</span><strong>{activeMembership ? "Included with membership" : formatCredits(creditCost)}</strong><p>{activeMembership ? "No credits required while your membership is active." : `Unlocks downloads/streams for ${creditDuration}.`}</p></div></div>}
           {validationState === "loading" && <p className="purchase-feedback" role="status" aria-live="polite">Checking approval, rights scope, and release evidence…</p>}
           {validationState === "error" && <p className="purchase-feedback error" role="alert">{purchaseError || "Licence validation is unavailable."} <button type="button" className="text-button" onClick={() => void validateLicence()}>Try again</button></p>}
           {validation && <div className={`purchase-checks ${validation.allowed ? "clear" : "blocked"}`} aria-label="Licence validation checks">{validation.checks.map((check) => <div key={check.label}><span className={check.passed ? "check-pass" : "check-fail"}>{check.passed ? "✓" : "×"}</span><span><strong>{check.label}</strong><small>{check.detail}</small></span></div>)}</div>}
           {validation?.licence && <p className="purchase-usage"><strong>Usage:</strong> {validation.licence.usage} <span>{validation.licence.releaseNote}</span></p>}
-          <details className="purchase-terms" onToggle={(event) => { if (event.currentTarget.open) setTermsViewed(true); }}><summary>Read {buyerAgreement.title} and {paymentDisclosure.title}</summary><div><h4>{buyerAgreement.title} · {buyerAgreement.version}</h4>{buyerAgreement.sections.map((section) => <p key={section.heading}><strong>{section.heading}</strong> {section.body}</p>)}<h4>{paymentDisclosure.title} · {paymentDisclosure.version}</h4>{paymentDisclosure.sections.map((section) => <p key={section.heading}><strong>{section.heading}</strong> {section.body}</p>)}</div></details>
-          <label className="purchase-terms-check"><input type="checkbox" checked={termsAccepted} disabled={!termsViewed || purchaseBusy} onChange={(event) => setTermsAccepted(event.target.checked)} /><span>I have read and accept the displayed buyer licence and payment terms for this selected use.</span></label>
+          {!creditShortfall && <><details className="purchase-terms" onToggle={(event) => { if (event.currentTarget.open) setTermsViewed(true); }}><summary>Read {buyerAgreement.title} and {paymentDisclosure.title}</summary><div><h4>{buyerAgreement.title} · {buyerAgreement.version}</h4>{buyerAgreement.sections.map((section) => <p key={section.heading}><strong>{section.heading}</strong> {section.body}</p>)}<h4>{paymentDisclosure.title} · {paymentDisclosure.version}</h4>{paymentDisclosure.sections.map((section) => <p key={section.heading}><strong>{section.heading}</strong> {section.body}</p>)}</div></details>
+          <label className="purchase-terms-check"><input type="checkbox" checked={termsAccepted} disabled={!termsViewed || purchaseBusy} onChange={(event) => setTermsAccepted(event.target.checked)} /><span>I have read and accept the displayed buyer licence and payment terms for this selected use.</span></label></>}
+          </>}
           {purchaseError && validationState !== "error" && <p className="purchase-feedback error" role="alert">{purchaseError}</p>}
-          <div className="purchase-actions"><button type="button" className="outline-button" onClick={() => void validateLicence()} disabled={validationState === "loading" || purchaseBusy}>Check licence again</button><button type="button" className="dark-button" onClick={() => void purchaseLicence()} disabled={purchaseBusy || validationState === "loading" || !validation?.allowed || !termsAccepted}>{purchaseBusy ? "Preparing secure checkout…" : demoMode ? "Simulate purchase (no charge)" : "Purchase licence"} ↗</button></div>
         </section>}
 
         {saveOpen && authenticated && <section className="lightbox-panel" aria-label="Save to lightbox"><div className="card-heading"><div><span className="section-kicker">YOUR LIGHTBOXES</span><h3>Keep this asset in reach.</h3></div><span>{lightboxes.reduce((total, box) => total + box.assetCount, 0)} saved</span></div>{lightboxes.length ? <div className="lightbox-list">{lightboxes.map((box) => <button type="button" key={box.id} disabled={savingId === box.id || box.assetIds.includes(asset.id)} onClick={() => void save(box.id)}><span><strong>{box.name}</strong><small>{box.assetCount} asset{box.assetCount === 1 ? "" : "s"} · {box.visibility}</small></span><b>{box.assetIds.includes(asset.id) ? "Saved" : savingId === box.id ? "Saving…" : "Add ↗"}</b></button>)}</div> : <p className="lightbox-empty">Create your first private collection for a brief, mood, or client.</p>}<form className="lightbox-create" onSubmit={createAndSave}><label>New lightbox name<input required maxLength={120} value={newName} onChange={(event) => setNewName(event.target.value)} placeholder="e.g. Cape Town launch" /></label><button type="submit" className="outline-button">Create & save</button></form></section>}

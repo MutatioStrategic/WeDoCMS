@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 const path = new URL("../wordpress-plugin/veld-archive-connector.php", import.meta.url);
 const source = await readFile(path, "utf8");
 const required = [
-  "Plugin Name: Veld Archive Connector",
+  "Plugin Name: Stockvel Connector",
   "register_activation_hook",
   "wp_nonce_field('veld_archive_pair')",
   "current_user_can('manage_options')",

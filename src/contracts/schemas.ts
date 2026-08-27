@@ -11,7 +11,7 @@ export const errorResponseSchema = z.object({
 
 export const healthResponseSchema = z.object({
   ok: z.literal(true),
-  service: z.literal("veld-archive-api"),
+  service: z.enum(["stockvel-api", "veld-archive-api"]),
   environment: z.string(),
 });
 
@@ -112,15 +112,23 @@ export const assetSchema = z.object({
   streamEmbedUrl: z.string().url().nullable().optional(),
   streamStatus: z.enum(["not_configured", "uploading", "processing", "ready", "error"]).optional(),
   monetizationModel: z.enum(["membership", "individual_license", "custom_quote"]).optional(),
+  licenseCreditCost: z.number().int().min(1).max(100_000).nullable().optional(),
+  subscriptionIncluded: z.boolean().optional(),
   licensePriceCents: z.number().int().nonnegative().nullable().optional(),
   freeDownloadEnabled: z.boolean().optional(),
+  matched_field: z.enum(["title", "description"]).nullable().optional(),
+  match_type: z.enum(["exact", "contains", "fuzzy"]).optional(),
+  metadata_score: z.number().min(0).max(100).optional(),
+  source_id: z.string().min(1).optional(),
+  match_snippet: z.string().optional(),
 }).passthrough();
 
 export const searchResponseSchema = z.object({
   query: z.string(),
-  mode: z.enum(["keyword", "semantic-preview", "hybrid"]),
+  mode: z.enum(["keyword"]),
   results: z.array(assetSchema),
   facets: z.array(z.object({ label: z.string(), value: z.string(), count: z.number().int().nonnegative() })),
+  suggestions: z.array(z.string()).optional(),
   nextCursor: z.string().nullable().optional(),
   total: z.number().int().nonnegative().optional(),
 });
@@ -140,6 +148,8 @@ export const assetCreateRequestSchema = z.object({
   modelReleaseStatus: releaseStatusSchema.default("unknown"),
   propertyReleaseStatus: releaseStatusSchema.default("unknown"),
   monetizationModel: z.enum(["membership", "individual_license", "custom_quote"]).default("membership"),
+  licenseCreditCost: z.number().int().min(1).max(100_000).default(100),
+  subscriptionIncluded: z.boolean().optional(),
   licensePriceCents: z.number().int().nonnegative().max(100_000_000).nullable().optional(),
   freeDownloadEnabled: z.boolean().default(false),
   artistLicenseKey: z.enum(["custom", "cc_by_4_0", "cc_by_sa_4_0", "mit", "other"]).default("custom"),
@@ -170,6 +180,8 @@ export const governanceActionRequestSchema = z.object({
   sceneAttributes: z.array(z.enum(["indoor", "outdoor", "daylight", "night", "sunrise_sunset", "people_present", "no_people", "crowd", "single_person", "group", "vehicle", "building", "landscape", "close_up", "wide_view", "aerial", "food_present", "text_present", "copy_space"])).max(30).optional(),
   visibleText: z.string().trim().max(2000).optional(),
   monetizationModel: z.enum(["membership", "individual_license", "custom_quote"]).optional(),
+  licenseCreditCost: z.number().int().min(1).max(100_000).optional(),
+  subscriptionIncluded: z.boolean().optional(),
   licensePriceCents: z.number().int().nonnegative().max(100_000_000).nullable().optional(),
   freeDownloadEnabled: z.boolean().optional(),
 });

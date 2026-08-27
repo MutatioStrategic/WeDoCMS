@@ -1,6 +1,6 @@
 openapi: 3.0.3
 info:
-  title: Veld Archive API
+  title: Stockvel API
   version: 0.1.0
   description: Core API for trusted South African visual discovery, ingestion, rights, and governance.
 servers:
@@ -97,7 +97,7 @@ paths:
   /api/assets:
     get:
       operationId: searchAssets
-      summary: Search published assets
+      summary: Search approved assets with deterministic metadata ranking
       parameters:
         - name: q
           in: query
@@ -108,6 +108,15 @@ paths:
         - name: location
           in: query
           schema: { type: string, maxLength: 80 }
+        - name: locationType
+          in: query
+          schema: { type: string, maxLength: 80 }
+        - name: category
+          in: query
+          schema: { type: string, maxLength: 80 }
+        - name: verified
+          in: query
+          schema: { type: string, enum: ["true"] }
         - name: status
           in: query
           schema: { type: string, enum: [published, needs_review, all], default: published }
@@ -176,6 +185,45 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/search:
+    get:
+      operationId: searchApprovedMetadata
+      summary: Search approved assets with deterministic title and description matching
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 240, default: '' }
+        - name: kind
+          in: query
+          schema: { type: string, enum: [all, image, video], default: all }
+        - name: location
+          in: query
+          schema: { type: string, maxLength: 80 }
+        - name: locationType
+          in: query
+          schema: { type: string, maxLength: 80 }
+        - name: category
+          in: query
+          schema: { type: string, maxLength: 80 }
+        - name: verified
+          in: query
+          schema: { type: string, enum: ["true"] }
+        - name: status
+          in: query
+          schema: { type: string, enum: [published, needs_review, all], default: published }
+      responses:
+        '200':
+          description: Deterministically ranked metadata search results
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SearchResponse' }
+        '400':
+          description: Invalid search query
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503':
+          description: Approved metadata search is temporarily unavailable
   /api/assets/{id}:
     get:
       operationId: getAsset
@@ -342,9 +390,9 @@ paths:
   /api/search/visual:
     post:
       operationId: visualSearch
-      summary: Find visually related published photography from an uploaded image
+      summary: Visual search is intentionally disabled while live search is metadata-only
       requestBody:
-        required: true
+        required: false
         content:
           multipart/form-data:
             schema:
@@ -353,10 +401,11 @@ paths:
               properties:
                 image: { type: string, format: binary }
       responses:
-        '200': { description: Related assets returned }
-        '400': { description: The multipart image field is missing or invalid }
-        '413': { description: Image exceeds 10 MB limit }
-        '503': { description: Visual search is not configured }
+        '503':
+          description: Visual search is disabled; use title or description search
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
   /api/creators:
     get:
       operationId: listCreators
@@ -610,6 +659,24 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/my/credits:
+    get:
+      operationId: getBuyerCredits
+      summary: Return the authenticated buyer's credit balance and credit purchase activity
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Buyer credit wallet, transactions, and pending credit purchases
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BuyerCreditsResponse'
+        '403':
+          description: Authenticated buyer access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/account/lifecycle:
     get:
       operationId: getAccountLifecycle
@@ -718,7 +785,7 @@ paths:
   /api/buyer/credits/checkout:
     post:
       operationId: createBuyerCreditBundleCheckout
-      summary: Start a once-off checkout for archive download credits
+      summary: Start a once-off checkout for archive credits
       security: [{ sessionCookie: [] }]
       requestBody:
         required: true
@@ -728,11 +795,27 @@ paths:
               type: object
               required: [credits, successUrl, cancelUrl]
               properties:
-                credits: { type: integer, minimum: 1, maximum: 1000 }
+                credits: { type: integer, minimum: 1, maximum: 100000, description: 'Credits to add to the buyer wallet; the buyer-facing product is credits, not a Rand offer.' }
                 successUrl: { type: string, format: uri }
                 cancelUrl: { type: string, format: uri }
       responses:
-        '201': { description: Once-off credit checkout created }
+        '201':
+          description: Once-off credit checkout created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [purchaseId, provider, checkoutUrl, status, credits, currency]
+                properties:
+                  purchaseId: { type: string }
+                  provider: { type: string }
+                  checkoutUrl: { type: string, format: uri }
+                  status: { type: string, enum: [created, pending] }
+                  credits: { type: integer, minimum: 1 }
+                  currency: { type: string, enum: [CREDITS] }
+                  showCurrencyReference: { type: boolean }
+                  referenceAmountCents: { type: integer, minimum: 0, nullable: true, description: Optional display-only internal currency reference. }
+                additionalProperties: true
         '503': { description: Payment provider is unavailable or unconfigured }
   /api/subscription/manage-link:
     post:
@@ -1069,8 +1152,8 @@ paths:
   /api/demo/payments/{licenceId}/complete:
     get:
       operationId: completeDemoLicencePayment
-      summary: Complete a licence through the explicitly non-production demo checkout
-      description: Demo-only server-side payment simulation. Production payment state is established by a verified provider webhook.
+      summary: Complete a licence or credit purchase through the explicitly non-production demo checkout
+      description: Demo-only server-side payment simulation for the selected licence or credit purchase. Production payment state is established by a verified provider webhook.
       security:
         - sessionCookie: []
       parameters:
@@ -1080,7 +1163,7 @@ paths:
           schema: { type: string, minLength: 1 }
       responses:
         '303':
-          description: Licence marked paid in demo and redirected to the buyer account
+          description: Selected licence or credit purchase marked paid in demo and redirected to the buyer account
         '401':
           description: Authenticated buyer required
           content:
@@ -1911,7 +1994,7 @@ components:
       required: [ok, service, environment]
       properties:
         ok: { type: boolean, enum: [true] }
-        service: { type: string, enum: [veld-archive-api] }
+        service: { type: string, enum: [stockvel-api, veld-archive-api], description: "Stockvel service identifier; veld-archive-api is retained for legacy responses." }
         environment: { type: string }
       additionalProperties: false
     DemoLoginRequest:
@@ -1978,6 +2061,27 @@ components:
       properties:
         results: { type: array, items: { type: object, additionalProperties: true } }
         summary: { type: object, additionalProperties: true }
+      additionalProperties: false
+    BuyerCreditsResponse:
+      type: object
+      required: [creditPackCredits, creditPackDurationDays, balanceCredits, transactions, pendingPurchases, currency, showCurrencyReference]
+      properties:
+        creditPackCredits: { type: integer, minimum: 1, description: Default media credit pack size. }
+        creditPackDurationDays: { type: integer, minimum: 1, description: Validity period for the default media credit pack. }
+        balanceCredits: { type: integer, minimum: 0 }
+        transactions:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        pendingPurchases:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        currency: { type: string, enum: [CREDITS] }
+        showCurrencyReference: { type: boolean }
+        referenceAmountCents: { type: integer, minimum: 0, nullable: true, description: Optional display-only currency reference. }
       additionalProperties: false
     AssetListResponse:
       type: object
@@ -2294,11 +2398,18 @@ components:
         metadataReviewStatus: { type: string, enum: [reviewed, needs_context, blocked] }
         metadataReviewNote: { type: string }
         metadataProvenance: { type: string, enum: [contributor, editor, ai_suggested] }
+        matched_field: { type: string, nullable: true, enum: [title, description] }
+        match_type: { type: string, enum: [exact, contains, fuzzy] }
+        metadata_score: { type: number, minimum: 0, maximum: 100, description: Deterministic title/description score; exact title matches are 100. }
+        source_id: { type: string, description: Asset ID that supplied the matched metadata. }
+        match_snippet: { type: string, description: Short excerpt from the matched title or description. }
         sourceFileName: { type: string, nullable: true }
         sourceUrl: { type: string, nullable: true }
         sourceLicense: { type: string, nullable: true }
         sourceAttribution: { type: string, nullable: true }
         monetizationModel: { type: string, enum: [membership, individual_license, custom_quote] }
+        licenseCreditCost: { type: integer, minimum: 1, maximum: 100000, description: Seller-listed credit amount for one year of media access. }
+        subscriptionIncluded: { type: boolean, description: Whether active Stockvel members can access this media without credits. Custom-buying listings are not membership-included. }
         licensePriceCents: { type: integer, minimum: 0, nullable: true }
         freeDownloadEnabled: { type: boolean, description: Seller opt-in for the one-time introductory photo offer }
       additionalProperties: true
@@ -2307,8 +2418,10 @@ components:
       required: [query, mode, results, facets]
       properties:
         query: { type: string }
-        mode: { type: string, enum: [keyword, semantic-preview] }
+        mode: { type: string, enum: [keyword] }
         results: { type: array, items: { $ref: '#/components/schemas/Asset' } }
+        suggestions: { type: array, items: { type: string }, description: Metadata-derived alternatives returned when no results match. }
+        total: { type: integer, minimum: 0 }
         facets:
           type: array
           items:
@@ -2338,6 +2451,8 @@ components:
         modelReleaseStatus: { type: string, enum: [unknown, not_required, pending, verified] }
         propertyReleaseStatus: { type: string, enum: [unknown, not_required, pending, verified] }
         monetizationModel: { type: string, enum: [membership, individual_license, custom_quote] }
+        licenseCreditCost: { type: integer, minimum: 1, maximum: 100000, default: 100, description: Seller-listed credit amount for one year of media access. }
+        subscriptionIncluded: { type: boolean, description: Include this media in the Stockvel monthly membership. }
         licensePriceCents: { type: integer, minimum: 0, maximum: 100000000, nullable: true }
         freeDownloadEnabled: { type: boolean, description: Seller opt-in for the one-time introductory photo offer }
       additionalProperties: false
@@ -2363,6 +2478,8 @@ components:
         propertyReleaseStatus: { type: string, enum: [unknown, not_required, pending, verified] }
         aiTags: { type: array, maxItems: 30, items: { type: string, minLength: 1, maxLength: 80 } }
         monetizationModel: { type: string, enum: [membership, individual_license, custom_quote] }
+        licenseCreditCost: { type: integer, minimum: 1, maximum: 100000, description: Seller-listed credit amount for one year of media access. }
+        subscriptionIncluded: { type: boolean, description: Include this media in the Stockvel monthly membership. }
         licensePriceCents: { type: integer, minimum: 0, maximum: 100000000, nullable: true }
         freeDownloadEnabled: { type: boolean, description: Seller opt-in for the one-time introductory photo offer }
       additionalProperties: false
@@ -2445,6 +2562,7 @@ components:
         licenceType: { type: string, enum: [editorial, commercial, advertising, social, broadcast, exclusive] }
         territory: { type: string, minLength: 1, maxLength: 80 }
         durationDays: { type: integer, minimum: 1, maximum: 3650 }
+        includeCustomBuying: { type: boolean, default: false, description: Buyer opt-in required to show custom-buying listings in Search and checkout. }
       additionalProperties: false
     CheckoutRequest:
       type: object
@@ -2454,8 +2572,9 @@ components:
         licenceType: { type: string, enum: [editorial, commercial, advertising, social, broadcast, exclusive] }
         territory: { type: string, minLength: 1, maxLength: 80 }
         durationDays: { type: integer, minimum: 1, maximum: 3650 }
-        buyerAgreementVersion: { type: string, enum: [buyer-marketplace-v1] }
-        paymentAgreementVersion: { type: string, enum: [payment-split-v1] }
+        includeCustomBuying: { type: boolean, default: false, description: Buyer opt-in required for custom-buying listings. }
+        buyerAgreementVersion: { type: string, enum: [buyer-marketplace-v2] }
+        paymentAgreementVersion: { type: string, enum: [payment-split-v2] }
         acceptBuyerTerms: { type: boolean, enum: [true] }
       additionalProperties: false
     CheckoutSessionRequest:
@@ -2467,25 +2586,42 @@ components:
       additionalProperties: false
     LicenceCheckoutResponse:
       type: object
-      required: [licenceId, priceCents, currency, paymentRequired, purchaseStatus]
+      required: [licenceId, creditCost, currency, paymentRequired, purchaseStatus]
       properties:
         licenceId: { type: string }
         licenceType: { type: string, enum: [editorial, commercial, advertising, social, broadcast, exclusive] }
-        priceCents: { type: integer, minimum: 0 }
-        currency: { type: string, enum: [ZAR] }
-        paymentRequired: { type: boolean, enum: [true] }
-        purchaseStatus: { type: string, enum: [not_charged_until_verified_checkout] }
+        creditCost: { type: integer, minimum: 0, description: Credits required for the selected media access. Zero means active membership access. }
+        creditsRequired: { type: boolean }
+        creditsSpent: { type: integer, minimum: 0 }
+        creditBalance: { type: integer, nullable: true }
+        accessMode: { type: string, enum: [subscription, credits] }
+        subscriptionIncluded: { type: boolean }
+        subscriptionActive: { type: boolean }
+        priceCents: { type: integer, minimum: 0, description: Internal provider/reference amount; not buyer-facing pricing. }
+        referenceAmountCents: { type: integer, minimum: 0, nullable: true, description: Optional display-only currency reference. }
+        currency: { type: string, enum: [CREDITS] }
+        showCurrencyReference: { type: boolean }
+        paymentRequired: { type: boolean }
+        purchaseStatus: { type: string, enum: [included_with_active_membership, paid_with_credits, paid, not_charged_until_verified_checkout] }
         existing: { type: boolean }
         agreementsPersisted: { type: boolean, enum: [true] }
         approvalStatus: { type: string, enum: [pending, auto_approved] }
       additionalProperties: true
     CheckoutValidationResponse:
       type: object
-      required: [assetId, priceCents, currency, monetizationModel, allowed, checks, blockingReasons]
+      required: [assetId, creditCost, creditsRequired, accessMode, subscriptionIncluded, subscriptionActive, priceCents, currency, monetizationModel, allowed, checks, blockingReasons]
       properties:
         assetId: { type: string }
-        priceCents: { type: integer, minimum: 0, nullable: true }
-        currency: { type: string, enum: [ZAR] }
+        creditCost: { type: integer, minimum: 0, description: Credits required for the selected media access. }
+        creditsRequired: { type: boolean }
+        creditBalance: { type: integer, nullable: true }
+        accessMode: { type: string, enum: [subscription, credits] }
+        subscriptionIncluded: { type: boolean }
+        subscriptionActive: { type: boolean }
+        referenceAmountCents: { type: integer, minimum: 0, nullable: true, description: Optional display-only currency reference. }
+        priceCents: { type: integer, minimum: 0, nullable: true, description: Internal provider/reference amount; not buyer-facing pricing. }
+        currency: { type: string, enum: [CREDITS] }
+        showCurrencyReference: { type: boolean }
         monetizationModel: { type: string, enum: [membership, individual_license, custom_quote] }
         allowed: { type: boolean }
         checks:

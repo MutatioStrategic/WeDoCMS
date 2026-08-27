@@ -17,7 +17,7 @@ export function safeSlug(value) {
 export function redact(value) {
   return String(value ?? "")
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
-    .replace(/VeldSession\s+[A-Za-z0-9._~+/=-]+/gi, "VeldSession [redacted]")
+    .replace(/(?:StockvelSession|VeldSession)\s+[A-Za-z0-9._~+/=-]+/gi, "StockvelSession [redacted]")
     .replace(/(cookie|authorization|x-csrf-token|apikey|token|secret|password)\s*[:=]\s*[^,\s}]+/gi, "$1=[redacted]")
     .slice(0, 2000);
 }

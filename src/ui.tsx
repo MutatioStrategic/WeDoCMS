@@ -1,5 +1,22 @@
 import type { ReactNode } from "react";
 
+type StockvelLogoProps = {
+  className?: string;
+  markOnly?: boolean;
+};
+
+/** The Stockvel mark: a simple, confident S monogram. */
+export function StockvelLogo({ className = "", markOnly = false }: StockvelLogoProps) {
+  const classes = ["stockvel-logo", markOnly ? "stockvel-logo-mark-only" : "", className].filter(Boolean).join(" ");
+  return <span className={classes}>
+    <svg className="stockvel-logo-icon" viewBox="0 0 48 48" aria-hidden="true" focusable="false">
+      <rect width="48" height="48" rx="12" fill="#173A31" />
+      <path d="M34 15.5c-2.2-2.2-5.2-3.4-9-3.4-5.8 0-9.7 2.6-9.7 6.7 0 4 3.4 5.7 9.5 6.9 5.8 1.1 9.1 2.8 9.1 7.2 0 4.5-3.9 7.8-10 7.8-4.8 0-8.7-1.6-11.3-4.5" fill="none" stroke="#F7F2E8" strokeWidth="4.4" strokeLinecap="round" />
+    </svg>
+    {!markOnly && <span className="stockvel-logo-type"><span>stock</span><b>vel</b></span>}
+  </span>;
+}
+
 export type IconName =
   | "arrow"
   | "bell"

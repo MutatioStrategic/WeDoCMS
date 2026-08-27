@@ -1,6 +1,6 @@
 # Agent deployment safeguards
 
-This is the required runbook for an agent building or deploying Veld Archive.
+This is the required runbook for an agent building or deploying Stockvel.
 It exists because a Worker can return a healthy catalogue from D1 while every
 preview fails when its R2 binding points at an empty or unrelated bucket.
 

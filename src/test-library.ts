@@ -71,7 +71,7 @@ export const testPhotoLibrary: Asset[] = Array.from({ length: 100 }, (_, index) 
     metadataProvenance: "editor",
     sourceFileName: null,
     sourceLicense: "Local test fixture",
-    sourceAttribution: "Veld Archive development team",
+    sourceAttribution: "Stockvel development team",
     previewUrl: null,
     monetizationModel: "membership",
     licensePriceCents: null,

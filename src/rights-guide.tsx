@@ -41,7 +41,7 @@ const guideSteps: GuideStep[] = [
     number: "05",
     title: "Record the permission",
     detail: "A buyer should receive a licence record, not an ambiguous promise in a chat thread.",
-    points: ["The creator keeps copyright; the buyer receives only the stated permission.", "For custom use, both parties can accept the displayed version before delivery.", "Veld records the terms, acceptance, payment and download trail for accountability."],
+    points: ["The creator keeps copyright; the buyer receives only the stated permission.", "For custom use, both parties can accept the displayed version before delivery.", "Stockvel records the terms, acceptance, payment and download trail for accountability."],
   },
 ];
 
@@ -101,7 +101,7 @@ export function RightsGuide() {
     <section id="rights-checklist" className="rights-checklist" aria-labelledby="rights-checklist-title">
       <div><span className="section-kicker">COPY-READY PROMPT</span><h2 id="rights-checklist-title">Make the terms <em>specific.</em></h2><p>When a buyer asks for permission, answer these questions. The resulting summary can become the listing terms and the signed licence record.</p></div>
       <div className="rights-question-grid"><div><b>Use</b><span>What exactly may they make with it?</span></div><div><b>Where</b><span>Which countries, channels or platforms?</span></div><div><b>When</b><span>For how long, and is renewal possible?</span></div><div><b>Credit</b><span>What name, link or notice must appear?</span></div><div><b>Changes</b><span>Can they crop, edit, remix or add text?</span></div><div><b>Limits</b><span>Resale, endorsement, sensitive use, AI training?</span></div></div>
-      <div className="rights-example"><span className="section-kicker">EXAMPLE CUSTOM TERM</span><p>“You may use this photograph in one organic campaign on your own website and social channels in South Africa for 12 months. Credit ‘Name / Veld Archive’ where practical. No resale, sublicensing, paid advertising, AI training, endorsement implication or material edit without written permission.”</p><small>Example only — adapt it to the actual work and deal.</small></div>
+      <div className="rights-example"><span className="section-kicker">EXAMPLE CUSTOM TERM</span><p>“You may use this photograph in one organic campaign on your own website and social channels in South Africa for 12 months. Credit ‘Name / Stockvel’ where practical. No resale, sublicensing, paid advertising, AI training, endorsement implication or material edit without written permission.”</p><small>Example only — adapt it to the actual work and deal.</small></div>
     </section>
 
     <section className="rights-links" aria-labelledby="rights-links-title">
@@ -109,6 +109,6 @@ export function RightsGuide() {
       <div className="rights-link-grid"><a href={externalLinks.ccChooser} target="_blank" rel="noreferrer"><span>01</span><strong>Creative Commons chooser ↗</strong><small>Pick conditions and get a shareable licence link.</small></a><a href={externalLinks.ccLicences} target="_blank" rel="noreferrer"><span>02</span><strong>Compare CC licences ↗</strong><small>Understand attribution, commercial use, remixing and share-alike.</small></a><a href={externalLinks.cipcCopyright} target="_blank" rel="noreferrer"><span>03</span><strong>CIPC copyright basics ↗</strong><small>South African official information on protected works and copyright.</small></a><a href={externalLinks.saCopyrightAct} target="_blank" rel="noreferrer"><span>04</span><strong>South African Copyright Act ↗</strong><small>Read the government-published Act 98 of 1978.</small></a></div>
     </section>
 
-    <section className="rights-final-cta"><div><span className="section-kicker">READY WHEN YOU ARE</span><h2>Post the preview.<br /><em>Keep the control.</em></h2></div><p>Veld can show a watermarked discovery preview, publish the exact terms, and keep the buyer inside a clear permission flow before the original is delivered.</p></section>
+    <section className="rights-final-cta"><div><span className="section-kicker">READY WHEN YOU ARE</span><h2>Post the preview.<br /><em>Keep the control.</em></h2></div><p>Stockvel can show a watermarked discovery preview, publish the exact terms, and keep the buyer inside a clear permission flow before the original is delivered.</p></section>
   </main>;
 }

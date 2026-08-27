@@ -4,7 +4,7 @@
 INSERT OR IGNORE INTO users (
   id, email, display_name, role, onboarding_status, status
 ) VALUES (
-  'demo-editor', 'review.editor@veldarchive.local', 'Veld Review Editor', 'editor', 'approved', 'active'
+  'demo-editor', 'review.editor@stockvel.local', 'Stockvel Review Editor', 'editor', 'approved', 'active'
 );
 
 INSERT INTO organization_memberships (

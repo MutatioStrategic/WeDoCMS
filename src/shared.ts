@@ -27,6 +27,40 @@ export type LicenceDescription = {
 export type MonetizationModel = "membership" | "individual_license" | "custom_quote";
 export const INTRODUCTORY_FREE_DOWNLOAD_LIMIT = 3;
 
+/**
+ * Buyer-facing media access is sold as a standard credit membership. The
+ * provider settlement reference is deliberately separate from this contract:
+ * credits are the product language buyers see and use.
+ */
+export const MEDIA_MEMBERSHIP_CREDITS = 100;
+export const MEDIA_MEMBERSHIP_DURATION_DAYS = 365;
+export const MEDIA_CREDIT_REFERENCE_UNIT_CENTS = 299;
+
+export function mediaLicenceCreditCost(durationDays: number, baseCredits = MEDIA_MEMBERSHIP_CREDITS): number {
+  if (!Number.isInteger(durationDays) || durationDays < 1 || durationDays > 3650) {
+    throw new Error("Media access duration must be a whole number of days between 1 and 3,650");
+  }
+  if (!Number.isInteger(baseCredits) || baseCredits < 1 || baseCredits > 100000) {
+    throw new Error("Media access credit cost must be a whole number between 1 and 100,000");
+  }
+  return baseCredits * Math.max(1, Math.ceil(durationDays / MEDIA_MEMBERSHIP_DURATION_DAYS));
+}
+
+export function mediaMembershipDurationLabel(durationDays: number): string {
+  if (!Number.isInteger(durationDays) || durationDays < 1 || durationDays > 3650) {
+    throw new Error("Media access duration must be a whole number of days between 1 and 3,650");
+  }
+  const months = Math.max(1, Math.round(durationDays / 30.4375));
+  return `${months} month${months === 1 ? "" : "s"}`;
+}
+
+export function mediaCreditReferenceAmountCents(credits: number): number {
+  if (!Number.isInteger(credits) || credits < 1 || credits > 100000) {
+    throw new Error("Media credit cost must be a whole number between 1 and 100,000");
+  }
+  return credits * MEDIA_CREDIT_REFERENCE_UNIT_CENTS;
+}
+
 export function introductoryDownloadsRemaining(used: number, limit = INTRODUCTORY_FREE_DOWNLOAD_LIMIT): number {
   return Math.max(0, Math.floor(limit) - Math.max(0, Math.floor(used)));
 }
@@ -53,6 +87,16 @@ export type MatchExplanation = {
   metadataUsed: MetadataUsed[];
   metadataReviewStatus: MetadataReviewStatus;
   metadataReviewNote: string;
+};
+
+export type SearchMatchedField = "title" | "description";
+export type SearchMatchType = "exact" | "contains" | "fuzzy";
+export type SearchMatchEvidence = {
+  matched_field: SearchMatchedField;
+  match_type: SearchMatchType;
+  metadata_score: number;
+  source_id: string;
+  match_snippet: string;
 };
 
 export type ContributorRelease = {
@@ -124,6 +168,10 @@ export type Asset = {
   streamStatus?: "not_configured" | "uploading" | "processing" | "ready" | "error";
   releases?: ContributorRelease[];
   monetizationModel?: MonetizationModel;
+  /** Seller-listed access price in credits for the standard duration. */
+  licenseCreditCost?: number | null;
+  /** Whether an active Stockvel membership unlocks this asset without credits. */
+  subscriptionIncluded?: boolean;
   licensePriceCents?: number | null;
   freeDownloadEnabled?: boolean;
   mediaContentType?: string | null;
@@ -134,13 +182,19 @@ export type Asset = {
   mediaHasPeople?: boolean;
   mediaUsageType?: "commercial" | "editorial";
   mediaAiGenerated?: boolean;
+  matched_field?: SearchMatchedField | null;
+  match_type?: SearchMatchType;
+  metadata_score?: number;
+  source_id?: string;
+  match_snippet?: string;
 };
 
 export type SearchResponse = {
   query: string;
-  mode: "keyword" | "semantic-preview" | "hybrid";
+  mode: "keyword";
   results: Asset[];
   facets: { label: string; value: string; count: number }[];
+  suggestions?: string[];
   nextCursor?: string | null;
   total?: number;
 };
@@ -211,6 +265,189 @@ export function rankHybridSearchRows(
   }).slice(0, 60);
 }
 
+function normalizeMetadataSearchText(value: string): string {
+  return value
+    .normalize("NFKD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+export function metadataSearchTokens(value: string): string[] {
+  return [...new Set(normalizeMetadataSearchText(value).match(/[\p{L}\p{N}]+/gu) ?? [])]
+    .filter((token) => token.length > 1)
+    .slice(0, 20);
+}
+
+function metadataTokenMatches(queryToken: string, candidateToken: string): boolean {
+  if (queryToken === candidateToken) return true;
+  // Keep the useful singular/plural convenience, but do not treat a short
+  // search term as a prefix of an unrelated word ("cat" must not match
+  // "catalogue", "cattle", or the middle of "location").
+  return queryToken.length > 2 && (
+    candidateToken === `${queryToken}s`
+    || (queryToken.endsWith("s") && candidateToken === queryToken.slice(0, -1))
+  );
+}
+
+function metadataPhraseMatches(value: string, query: string): boolean {
+  const fieldTokens = metadataSearchTokens(value);
+  const queryTokens = metadataSearchTokens(query);
+  if (!fieldTokens.length || !queryTokens.length || queryTokens.length > fieldTokens.length) return false;
+  return fieldTokens.some((_, start) => queryTokens.every((queryToken, offset) =>
+    metadataTokenMatches(queryToken, fieldTokens[start + offset] ?? "")
+  ));
+}
+
+function metadataSearchSnippet(value: string, query: string): string {
+  const text = value.trim();
+  if (!text) return "";
+  const index = normalizeMetadataSearchText(text).indexOf(normalizeMetadataSearchText(query));
+  const start = index > 45 ? Math.max(0, index - 45) : 0;
+  const snippet = text.slice(start, start + 220).trim();
+  return `${start > 0 ? "…" : ""}${snippet}${start + snippet.length < text.length ? "…" : ""}`;
+}
+
+function metadataEditDistance(left: string, right: string): number {
+  const leftChars = [...left];
+  const rightChars = [...right];
+  let previous = Array.from({ length: rightChars.length + 1 }, (_, index) => index);
+  for (let row = 1; row <= leftChars.length; row += 1) {
+    const current = [row];
+    for (let column = 1; column <= rightChars.length; column += 1) {
+      current[column] = Math.min(
+        current[column - 1] + 1,
+        previous[column] + 1,
+        previous[column - 1] + (leftChars[row - 1] === rightChars[column - 1] ? 0 : 1),
+      );
+    }
+    previous = current;
+  }
+  return previous[rightChars.length] ?? Math.max(leftChars.length, rightChars.length);
+}
+
+function metadataTokenSimilarity(queryToken: string, candidateToken: string): number {
+  if (queryToken === candidateToken) return 1;
+  if (queryToken.length > 2 && (candidateToken === `${queryToken}s` || (queryToken.endsWith("s") && candidateToken === queryToken.slice(0, -1)))) return 0.9;
+  if (queryToken.length >= 4 && candidateToken.length >= 4 && Math.abs(candidateToken.length - queryToken.length) <= 1 && (candidateToken.startsWith(queryToken) || queryToken.startsWith(candidateToken))) {
+    return 0.9 - Math.min(0.12, Math.abs(candidateToken.length - queryToken.length) / Math.max(candidateToken.length, queryToken.length, 1) * 0.12);
+  }
+  if (queryToken.length < 4 || candidateToken.length < 4) return 0;
+  const longest = Math.max(queryToken.length, candidateToken.length, 1);
+  return Math.max(0, 1 - metadataEditDistance(queryToken, candidateToken) / longest);
+}
+
+function metadataFieldFuzzyScore(value: string, queryTokens: string[]): number {
+  const fieldTokens = metadataSearchTokens(value);
+  if (!fieldTokens.length || !queryTokens.length) return 0;
+  const similarities = queryTokens.map((queryToken) => Math.max(...fieldTokens.map((candidate) => metadataTokenSimilarity(queryToken, candidate))));
+  const matched = similarities.filter((score) => score >= 0.55).length;
+  if (matched < Math.ceil(queryTokens.length / 2)) return 0;
+  return (similarities.reduce((total, score) => total + score, 0) / similarities.length) * (matched / queryTokens.length);
+}
+
+function searchRowText(row: Record<string, unknown> | Pick<Asset, "title" | "description">, field: SearchMatchedField): string {
+  const value = row[field];
+  return typeof value === "string" ? value : String(value ?? "");
+}
+
+export function metadataSearchEvidence(
+  row: Record<string, unknown> | Pick<Asset, "title" | "description">,
+  query: string,
+  allowFuzzy = false,
+): SearchMatchEvidence | null {
+  const normalizedQuery = normalizeMetadataSearchText(query);
+  if (!normalizedQuery) return null;
+  const title = searchRowText(row, "title");
+  const description = searchRowText(row, "description");
+  const normalizedTitle = normalizeMetadataSearchText(title);
+  const normalizedDescription = normalizeMetadataSearchText(description);
+  const sourceId = String("id" in row ? row.id ?? "" : "");
+  if (normalizedTitle === normalizedQuery) {
+    return { matched_field: "title", match_type: "exact", metadata_score: 100, source_id: sourceId, match_snippet: metadataSearchSnippet(title, query) };
+  }
+  if (metadataPhraseMatches(title, query)) {
+    const score = Math.round((80 + 15 * Math.min(1, normalizedQuery.length / Math.max(normalizedTitle.length, 1))) * 100) / 100;
+    return { matched_field: "title", match_type: "contains", metadata_score: score, source_id: sourceId, match_snippet: metadataSearchSnippet(title, query) };
+  }
+  if (metadataPhraseMatches(description, query)) {
+    const score = Math.round((50 + 30 * Math.min(1, normalizedQuery.length / Math.max(normalizedDescription.length, 1))) * 100) / 100;
+    return { matched_field: "description", match_type: "contains", metadata_score: score, source_id: sourceId, match_snippet: metadataSearchSnippet(description, query) };
+  }
+  if (!allowFuzzy) return null;
+  const queryTokens = metadataSearchTokens(query);
+  const titleScore = metadataFieldFuzzyScore(title, queryTokens);
+  const descriptionScore = metadataFieldFuzzyScore(description, queryTokens);
+  const matchedField: SearchMatchedField = titleScore >= descriptionScore ? "title" : "description";
+  const fuzzyScore = Math.max(titleScore, descriptionScore);
+  if (fuzzyScore < 0.55) return null;
+  const metadataScore = matchedField === "title" ? 25 + fuzzyScore * 50 : 15 + fuzzyScore * 45;
+  const matchedValue = matchedField === "title" ? title : description;
+  return {
+    matched_field: matchedField,
+    match_type: "fuzzy",
+    metadata_score: Math.round(metadataScore * 100) / 100,
+    source_id: sourceId,
+    match_snippet: metadataSearchSnippet(matchedValue, query),
+  };
+}
+
+function searchMatchRank(row: Record<string, unknown>): number {
+  const type = row.match_type as SearchMatchType | undefined;
+  if (type === "exact") return 3;
+  if (type === "contains") return 2;
+  return 1;
+}
+
+export function rankMetadataSearchRows(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  return [...rows].sort((left, right) => {
+    const typeDifference = searchMatchRank(right) - searchMatchRank(left);
+    if (typeDifference) return typeDifference;
+    const scoreDifference = Number(right.metadata_score ?? 0) - Number(left.metadata_score ?? 0);
+    if (scoreDifference) return scoreDifference;
+    const fieldDifference = (right.matched_field === "title" ? 1 : 0) - (left.matched_field === "title" ? 1 : 0);
+    if (fieldDifference) return fieldDifference;
+    const verifiedDifference = Number(Boolean(right.human_verified)) - Number(Boolean(left.human_verified));
+    if (verifiedDifference) return verifiedDifference;
+    return String(left.id ?? "").localeCompare(String(right.id ?? ""));
+  });
+}
+
+export function withMetadataSearchEvidence(row: Record<string, unknown>, evidence: SearchMatchEvidence): Record<string, unknown> {
+  return { ...row, ...evidence };
+}
+
+export function metadataSearchSuggestions(query: string, rows: Record<string, unknown>[]): string[] {
+  const normalizedQuery = normalizeMetadataSearchText(query);
+  const queryTokens = metadataSearchTokens(query);
+  if (!normalizedQuery || !queryTokens.length) return [];
+  const suggestions = new Set<string>();
+  const tokenCandidates = new Set<string>();
+  for (const row of rows) {
+    for (const value of [searchRowText(row, "title"), searchRowText(row, "description")]) {
+      for (const token of metadataSearchTokens(value)) tokenCandidates.add(token);
+      const title = searchRowText(row, "title").trim();
+      const evidence = metadataSearchEvidence(row, query, true);
+      if (title && evidence && evidence.metadata_score >= 55) suggestions.add(title);
+    }
+  }
+  for (const queryToken of queryTokens) {
+    const closest = [...tokenCandidates]
+      .filter((candidate) => candidate !== queryToken)
+      .map((candidate) => ({ candidate, score: metadataTokenSimilarity(queryToken, candidate) }))
+      .filter((candidate) => candidate.score >= 0.68)
+      .sort((left, right) => right.score - left.score || left.candidate.localeCompare(right.candidate))[0];
+    if (closest) suggestions.add(queryTokens.map((token) => token === queryToken ? closest.candidate : token).join(" "));
+  }
+  const pluralVariant = normalizedQuery.endsWith("s") ? normalizedQuery.slice(0, -1) : `${normalizedQuery}s`;
+  if (rows.some((row) => [searchRowText(row, "title"), searchRowText(row, "description")].some((value) => metadataPhraseMatches(value, pluralVariant)))) {
+    suggestions.add(pluralVariant);
+  }
+  return [...suggestions].filter((value) => normalizeMetadataSearchText(value) !== normalizedQuery).slice(0, 3);
+}
+
 export function canApproveMetadataRevision(asset: { assetRevision?: number; reviewedRevision?: number | null; metadataReviewStatus?: MetadataReviewStatus }): boolean {
   return Number(asset.assetRevision) > 0
     && Number(asset.reviewedRevision) === Number(asset.assetRevision)
@@ -219,6 +456,20 @@ export function canApproveMetadataRevision(asset: { assetRevision?: number; revi
 
 /** Builds an evidence-led explanation without turning visual guesses into identity or cultural facts. */
 export function buildMatchExplanation(asset: Asset, query = ""): MatchExplanation {
+  if (asset.match_type && asset.matched_field && asset.metadata_score != null) {
+    const fieldLabel = asset.matched_field === "title" ? "Title" : "Description";
+    const matchLabel = asset.match_type[0].toUpperCase() + asset.match_type.slice(1);
+    const matchedValue = asset.matched_field === "title" ? asset.title : asset.description;
+    const provenance = asset.metadataProvenance ?? (asset.humanVerified ? "editor" : "contributor");
+    const score = Math.max(0.5, Math.min(0.99, Number(asset.metadata_score) / 100));
+    return {
+      matchConfidence: score,
+      signals: [{ field: asset.matched_field, label: `${fieldLabel} metadata`, detail: asset.match_snippet ? `${matchLabel} metadata match: ${asset.match_snippet}` : `${matchLabel} metadata match.`, score, source: "editorial" }],
+      metadataUsed: [{ field: fieldLabel, value: asset.match_snippet || matchedValue, source: provenance }],
+      metadataReviewStatus: asset.metadataReviewStatus ?? (asset.humanVerified ? "reviewed" : "needs_context"),
+      metadataReviewNote: `Deterministic ${fieldLabel.toLowerCase()} metadata match from the approved record.`,
+    };
+  }
   const queryTokens = tokens(query);
   const fields: Array<{ field: MatchSignal["field"]; label: string; value: string; weight: number }> = [
     { field: "title", label: "Title", value: asset.title, weight: 0.82 },
@@ -354,13 +605,13 @@ export type ContributorAnalytics = {
 export type BuyerAnalytics = {
   role: "buyer";
   range: string;
-  summary: { spendCents: number; licensedAssets: number; impressions: number; conversions: number; roi: number };
+  summary: { creditsUsed: number; licensedAssets: number; impressions: number; conversions: number; roi: number };
   campaigns: {
     id: string;
     name: string;
     assetTitle: string;
     assetId: string;
-    spendCents: number;
+    creditsUsed: number;
     impressions: number;
     conversions: number;
     roi: number;
@@ -726,6 +977,22 @@ export class ArchiveDomain {
     return rankSearchAssets(assets, query);
   }
 
+  metadataSearchEvidence(row: Record<string, unknown> | Pick<Asset, "title" | "description">, query: string, allowFuzzy = false): SearchMatchEvidence | null {
+    return metadataSearchEvidence(row, query, allowFuzzy);
+  }
+
+  withMetadataSearchEvidence(row: Record<string, unknown>, evidence: SearchMatchEvidence): Record<string, unknown> {
+    return withMetadataSearchEvidence(row, evidence);
+  }
+
+  rankMetadataSearchRows(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+    return rankMetadataSearchRows(rows);
+  }
+
+  metadataSearchSuggestions(query: string, rows: Record<string, unknown>[]): string[] {
+    return metadataSearchSuggestions(query, rows);
+  }
+
   canApproveMetadataRevision(asset: { assetRevision?: number; reviewedRevision?: number | null; metadataReviewStatus?: MetadataReviewStatus }): boolean {
     return canApproveMetadataRevision(asset);
   }
@@ -736,6 +1003,18 @@ export class ArchiveDomain {
 
   licenceDescription(licenceType: LicenceType): LicenceDescription {
     return licenceDescription(licenceType);
+  }
+
+  mediaLicenceCreditCost(durationDays: number, baseCredits = MEDIA_MEMBERSHIP_CREDITS): number {
+    return mediaLicenceCreditCost(durationDays, baseCredits);
+  }
+
+  mediaMembershipDurationLabel(durationDays: number): string {
+    return mediaMembershipDurationLabel(durationDays);
+  }
+
+  mediaCreditReferenceAmountCents(credits: number): number {
+    return mediaCreditReferenceAmountCents(credits);
   }
 
   normalizeSouthAfricanPhone(phone: string): string {

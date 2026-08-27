@@ -34,9 +34,9 @@ export type MobileApiSession = {
 type StoredSession = Pick<MobileApiSession, "sessionToken" | "csrfToken" | "expiresAt">;
 type ExchangeResponse = Partial<MobileApiSession> & { authenticated?: boolean; error?: string };
 
-const SESSION_STORAGE_KEY = "veld.mobile.api-session.v1";
-const ACCOUNT_INTENT_STORAGE_KEY = "veld.mobile.account-intent.v1";
-const SUPABASE_EMAIL_REDIRECT_URL = "veldarchive://auth/confirmed";
+const SESSION_STORAGE_KEY = "stockvel.mobile.api-session.v1";
+const ACCOUNT_INTENT_STORAGE_KEY = "stockvel.mobile.account-intent.v1";
+const SUPABASE_EMAIL_REDIRECT_URL = "stockvel://auth/confirmed";
 const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL?.trim() ?? "";
 const supabasePublishableKey = (process.env.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY)?.trim() ?? "";
 
@@ -87,7 +87,7 @@ async function readStoredSession(): Promise<StoredSession | null> {
 
 export function mobileSessionHeaders(session: MobileApiSession): Record<string, string> {
   return {
-    Authorization: `VeldSession ${session.sessionToken}`,
+    Authorization: `StockvelSession ${session.sessionToken}`,
     "X-CSRF-Token": session.csrfToken,
   };
 }
@@ -139,7 +139,7 @@ async function restoreApiSession(apiBaseUrl: string): Promise<MobileApiSession |
   const stored = await readStoredSession();
   if (!stored) return null;
   const response = await fetch(`${apiBaseUrl}/api/me`, {
-    headers: { Accept: "application/json", Authorization: `VeldSession ${stored.sessionToken}` },
+    headers: { Accept: "application/json", Authorization: `StockvelSession ${stored.sessionToken}` },
   });
   const body = await response.json().catch(() => null) as { authenticated?: boolean; user?: MobileUser } | null;
   if (!response.ok || !body?.authenticated || !body.user) {
@@ -168,7 +168,7 @@ export function useMobileAuth(apiBaseUrl: string) {
     void (async () => {
       try {
         const initialUrl = await Linking.getInitialURL();
-        const openedForRecovery = initialUrl?.startsWith("veldarchive://auth/recovery") ?? false;
+        const openedForRecovery = initialUrl?.startsWith("stockvel://auth/recovery") ?? false;
         if (openedForRecovery) {
           recoveryPending.current = true;
           if (active) setPasswordRecovery(true);
@@ -216,8 +216,8 @@ export function useMobileAuth(apiBaseUrl: string) {
     });
 
     const handleAuthLink = async (url: string | null) => {
-      if (!url || !supabase || !(url.startsWith("veldarchive://auth/confirmed") || url.startsWith("veldarchive://auth/recovery"))) return;
-      const isRecovery = url.startsWith("veldarchive://auth/recovery");
+      if (!url || !supabase || !(url.startsWith("stockvel://auth/confirmed") || url.startsWith("stockvel://auth/recovery"))) return;
+      const isRecovery = url.startsWith("stockvel://auth/recovery");
       try {
         const normalized = url.replace("#", "?");
         const parameters = new URL(normalized).searchParams;
@@ -329,7 +329,7 @@ export function useMobileAuth(apiBaseUrl: string) {
     setLoading(true);
     setError(null);
     try {
-      const result = await supabase.auth.resetPasswordForEmail(email.trim(), { redirectTo: "veldarchive://auth/recovery" });
+      const result = await supabase.auth.resetPasswordForEmail(email.trim(), { redirectTo: "stockvel://auth/recovery" });
       if (result.error) throw result.error;
     } catch (resetError) {
       const message = friendlySupabaseAuthError(resetError, "reset");

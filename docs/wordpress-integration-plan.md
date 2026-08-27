@@ -2,11 +2,11 @@
 
 ## Product boundary
 
-The WordPress connector is a publishing integration for licensed Veld Archive
+The WordPress connector is a publishing integration for licensed Stockvel
 media. WeDoCMS remains the source of truth for assets, contributor rights,
 licences, releases, derivatives, payments, takedowns, and audit evidence.
 WordPress stores either a reference to an approved hosted preview or a licensed
-preview derivative. It does not create, edit, approve, license, or revoke Veld
+preview derivative. It does not create, edit, approve, license, or revoke Stockvel
 assets.
 
 ## Release 1 user stories
@@ -16,7 +16,7 @@ assets.
 **A1 — Pair a WordPress site**
 
 As an organisation administrator, I want to create a short-lived pairing code
-for one WordPress site so that I can connect the site without pasting my Veld
+for one WordPress site so that I can connect the site without pasting my Stockvel
 password or browser session into WordPress.
 
 Acceptance criteria:
@@ -51,9 +51,9 @@ Acceptance criteria:
 
 ### Epic B: Asset discovery
 
-**B1 — Search Veld Archive from WordPress**
+**B1 — Search Stockvel from WordPress**
 
-As a WordPress editor, I want to search approved Veld images from the WordPress
+As a WordPress editor, I want to search approved Stockvel images from the WordPress
 admin area so that I can select imagery without changing applications.
 
 Acceptance criteria:
@@ -72,7 +72,7 @@ Acceptance criteria:
 
 - An unlicensed result cannot be imported.
 - Editorial-only media is not presented as commercial media.
-- The UI links the editor back to the Veld licence workflow when payment is
+- The UI links the editor back to the Stockvel licence workflow when payment is
   required.
 
 ### Epic C: Publishing
@@ -88,11 +88,11 @@ Acceptance criteria:
 - The Worker rechecks paid, active licence, asset publication, and rights state
   immediately before delivery.
 - The original media is never delivered by this endpoint.
-- The plugin creates a WordPress attachment and stores Veld asset, licence,
+- The plugin creates a WordPress attachment and stores Stockvel asset, licence,
   derivative, attribution, and expiry metadata.
 - The plugin records an auditable usage event after successful import.
 
-**C2 — Insert a hosted Veld image**
+**C2 — Insert a hosted Stockvel image**
 
 As an editor, I want a shortcode for a hosted approved preview so that I can
 avoid duplicating media while retaining provenance.
@@ -141,7 +141,7 @@ Acceptance criteria:
 
 ## Out of scope for Release 1
 
-- Full WordPress-to-Veld two-way asset synchronisation.
+- Full WordPress-to-Stockvel two-way asset synchronisation.
 - WordPress as the source of truth for rights or licensing.
 - Automatic deletion of images from customer websites.
 - Uploading arbitrary WordPress media into the marketplace.

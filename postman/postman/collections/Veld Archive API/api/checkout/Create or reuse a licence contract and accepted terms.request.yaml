@@ -12,8 +12,9 @@ body:
       "licenceType": "editorial",
       "territory": "strin",
       "durationDays": 519,
-      "buyerAgreementVersion": "buyer-marketplace-v1",
-      "paymentAgreementVersion": "payment-split-v1",
+      "includeCustomBuying": false,
+      "buyerAgreementVersion": "buyer-marketplace-v2",
+      "paymentAgreementVersion": "payment-split-v2",
       "acceptBuyerTerms": true
     }
 auth:

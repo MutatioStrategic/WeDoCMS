@@ -1,9 +1,11 @@
 export const PLATFORM_SUBSCRIPTION_PRICE_CENTS = 129900;
-export const CREDIT_UNIT_CENTS = 10000;
+export const CREDIT_REFERENCE_UNIT_CENTS = 299;
+/** @deprecated Use CREDIT_REFERENCE_UNIT_CENTS; retained for old integrations. */
+export const CREDIT_UNIT_CENTS = CREDIT_REFERENCE_UNIT_CENTS;
 
 export function creditPurchaseAmountCents(credits: number): number {
   if (!Number.isInteger(credits) || credits < 1 || credits > 100000) throw new Error("Credit quantity must be an integer between 1 and 100000");
-  return credits * CREDIT_UNIT_CENTS;
+  return credits * CREDIT_REFERENCE_UNIT_CENTS;
 }
 
 export function isCalendarDate(value: string): boolean {

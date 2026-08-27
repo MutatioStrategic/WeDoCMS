@@ -13,7 +13,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $output = if ($OutputRoot) { [IO.Path]::GetFullPath($OutputRoot) } else { Join-Path $root "fixtures\test-photo-library" }
 $manifestPath = Join-Path $output "manifest.json"
 $api = "https://commons.wikimedia.org/w/api.php"
-$userAgent = "VeldArchiveTestLibrary/1.0 (contact: blewisorlando@gmail.com)"
+$userAgent = "StockvelTestLibrary/1.0 (contact: blewisorlando@gmail.com)"
 
 # Five results per topic gives the model varied objects, settings, textures,
 # vehicles, animals, food, architecture, and people without reusing one image

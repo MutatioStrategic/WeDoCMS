@@ -4,8 +4,8 @@ project_id = "fmqwymgmrkrnfkugogbw"
 site_url = "https://veld-archive.pages.dev"
 additional_redirect_urls = [
   "https://veld-archive.pages.dev/**",
-  "veldarchive://auth/confirmed",
-  "veldarchive://auth/recovery",
+  "stockvel://auth/confirmed",
+  "stockvel://auth/recovery",
 ]
 enable_manual_linking = true
 

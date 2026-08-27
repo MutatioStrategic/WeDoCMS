@@ -1,7 +1,7 @@
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { z } from "zod";
-import { archiveDomain } from "../shared";
+import { archiveDomain, MEDIA_MEMBERSHIP_CREDITS, MEDIA_MEMBERSHIP_DURATION_DAYS } from "../shared";
 import type { Asset, BuyerAnalytics, CommunityOverview, ContributorAnalytics, CreatorProfile, DiscoveryResponse, LicenceProduct, LicenceRequest, MonetizationModel, PortfolioCollection, RightsCase, SavedSearch, SearchResponse, TakedownReason, UserLightbox } from "../shared";
 import {
   elapsedMilliseconds,
@@ -32,12 +32,13 @@ import {
   type AuditCatalogRow,
 } from "./audit-analytics";
 import { IntegrationContainer } from "../integrations";
+import { IntegrationError } from "../integrations/http";
 import { calculateMarketplaceSplit } from "../integrations/paystack-splits";
 import { normalizePaystackPaymentEvent, verifyPaystackWebhook } from "../integrations/paystack-webhooks";
 import { normalizeDiditStatus, verifyDiditWebhook } from "../integrations/didit";
 import { agreementText, buyerAgreement, paymentDisclosure, sellerAgreement } from "../legal/agreements";
 import { isPayFastIp, payfastAmountCents, verifyPayFastSignature } from "../integrations/payfast";
-import { CREDIT_UNIT_CENTS, creditPurchaseAmountCents } from "./buyer-finance";
+import { CREDIT_REFERENCE_UNIT_CENTS, creditPurchaseAmountCents } from "./buyer-finance";
 import { monthlyPayoutSchedule } from "./payout-schedule";
 import { buildStatementCsv, buildStatementPdf } from "./statement-export";
 import { canonicalContract, ocrValidation, sanitizeOcrResult, sha256Hex } from "./seller-workflow";
@@ -79,7 +80,7 @@ import { parseCampaignBrief, rankCampaignAssets, type BrandKit, type CampaignBri
 import { decideRightsTransition, isRightsReviewer } from "./rights-transition";
 import { sellerEvidenceUpdateAllowed } from "./asset-rights";
 import { createStoredZip, type ZipEntry } from "./zip";
-import { settlementAmounts } from "./payment-settlement";
+import { creditRedemptionSettlement, settlementAmounts } from "./payment-settlement";
 import { decryptZohoSecret, encryptZohoSecret, enqueueZohoOutbox, dispatchDueZohoOutbox, dispatchZohoOutboxJob, type ZohoOutboxJobMessage } from "./zoho-outbox";
 import type { ZohoCampaignSync, ZohoDeskCase, ZohoSocialDraft } from "../integrations/zoho";
 import { bearerToken, normalizeWordPressSiteUrl, WORDPRESS_SCOPES, wordPressApiBaseUrl } from "../integrations/wordpress";
@@ -202,6 +203,7 @@ type SecretBindings = {
   BUYER_SUBSCRIPTION_AMOUNT_CENTS?: string;
   BUYER_ANNUAL_SUBSCRIPTION_AMOUNT_CENTS?: string;
   BUYER_SUBSCRIPTION_INTERVAL?: string;
+  SHOW_CURRENCY_REFERENCE?: string;
   INTRODUCTORY_FREE_DOWNLOAD_LIMIT?: string;
   DEFAULT_ARTIST_SHARE_PERCENTAGE?: string;
   PAYSTACK_SPLIT_FEE_BEARER?: string;
@@ -343,7 +345,10 @@ async function dispatchWebhookEvent(env: Bindings, organizationId: string, event
     const signature = hex(await hmac(utf8(subscription.secret), body));
     await env.DB.prepare("INSERT INTO webhook_deliveries (id, subscription_id, event_type, payload_json, status, attempts) VALUES (?, ?, ?, ?, 'pending', 1)").bind(deliveryId, subscription.id, eventType, body).run();
     try {
-      const response = await fetch(subscription.target_url, { method: "POST", headers: { "Content-Type": "application/json", "X-Veld-Signature": signature, "X-Veld-Delivery": deliveryId }, body });
+      // New consumers use the Stockvel headers; keep the legacy aliases during
+      // the rename window so an existing subscriber does not silently lose
+      // signed deliveries.
+      const response = await fetch(subscription.target_url, { method: "POST", headers: { "Content-Type": "application/json", "X-Stockvel-Signature": signature, "X-Stockvel-Delivery": deliveryId, "X-Veld-Signature": signature, "X-Veld-Delivery": deliveryId }, body });
       await env.DB.prepare("UPDATE webhook_deliveries SET status = ?, response_status = ?, delivered_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END WHERE id = ?")
         .bind(response.ok ? "delivered" : "failed", response.status, response.ok ? 1 : 0, deliveryId).run();
     } catch (error) {
@@ -486,7 +491,7 @@ async function seedSessionForRole(c: AppContext, role: DemoRole): Promise<Respon
       .first<{ organization_id: string }>();
     if (!adminMembership) return c.json({ error: "Demo seed identity is not available; apply migrations first" }, 503);
     await c.env.DB.batch([
-      c.env.DB.prepare("INSERT OR IGNORE INTO users (id, email, display_name, role) VALUES ('demo-editor', 'review.editor@veldarchive.local', 'Veld Review Editor', 'editor')"),
+      c.env.DB.prepare("INSERT OR IGNORE INTO users (id, email, display_name, role) VALUES ('demo-editor', 'review.editor@stockvel.local', 'Stockvel Review Editor', 'editor')"),
       c.env.DB.prepare("INSERT INTO organization_memberships (id, organization_id, user_id, role, status) VALUES (?, ?, 'demo-editor', 'editor', 'active') ON CONFLICT(organization_id, user_id) DO UPDATE SET role = 'editor', status = 'active', updated_at = CURRENT_TIMESTAMP")
         .bind(crypto.randomUUID(), adminMembership.organization_id),
     ]);
@@ -834,7 +839,7 @@ const assetRowToDomain = (row: Record<string, unknown>, env?: Pick<SecretBinding
   authenticityConfidence: Number(row.authenticity_confidence ?? 0),
   aiConfidence: Number(row.ai_confidence ?? row.authenticity_confidence ?? 0),
   humanVerified: Boolean(row.human_verified),
-  contributor: String(row.contributor ?? "Veld Studio"),
+  contributor: String(row.contributor ?? "Stockvel Studio"),
   workflowStage: (row.workflow_stage as Asset["workflowStage"]) ?? "ingestion",
   aiTags: JSON.parse(String(row.ai_tags ?? "[]")) as string[],
   aiSuggestedMetadata: JSON.parse(String(row.ai_metadata_suggestion_json ?? "{}")) as Asset["aiSuggestedMetadata"],
@@ -869,8 +874,19 @@ const assetRowToDomain = (row: Record<string, unknown>, env?: Pick<SecretBinding
   streamEmbedUrl: streamEmbedUrl(row, env),
   streamStatus: (row.stream_status as Asset["streamStatus"]) ?? "not_configured",
   monetizationModel: (row.monetization_model as MonetizationModel | undefined) ?? "membership",
+  licenseCreditCost: row.license_credit_cost == null ? MEDIA_MEMBERSHIP_CREDITS : Number(row.license_credit_cost),
+  subscriptionIncluded: (row.monetization_model as MonetizationModel | undefined) === "custom_quote"
+    ? false
+    : row.subscription_included == null
+      ? (row.monetization_model as MonetizationModel | undefined) === "membership"
+      : Number(row.subscription_included) === 1,
   licensePriceCents: row.license_price_cents == null ? null : Number(row.license_price_cents),
   freeDownloadEnabled: Number(row.free_download_enabled) === 1,
+  matched_field: row.matched_field == null ? undefined : row.matched_field as Asset["matched_field"],
+  match_type: row.match_type == null ? undefined : row.match_type as Asset["match_type"],
+  metadata_score: row.metadata_score == null ? undefined : Number(row.metadata_score),
+  source_id: row.source_id == null ? undefined : String(row.source_id),
+  match_snippet: row.match_snippet == null ? undefined : String(row.match_snippet),
 });
 
 function previewContentType(row: Record<string, unknown>): string {
@@ -1083,7 +1099,7 @@ const governanceActionSchema = contractGovernanceActionRequestSchema;
 function governancePayloadEditsMetadata(payload: z.infer<typeof governanceActionSchema>): boolean {
   return [payload.title, payload.caption, payload.subjectTags, payload.culturalTags, payload.aiTags,
     payload.curatorNotes, payload.rightsStatus, payload.modelReleaseStatus, payload.propertyReleaseStatus,
-    payload.monetizationModel, payload.licensePriceCents, payload.freeDownloadEnabled, payload.visualLocationType,
+    payload.monetizationModel, payload.licenseCreditCost, payload.subscriptionIncluded, payload.licensePriceCents, payload.freeDownloadEnabled, payload.visualLocationType,
     payload.sceneContext, payload.primaryCategory, payload.sceneAttributes, payload.visibleText].some((value) => value !== undefined);
 }
 
@@ -1091,17 +1107,14 @@ app.post("/api/governance/assets/:id/action", async (c) => {
   const actor = await requestUser(c);
   if (!actor || !allowedRole(actor, ["contributor", "editor", "admin"])) return c.json({ error: "Contributor or editor access required" }, 403);
   const payload = governanceActionSchema.parse(await c.req.json());
-  if (payload.monetizationModel === "individual_license" && (!payload.licensePriceCents || payload.licensePriceCents < 100)) {
-    return c.json({ error: "Individual licences must have a price of at least ZAR 1.00" }, 422);
-  }
   const safetyIssue = payload.culturalTags ? metadataSafetyIssue(payload.culturalTags) : null;
   if (safetyIssue) return c.json({ error: safetyIssue, code: "metadata_context_required" }, 422);
   const assetId = c.req.param("id");
-  let exists: { id: string; owner_id: string; organization_id: string; kind: "image" | "video"; status: string; asset_revision: number; reviewed_revision: number | null; metadata_review_status: string; rights_status: Asset["rightsStatus"]; model_release_status: Asset["modelReleaseStatus"]; property_release_status: Asset["propertyReleaseStatus"] } | null;
+  let exists: { id: string; owner_id: string; organization_id: string; kind: "image" | "video"; status: string; asset_revision: number; reviewed_revision: number | null; metadata_review_status: string; rights_status: Asset["rightsStatus"]; model_release_status: Asset["modelReleaseStatus"]; property_release_status: Asset["propertyReleaseStatus"]; monetization_model: MonetizationModel } | null;
   try {
     exists = await c.env.DB.prepare(`SELECT id, owner_id, organization_id, kind, status, asset_revision,
-      reviewed_revision, metadata_review_status, rights_status, model_release_status, property_release_status FROM assets WHERE id = ? AND organization_id = ?`)
-      .bind(assetId, actor.organizationId).first<{ id: string; owner_id: string; organization_id: string; kind: "image" | "video"; status: string; asset_revision: number; reviewed_revision: number | null; metadata_review_status: string; rights_status: Asset["rightsStatus"]; model_release_status: Asset["modelReleaseStatus"]; property_release_status: Asset["propertyReleaseStatus"] }>();
+      reviewed_revision, metadata_review_status, rights_status, model_release_status, property_release_status, monetization_model FROM assets WHERE id = ? AND organization_id = ?`)
+      .bind(assetId, actor.organizationId).first<{ id: string; owner_id: string; organization_id: string; kind: "image" | "video"; status: string; asset_revision: number; reviewed_revision: number | null; metadata_review_status: string; rights_status: Asset["rightsStatus"]; model_release_status: Asset["modelReleaseStatus"]; property_release_status: Asset["propertyReleaseStatus"]; monetization_model: MonetizationModel }>();
   } catch (error) {
     logEvent("error", "metadata.workflow_schema_unavailable", c.get("trace"), { assetId, error: error instanceof Error ? error.message : "unknown-error" });
     return c.json({ error: "Metadata workflow is unavailable until its database migration is applied", code: "metadata_schema_unavailable" }, 503);
@@ -1116,7 +1129,7 @@ app.post("/api/governance/assets/:id/action", async (c) => {
     rightsStatus: payload.rightsStatus,
     modelReleaseStatus: payload.modelReleaseStatus,
     propertyReleaseStatus: payload.propertyReleaseStatus,
-  })) return c.json({ error: "Rights and release verification is completed by Veld review; submit supporting evidence for review instead.", code: "seller_verification_reviewer_only" }, 422);
+  })) return c.json({ error: "Rights and release verification is completed by Stockvel review; submit supporting evidence for review instead.", code: "seller_verification_reviewer_only" }, 422);
   if (payload.freeDownloadEnabled && exists.kind === "video") return c.json({ error: "Introductory free downloads are currently available for photos only" }, 422);
   if (payload.action === "run_ai_tagging") {
     return c.json({
@@ -1133,12 +1146,18 @@ app.post("/api/governance/assets/:id/action", async (c) => {
   const stage = payload.action === "approve" ? "approval" : "curator_correction";
   const status = payload.action === "approve" ? "published" : payload.action === "reject" ? "rejected" : "needs_review";
   if (payload.action === "save_correction") {
+    const nextMonetizationModel = payload.monetizationModel ?? exists.monetization_model;
+    const nextSubscriptionIncluded = nextMonetizationModel === "custom_quote"
+      ? 0
+      : payload.subscriptionIncluded === undefined ? null : payload.subscriptionIncluded ? 1 : 0;
     await c.env.DB.prepare(`UPDATE assets SET status = 'needs_review', workflow_stage = 'curator_correction',
       title = COALESCE(?, title), caption = COALESCE(?, caption), subject_tags = COALESCE(?, subject_tags),
       cultural_tags = COALESCE(?, cultural_tags), ai_tags = COALESCE(?, ai_tags), curator_notes = COALESCE(?, curator_notes),
       rights_status = COALESCE(?, rights_status), model_release_status = COALESCE(?, model_release_status),
       property_release_status = COALESCE(?, property_release_status), monetization_model = COALESCE(?, monetization_model),
       license_price_cents = CASE WHEN ? = 'individual_license' THEN ? WHEN ? IN ('membership', 'custom_quote') THEN NULL ELSE license_price_cents END,
+      license_credit_cost = COALESCE(?, license_credit_cost),
+      subscription_included = COALESCE(?, subscription_included),
       free_download_enabled = CASE WHEN ? IS NULL THEN free_download_enabled WHEN ? = 1 AND kind = 'image' THEN 1 ELSE 0 END,
       visual_location_type = COALESCE(?, visual_location_type), scene_context = COALESCE(?, scene_context), primary_category = COALESCE(?, primary_category),
       scene_attributes = COALESCE(?, scene_attributes), ocr_text = COALESCE(?, ocr_text),
@@ -1154,6 +1173,8 @@ app.post("/api/governance/assets/:id/action", async (c) => {
         payload.curatorNotes ?? null, payload.rightsStatus ?? null, payload.modelReleaseStatus ?? null,
          payload.propertyReleaseStatus ?? null, payload.monetizationModel ?? null,
          payload.monetizationModel ?? null, payload.licensePriceCents ?? null, payload.monetizationModel ?? null,
+         payload.licenseCreditCost ?? null,
+         nextSubscriptionIncluded,
          payload.freeDownloadEnabled === undefined ? null : payload.freeDownloadEnabled ? 1 : 0,
          payload.freeDownloadEnabled === undefined ? null : payload.freeDownloadEnabled ? 1 : 0,
         payload.visualLocationType ?? null, payload.sceneContext ?? null, payload.primaryCategory ?? null,
@@ -1266,7 +1287,7 @@ const walletSchema = z.object({
   currency: z.string().trim().length(3).transform((value) => value.toUpperCase()).default("ZAR"),
 });
 
-const contributorTerms = "Veld Archive Contributor Terms v1: the contributor grants the marketplace the rights necessary to host, review, market, license, and account for submitted media; confirms authority over submitted material; agrees to accurate identity and payout information; and accepts the published royalty schedule and dispute process. The complete legal terms must be versioned and reviewed before production launch.";
+const contributorTerms = "Stockvel Contributor Terms v1: the contributor grants the marketplace the rights necessary to host, review, market, license, and account for submitted media; confirms authority over submitted material; agrees to accurate identity and payout information; and accepts the published royalty schedule and dispute process. The complete legal terms must be versioned and reviewed before production launch.";
 
 function verificationBucket(env: Bindings, region: "za" | "eu"): R2Bucket {
   return region === "eu" ? env.KYC_BUCKET_EU : env.KYC_BUCKET_ZA;
@@ -1476,26 +1497,25 @@ app.post("/api/assets", async (c) => {
     rightsStatus: payload.rightsStatus,
     modelReleaseStatus: payload.modelReleaseStatus,
     propertyReleaseStatus: payload.propertyReleaseStatus,
-  })) return c.json({ error: "Rights and release verification is completed by Veld review; submit supporting evidence for review instead.", code: "seller_verification_reviewer_only" }, 422);
+  })) return c.json({ error: "Rights and release verification is completed by Stockvel review; submit supporting evidence for review instead.", code: "seller_verification_reviewer_only" }, 422);
   if (payload.freeDownloadEnabled && payload.kind !== "image") {
     return c.json({ error: "Introductory free downloads are currently available for photos only" }, 422);
   }
   const safetyIssue = metadataSafetyIssue(payload.culturalTags);
   if (safetyIssue) return c.json({ error: safetyIssue, code: "metadata_context_required" }, 422);
-  if (payload.monetizationModel === "individual_license" && (!payload.licensePriceCents || payload.licensePriceCents < 100)) {
-    return c.json({ error: "Individual licences must have a price of at least ZAR 1.00" }, 422);
-  }
   const id = crypto.randomUUID();
   const geographicLocationSource = payload.province || payload.city || payload.locality || payload.landmark ? "seller" : "none";
-  await c.env.DB.prepare(`INSERT INTO assets (id, organization_id, owner_id, kind, status, title, description, caption, province, city, locality, landmark, subject_tags, cultural_tags, rights_status, model_release_status, property_release_status, monetization_model, license_price_cents, free_download_enabled, workflow_stage, geographic_location_source)
+  const subscriptionIncluded = payload.monetizationModel !== "custom_quote"
+    && (payload.subscriptionIncluded ?? payload.monetizationModel === "membership");
+  await c.env.DB.prepare(`INSERT INTO assets (id, organization_id, owner_id, kind, status, title, description, caption, province, city, locality, landmark, subject_tags, cultural_tags, rights_status, model_release_status, property_release_status, monetization_model, license_price_cents, license_credit_cost, subscription_included, free_download_enabled, workflow_stage, geographic_location_source)
     VALUES (
       ?, ?, ?, ?, 'needs_review',
+      ?, ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?,
-      ?, ?, ?, ?, ?,
-      'curator_correction', ?
+      'curator_correction', ?, ?
     )`)
-    .bind(id, user.organizationId, user.id, payload.kind, payload.title, payload.description, payload.caption, payload.province ?? null, payload.city ?? null, payload.locality ?? null, payload.landmark ?? null, JSON.stringify(payload.subjectTags), JSON.stringify(payload.culturalTags), payload.rightsStatus, payload.modelReleaseStatus, payload.propertyReleaseStatus, payload.monetizationModel, payload.monetizationModel === "individual_license" ? payload.licensePriceCents : null, payload.kind === "image" && payload.freeDownloadEnabled ? 1 : 0, geographicLocationSource).run();
+    .bind(id, user.organizationId, user.id, payload.kind, payload.title, payload.description, payload.caption, payload.province ?? null, payload.city ?? null, payload.locality ?? null, payload.landmark ?? null, JSON.stringify(payload.subjectTags), JSON.stringify(payload.culturalTags), payload.rightsStatus, payload.modelReleaseStatus, payload.propertyReleaseStatus, payload.monetizationModel, payload.licensePriceCents ?? null, payload.licenseCreditCost, subscriptionIncluded ? 1 : 0, payload.kind === "image" && payload.freeDownloadEnabled ? 1 : 0, geographicLocationSource).run();
   return c.json(validateContractResponse("POST /api/assets 201", assetCreateResponseSchema, { id, status: "needs_review" }), 201, { Location: `/api/assets/${id}` });
 });
 
@@ -1507,11 +1527,20 @@ app.patch("/api/assets/:id", async (c) => {
   if (!current) return c.json({ error: "Asset not found" }, 404);
   if (String(current.owner_id) !== user.id && !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Forbidden" }, 403);
   const payload = assetCreateSchema.partial().parse(await c.req.json());
+  const nextMonetizationModel = payload.monetizationModel ?? (current.monetization_model as MonetizationModel | undefined) ?? "membership";
   const next = {
     ...current,
     ...payload,
-    monetizationModel: payload.monetizationModel ?? (current.monetization_model as MonetizationModel | undefined) ?? "membership",
+    monetizationModel: nextMonetizationModel,
     licensePriceCents: payload.licensePriceCents !== undefined ? payload.licensePriceCents : (current.license_price_cents == null ? null : Number(current.license_price_cents)),
+    licenseCreditCost: payload.licenseCreditCost !== undefined ? payload.licenseCreditCost : Number(current.license_credit_cost ?? MEDIA_MEMBERSHIP_CREDITS),
+    subscriptionIncluded: nextMonetizationModel === "custom_quote"
+      ? false
+      : payload.subscriptionIncluded !== undefined
+        ? payload.subscriptionIncluded
+        : current.subscription_included == null
+          ? (current.monetization_model as MonetizationModel | undefined) === "membership"
+          : Number(current.subscription_included) === 1,
     freeDownloadEnabled: payload.freeDownloadEnabled !== undefined ? payload.freeDownloadEnabled : Boolean(current.free_download_enabled),
   };
   if (!sellerEvidenceUpdateAllowed(user.role, {
@@ -1522,21 +1551,18 @@ app.patch("/api/assets/:id", async (c) => {
     rightsStatus: payload.rightsStatus,
     modelReleaseStatus: payload.modelReleaseStatus,
     propertyReleaseStatus: payload.propertyReleaseStatus,
-  })) return c.json({ error: "Rights and release verification is completed by Veld review; submit supporting evidence for review instead.", code: "seller_verification_reviewer_only" }, 422);
-  if (next.monetizationModel === "individual_license" && (!next.licensePriceCents || next.licensePriceCents < 100)) {
-    return c.json({ error: "Individual licences must have a price of at least ZAR 1.00" }, 422);
-  }
+  })) return c.json({ error: "Rights and release verification is completed by Stockvel review; submit supporting evidence for review instead.", code: "seller_verification_reviewer_only" }, 422);
   if (next.freeDownloadEnabled && next.kind !== "image") return c.json({ error: "Introductory free downloads are currently available for photos only" }, 422);
   const safetyIssue = metadataSafetyIssue((next.culturalTags ?? []) as string[]);
   if (safetyIssue) return c.json({ error: safetyIssue, code: "metadata_context_required" }, 422);
   const locationWasEdited = payload.province !== undefined || payload.city !== undefined || payload.locality !== undefined || payload.landmark !== undefined;
-  await c.env.DB.prepare(`UPDATE assets SET kind = ?, title = ?, description = ?, caption = ?, province = ?, city = ?, locality = ?, landmark = ?, subject_tags = ?, cultural_tags = ?, rights_status = ?, model_release_status = ?, property_release_status = ?, monetization_model = ?, license_price_cents = ?, free_download_enabled = ?,
+  await c.env.DB.prepare(`UPDATE assets SET kind = ?, title = ?, description = ?, caption = ?, province = ?, city = ?, locality = ?, landmark = ?, subject_tags = ?, cultural_tags = ?, rights_status = ?, model_release_status = ?, property_release_status = ?, monetization_model = ?, license_price_cents = ?, license_credit_cost = ?, subscription_included = ?, free_download_enabled = ?,
     geographic_location_source = CASE WHEN ? = 1 THEN 'seller' ELSE geographic_location_source END,
     asset_revision = asset_revision + 1, reviewed_revision = NULL, approved_revision = NULL, human_verified = 0,
     status = 'needs_review', workflow_stage = 'curator_correction', metadata_review_status = 'needs_context',
     metadata_review_note = 'Seller metadata changed; review the current revision before publication.',
     vector_index_status = 'pending', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?`)
-    .bind(next.kind, next.title, next.description ?? "", next.caption ?? "", next.province ?? null, next.city ?? null, next.locality ?? null, next.landmark ?? null, JSON.stringify(next.subjectTags ?? []), JSON.stringify(next.culturalTags ?? []), next.rightsStatus ?? "pending", next.modelReleaseStatus ?? "unknown", next.propertyReleaseStatus ?? "unknown", next.monetizationModel ?? "membership", next.monetizationModel === "individual_license" ? next.licensePriceCents : null, next.kind === "image" && next.freeDownloadEnabled ? 1 : 0, locationWasEdited ? 1 : 0, id, user.organizationId).run();
+    .bind(next.kind, next.title, next.description ?? "", next.caption ?? "", next.province ?? null, next.city ?? null, next.locality ?? null, next.landmark ?? null, JSON.stringify(next.subjectTags ?? []), JSON.stringify(next.culturalTags ?? []), next.rightsStatus ?? "pending", next.modelReleaseStatus ?? "unknown", next.propertyReleaseStatus ?? "unknown", next.monetizationModel ?? "membership", next.licensePriceCents ?? null, next.licenseCreditCost ?? MEDIA_MEMBERSHIP_CREDITS, next.subscriptionIncluded ? 1 : 0, next.kind === "image" && next.freeDownloadEnabled ? 1 : 0, locationWasEdited ? 1 : 0, id, user.organizationId).run();
   return c.json({ ok: true, id });
 });
 
@@ -1634,11 +1660,14 @@ app.post("/api/admin/assets/:id/review", async (c) => {
   return c.json({ ok: true, status, indexing });
 });
 
-const licenceRequestSchema: z.ZodType<LicenceRequest> = contractLicenceRequestSchema;
+const buyerLicenceRequestSchema = contractLicenceRequestSchema.extend({
+  includeCustomBuying: z.boolean().default(false),
+});
 const checkoutRequestSchema = contractLicenceRequestSchema.extend({
   buyerAgreementVersion: z.literal(buyerAgreement.version),
   paymentAgreementVersion: z.literal(paymentDisclosure.version),
   acceptBuyerTerms: z.literal(true),
+  includeCustomBuying: z.boolean().default(false),
 });
 
 async function governanceAsset(c: { env: Bindings }, assetId: string, organizationId?: string): Promise<Asset | null> {
@@ -1650,28 +1679,108 @@ async function governanceAsset(c: { env: Bindings }, assetId: string, organizati
   return addReleaseDocuments(assetRowToDomain(row), releases.results as Record<string, unknown>[]);
 }
 
-function licencePriceCents(request: LicenceRequest, asset: Asset): number | null {
-  if (asset.monetizationModel === "custom_quote") return null;
-  if (asset.monetizationModel === "individual_license" && asset.licensePriceCents && asset.licensePriceCents >= 100) {
-    return asset.licensePriceCents * Math.max(1, Math.ceil(request.durationDays / 365));
-  }
-  const annualBase: Record<LicenceRequest["licenceType"], number> = { editorial: 25_000, social: 35_000, commercial: 75_000, advertising: 150_000, broadcast: 250_000, exclusive: 500_000 };
-  return annualBase[request.licenceType] * Math.max(1, Math.ceil(request.durationDays / 365));
+function currencyReferenceEnabled(env: Pick<Bindings, "SHOW_CURRENCY_REFERENCE">): boolean {
+  return String(env.SHOW_CURRENCY_REFERENCE ?? "").toLowerCase() === "true";
+}
+
+function licenceCreditCost(request: LicenceRequest, asset: Asset): number {
+  return archiveDomain.mediaLicenceCreditCost(request.durationDays, Number(asset.licenseCreditCost ?? MEDIA_MEMBERSHIP_CREDITS));
+}
+
+/**
+ * Paystack and the internal settlement ledger still require a currency amount.
+ * This is a provider reference derived from the credit product, never a
+ * seller-entered offer and never the buyer-facing price language.
+ */
+function licenceReferenceAmountCents(request: LicenceRequest, asset: Asset): number {
+  return creditPurchaseAmountCents(licenceCreditCost(request, asset));
+}
+
+async function creditAccessSettlement(env: Bindings, assetId: string, credits: number): Promise<{
+  ownerId: string;
+  amountCents: number;
+  platformFeeCents: number;
+  royaltyCents: number;
+  artistSharePercentage: number;
+}> {
+  const configuredShare = Number(env.DEFAULT_ARTIST_SHARE_PERCENTAGE ?? 60);
+  const fallbackShare = Number.isSafeInteger(configuredShare) && configuredShare >= 1 && configuredShare <= 99 ? configuredShare : 60;
+  const seller = await env.DB.prepare(`SELECT a.owner_id,
+      COALESCE((SELECT w.artist_share_percentage FROM payout_wallets w
+        WHERE w.contributor_id = a.owner_id AND w.status = 'verified'
+        ORDER BY CASE WHEN w.provider = 'paystack' THEN 0 ELSE 1 END, w.updated_at DESC LIMIT 1), ?) AS artist_share_percentage
+    FROM assets a WHERE a.id = ?`).bind(fallbackShare, assetId).first<{ owner_id: string; artist_share_percentage: number }>();
+  if (!seller) throw new Error("Asset seller not found for credit settlement");
+  const settlement = creditRedemptionSettlement({
+    credits,
+    referenceUnitCents: CREDIT_REFERENCE_UNIT_CENTS,
+    artistSharePercentage: Number(seller.artist_share_percentage),
+  });
+  return { ownerId: String(seller.owner_id), ...settlement };
+}
+
+type MediaAccessDecision = {
+  subscriptionIncluded: boolean;
+  subscriptionActive: boolean;
+  subscriptionId: string | null;
+  accessMode: "subscription" | "credits";
+  creditCost: number;
+  creditBalance: number | null;
+};
+
+async function mediaAccessDecision(env: Bindings, user: RequestUser | null, asset: Asset, creditCost: number): Promise<MediaAccessDecision> {
+  const subscriptionIncluded = asset.monetizationModel === "custom_quote"
+    ? false
+    : asset.subscriptionIncluded ?? asset.monetizationModel === "membership";
+  if (!user) return { subscriptionIncluded, subscriptionActive: false, subscriptionId: null, accessMode: "credits", creditCost, creditBalance: null };
+  const [subscription, balance] = await env.DB.batch([
+    env.DB.prepare(`SELECT id FROM buyer_subscriptions
+      WHERE organization_id = ? AND buyer_id = ? AND status IN ('active', 'non-renewing')
+      ORDER BY created_at DESC LIMIT 1`).bind(user.organizationId, user.id),
+    env.DB.prepare("SELECT COALESCE(SUM(credits), 0) AS balance FROM buyer_credit_transactions WHERE organization_id = ? AND buyer_id = ?").bind(user.organizationId, user.id),
+  ]);
+  const subscriptionId = subscription.results.length ? String((subscription.results[0] as Record<string, unknown>).id) : null;
+  const subscriptionActive = Boolean(subscriptionId);
+  const creditBalance = Number((balance.results[0] as Record<string, unknown> | undefined)?.balance ?? 0);
+  return {
+    subscriptionIncluded,
+    subscriptionActive,
+    subscriptionId,
+    accessMode: subscriptionActive && subscriptionIncluded ? "subscription" : "credits",
+    creditCost,
+    creditBalance,
+  };
 }
 
 app.post("/api/checkout/validate", async (c) => {
-  const request = licenceRequestSchema.parse(await c.req.json());
+  const requestWithMode = buyerLicenceRequestSchema.parse(await c.req.json());
+  const { includeCustomBuying, ...request } = requestWithMode;
+  const user = await requestUser(c);
   const asset = await governanceAsset(c, request.assetId);
   if (!asset) return c.json({ error: "Asset not found" }, 404);
-  const priceCents = licencePriceCents(request, asset);
+  if (asset.monetizationModel === "custom_quote" && !includeCustomBuying) {
+    return c.json({ blocked: true, code: "custom_buying_opt_in_required", error: "Enable custom buying in Search to view this seller-listed credit price." }, 422);
+  }
+  const creditCost = licenceCreditCost(request, asset);
+  const referenceAmountCents = licenceReferenceAmountCents(request, asset);
+  const showCurrencyReference = currencyReferenceEnabled(c.env);
+  const access = await mediaAccessDecision(c.env, user, asset, creditCost);
   return c.json({
     assetId: request.assetId,
     licenceType: request.licenceType,
     licence: archiveDomain.licenceDescription(request.licenceType),
-    priceCents,
-    currency: "ZAR",
+    creditCost,
+    creditsRequired: access.accessMode === "credits",
+    creditBalance: access.creditBalance,
+    accessMode: access.accessMode,
+    subscriptionIncluded: access.subscriptionIncluded,
+    subscriptionActive: access.subscriptionActive,
+    ...(showCurrencyReference ? { referenceAmountCents } : {}),
+    priceCents: referenceAmountCents,
+    currency: "CREDITS",
+    showCurrencyReference,
     monetizationModel: asset.monetizationModel ?? "membership",
-    purchase: { paymentRequired: true, paymentStatus: "not_charged_until_verified_checkout", originalAccess: "released_after_paid_webhook" },
+    purchase: { paymentRequired: access.accessMode === "credits", paymentStatus: access.accessMode === "subscription" ? "included_with_active_membership" : "credits_reserved_at_checkout", originalAccess: "released_after_paid_checkout" },
     ...archiveDomain.evaluateLicenceRequest(asset, request),
   });
 });
@@ -1840,15 +1949,25 @@ app.post("/api/checkout", async (c) => {
   if (!asset) return c.json({ error: "Asset not found" }, 404);
   const validation = archiveDomain.evaluateLicenceRequest(asset, request);
   if (!validation.allowed) return c.json({ blocked: true, ...validation }, 422);
-  if (asset.monetizationModel === "custom_quote") {
-    return c.json({ blocked: true, error: "This asset is available by custom quote. Contact the contributor to request pricing.", monetizationModel: asset.monetizationModel }, 422);
+  if (asset.monetizationModel === "custom_quote" && !request.includeCustomBuying) {
+    return c.json({ blocked: true, code: "custom_buying_opt_in_required", error: "Enable custom buying in Search to view this seller-listed credit price." }, 422);
   }
   const licenceId = crypto.randomUUID();
-  const priceCents = licencePriceCents(request, asset);
-  if (!priceCents) return c.json({ blocked: true, error: "A licence price is not configured for this asset." }, 422);
-  const existing = await c.env.DB.prepare(`SELECT id, price_cents FROM licences
-    WHERE organization_id = ? AND asset_id = ? AND buyer_id = ? AND licence_type = ? AND territory = ? AND duration_days = ? AND status = 'pending'
-    ORDER BY created_at DESC LIMIT 1`).bind(user.organizationId, request.assetId, user.id, request.licenceType, request.territory, request.durationDays).first<{ id: string; price_cents: number }>();
+  const creditCost = licenceCreditCost(request, asset);
+  const referenceAmountCents = licenceReferenceAmountCents(request, asset);
+  const showCurrencyReference = currencyReferenceEnabled(c.env);
+  const access = await mediaAccessDecision(c.env, user, asset, creditCost);
+  const creditSettlement = access.accessMode === "credits"
+    ? await creditAccessSettlement(c.env, request.assetId, access.creditCost)
+    : null;
+  let existing = await c.env.DB.prepare(`SELECT id, price_cents, credit_cost, status, payment_provider
+    FROM licences
+    WHERE organization_id = ? AND asset_id = ? AND buyer_id = ? AND licence_type = ? AND territory = ? AND duration_days = ? AND status IN ('pending', 'paid')
+    ORDER BY CASE WHEN status = 'paid' THEN 0 ELSE 1 END, created_at DESC LIMIT 1`).bind(user.organizationId, request.assetId, user.id, request.licenceType, request.territory, request.durationDays).first<{ id: string; price_cents: number; credit_cost: number; status: string; payment_provider: string | null }>();
+  // A subscription-funded licence is only usable while the matching platform
+  // membership is active. If membership has ended, let the buyer fall back to
+  // the seller-listed credit cost instead of reusing the old free entitlement.
+  if (existing?.payment_provider === "subscription" && access.accessMode !== "subscription") existing = null;
   const acceptedAt = new Date().toISOString();
   const buyerTermsHash = await sha256Hex(agreementText(buyerAgreement));
   const paymentTermsHash = await sha256Hex(agreementText(paymentDisclosure));
@@ -1857,7 +1976,11 @@ app.post("/api/checkout", async (c) => {
       c.env.DB.prepare("INSERT OR IGNORE INTO marketplace_agreement_acceptances (id, organization_id, user_id, agreement_type, agreement_version, terms_sha256, context_type, context_id, accepted_at) VALUES (?, ?, ?, 'buyer', ?, ?, 'checkout', ?, ?)").bind(crypto.randomUUID(), user.organizationId, user.id, buyerAgreement.version, buyerTermsHash, existing.id, acceptedAt),
       c.env.DB.prepare("INSERT OR IGNORE INTO marketplace_agreement_acceptances (id, organization_id, user_id, agreement_type, agreement_version, terms_sha256, context_type, context_id, accepted_at) VALUES (?, ?, ?, 'payment', ?, ?, 'checkout', ?, ?)").bind(crypto.randomUUID(), user.organizationId, user.id, paymentDisclosure.version, paymentTermsHash, existing.id, acceptedAt),
     ]);
-    return c.json({ blocked: false, licenceId: existing.id, licenceType: request.licenceType, licence: archiveDomain.licenceDescription(request.licenceType), priceCents: Number(existing.price_cents), currency: "ZAR", paymentRequired: true, purchaseStatus: "not_charged_until_verified_checkout", existing: true, agreementsPersisted: true, ...validation }, 200);
+    const existingPaid = existing.status === "paid";
+    return c.json({ blocked: false, licenceId: existing.id, licenceType: request.licenceType, licence: archiveDomain.licenceDescription(request.licenceType), creditCost: access.creditCost, creditsRequired: access.accessMode === "credits", creditBalance: access.creditBalance, accessMode: existing.payment_provider === "subscription" ? "subscription" : access.accessMode, subscriptionIncluded: access.subscriptionIncluded, subscriptionActive: access.subscriptionActive, ...(showCurrencyReference ? { referenceAmountCents: existing.price_cents > 0 ? Number(existing.price_cents) : referenceAmountCents } : {}), priceCents: existing.price_cents > 0 ? Number(existing.price_cents) : referenceAmountCents, currency: "CREDITS", showCurrencyReference, paymentRequired: !existingPaid, purchaseStatus: existingPaid ? "paid" : "not_charged_until_verified_checkout", paid: existingPaid, existing: true, agreementsPersisted: true, ...validation }, 200);
+  }
+  if (access.accessMode === "credits" && Number(access.creditBalance ?? 0) < access.creditCost) {
+    return c.json({ blocked: true, code: "insufficient_credits", error: `You need ${access.creditCost} credits to unlock this media. Buy credits and try again.`, creditCost: access.creditCost, creditBalance: access.creditBalance, creditsRequired: true, accessMode: "credits", subscriptionIncluded: access.subscriptionIncluded, subscriptionActive: access.subscriptionActive }, 402);
   }
   const preference = await c.env.DB.prepare(`SELECT id, enabled, terms_version, signed_at, signed_by
     FROM buyer_licence_approval_preferences WHERE organization_id = ? AND buyer_id = ?`)
@@ -1901,14 +2024,60 @@ app.post("/api/checkout", async (c) => {
       }
     }
   }
-  await c.env.DB.batch([c.env.DB.prepare(`INSERT INTO licences
-      (id, organization_id, asset_id, buyer_id, licence_type, territory, duration_days, price_cents, approval_status, approval_method, approved_at, approved_by, auto_approval_preference_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(licenceId, user.organizationId, request.assetId, user.id, request.licenceType, request.territory, request.durationDays, priceCents, approvalStatus, autoApproved ? "buyer_auto_approval" : null, autoApproved ? new Date().toISOString() : null, autoApproved ? user.id : null, autoApproved ? preference?.id ?? null : null),
+  const paymentProvider = access.accessMode === "subscription" ? "subscription" : "credits";
+  const paymentReference = access.accessMode === "subscription" && access.subscriptionId
+    ? `membership:${access.subscriptionId}:${licenceId}`
+    : `credit:${licenceId}`;
+  const creditSpendIdempotencyKey = `licence-credit:${licenceId}`;
+  const checkoutStatements = [
+    c.env.DB.prepare(`INSERT INTO licences
+        (id, organization_id, asset_id, buyer_id, licence_type, territory, duration_days, price_cents, credit_cost, status, payment_provider, payment_reference, paid_at, approval_status, approval_method, approved_at, approved_by, auto_approval_preference_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 'pending', NULL, NULL, NULL, ?, ?, ?, ?, ?)`)
+      .bind(licenceId, user.organizationId, request.assetId, user.id, request.licenceType, request.territory, request.durationDays, access.accessMode === "subscription" ? 0 : access.creditCost, approvalStatus, autoApproved ? "buyer_auto_approval" : null, autoApproved ? new Date().toISOString() : null, autoApproved ? user.id : null, autoApproved ? preference?.id ?? null : null),
     c.env.DB.prepare("INSERT INTO marketplace_agreement_acceptances (id, organization_id, user_id, agreement_type, agreement_version, terms_sha256, context_type, context_id, accepted_at) VALUES (?, ?, ?, 'buyer', ?, ?, 'checkout', ?, ?)").bind(crypto.randomUUID(), user.organizationId, user.id, buyerAgreement.version, buyerTermsHash, licenceId, acceptedAt),
     c.env.DB.prepare("INSERT INTO marketplace_agreement_acceptances (id, organization_id, user_id, agreement_type, agreement_version, terms_sha256, context_type, context_id, accepted_at) VALUES (?, ?, ?, 'payment', ?, ?, 'checkout', ?, ?)").bind(crypto.randomUUID(), user.organizationId, user.id, paymentDisclosure.version, paymentTermsHash, licenceId, acceptedAt),
-  ]);
-  return c.json({ blocked: false, licenceId, licenceType: request.licenceType, licence: archiveDomain.licenceDescription(request.licenceType), priceCents, currency: "ZAR", paymentRequired: true, purchaseStatus: "not_charged_until_verified_checkout", agreementsPersisted: true, approvalStatus, approvalAuditEventId, approvalAuditSource, ...validation }, 201);
+  ];
+  if (access.accessMode === "credits") {
+    checkoutStatements.push(
+      c.env.DB.prepare(`INSERT INTO buyer_credit_transactions
+        (id, organization_id, buyer_id, transaction_type, credits, amount_cents, reference_type, reference_id, idempotency_key)
+        SELECT ?, ?, ?, 'spend', ?, 0, 'licence', ?, ?
+        WHERE (SELECT COALESCE(SUM(credits), 0) FROM buyer_credit_transactions WHERE organization_id = ? AND buyer_id = ?) >= ?`)
+        .bind(crypto.randomUUID(), user.organizationId, user.id, -access.creditCost, licenceId, creditSpendIdempotencyKey, user.organizationId, user.id, access.creditCost),
+    );
+  }
+  if (creditSettlement) {
+    const settlementTransactionId = crypto.randomUUID();
+    const settlementIdempotencyKey = `credit-access:${licenceId}`;
+    checkoutStatements.push(
+      c.env.DB.prepare("INSERT INTO ledger_transactions (id, licence_id, transaction_type, idempotency_key, amount_cents, currency) VALUES (?, ?, 'sale', ?, ?, 'ZAR')")
+        .bind(settlementTransactionId, licenceId, settlementIdempotencyKey, creditSettlement.amountCents),
+      c.env.DB.prepare("INSERT INTO ledger_postings (id, transaction_id, account_code, debit_cents, credit_cents, metadata_json) VALUES (?, ?, 'credit_liability', ?, 0, ?)")
+        .bind(crypto.randomUUID(), settlementTransactionId, creditSettlement.amountCents, JSON.stringify({ source: "credit_redemption", credits: access.creditCost, referenceUnitCents: CREDIT_REFERENCE_UNIT_CENTS })),
+      c.env.DB.prepare("INSERT INTO ledger_postings (id, transaction_id, account_code, contributor_id, debit_cents, credit_cents, metadata_json) VALUES (?, ?, 'contributor_payable', ?, 0, ?, ?)")
+        .bind(crypto.randomUUID(), settlementTransactionId, creditSettlement.ownerId, creditSettlement.royaltyCents, JSON.stringify({ source: "credit_redemption", licenceId, credits: access.creditCost, artistSharePercentage: creditSettlement.artistSharePercentage })),
+      c.env.DB.prepare("INSERT INTO ledger_postings (id, transaction_id, account_code, debit_cents, credit_cents, metadata_json) VALUES (?, ?, 'platform_revenue', 0, ?, ?)")
+        .bind(crypto.randomUUID(), settlementTransactionId, creditSettlement.platformFeeCents, JSON.stringify({ source: "credit_redemption", licenceId, credits: access.creditCost })),
+      c.env.DB.prepare("INSERT INTO ledger_entries (id, licence_id, contributor_id, entry_type, amount_cents, currency) VALUES (?, ?, ?, 'sale', ?, 'ZAR'), (?, ?, ?, 'platform_fee', ?, 'ZAR')")
+        .bind(crypto.randomUUID(), licenceId, creditSettlement.ownerId, creditSettlement.royaltyCents, crypto.randomUUID(), licenceId, creditSettlement.ownerId, -creditSettlement.platformFeeCents),
+    );
+  }
+  checkoutStatements.push(
+    c.env.DB.prepare(`UPDATE licences SET status = 'paid', payment_provider = ?, payment_reference = ?, paid_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND organization_id = ? AND buyer_id = ?${access.accessMode === "credits" ? " AND EXISTS (SELECT 1 FROM buyer_credit_transactions WHERE idempotency_key = ? AND transaction_type = 'spend')" : ""}`)
+      .bind(...(access.accessMode === "credits"
+        ? [paymentProvider, paymentReference, licenceId, user.organizationId, user.id, creditSpendIdempotencyKey]
+        : [paymentProvider, paymentReference, licenceId, user.organizationId, user.id])),
+  );
+  const checkoutResult = await c.env.DB.batch(checkoutStatements);
+  const finalized = Number(checkoutResult[checkoutResult.length - 1]?.meta?.changes ?? 0) === 1;
+  if (!finalized) {
+    await c.env.DB.prepare("UPDATE licences SET status = 'cancelled', payment_reference = ? WHERE id = ? AND status = 'pending'").bind("insufficient-credits", licenceId).run();
+    const balance = await c.env.DB.prepare("SELECT COALESCE(SUM(credits), 0) AS balance FROM buyer_credit_transactions WHERE organization_id = ? AND buyer_id = ?").bind(user.organizationId, user.id).first<{ balance: number }>();
+    return c.json({ blocked: true, code: "insufficient_credits", error: `You need ${access.creditCost} credits to unlock this media. Buy credits and try again.`, creditCost: access.creditCost, creditBalance: Number(balance?.balance ?? 0), creditsRequired: true, accessMode: "credits", subscriptionIncluded: access.subscriptionIncluded, subscriptionActive: access.subscriptionActive }, 402);
+  }
+  const creditsRemaining = access.accessMode === "credits" ? Number(access.creditBalance ?? 0) - access.creditCost : access.creditBalance;
+  return c.json({ blocked: false, licenceId, licenceType: request.licenceType, licence: archiveDomain.licenceDescription(request.licenceType), creditCost, creditsRequired: access.accessMode === "credits", creditsSpent: access.accessMode === "credits" ? creditCost : 0, creditBalance: creditsRemaining, accessMode: access.accessMode, subscriptionIncluded: access.subscriptionIncluded, subscriptionActive: access.subscriptionActive, ...(showCurrencyReference ? { referenceAmountCents } : {}), priceCents: 0, currency: "CREDITS", showCurrencyReference, paymentRequired: false, purchaseStatus: access.accessMode === "subscription" ? "included_with_active_membership" : "paid_with_credits", paid: true, agreementsPersisted: true, approvalStatus, approvalAuditEventId, approvalAuditSource, ...validation }, 201);
 });
 
 const paymentSessionSchema = z.object({
@@ -1922,7 +2091,7 @@ app.post("/api/payments/:licenceId/session", async (c) => {
   if (!licencePaymentProviderConfigured(c.env)) return c.json({ error: "Payment provider is not configured" }, 503);
   const payload = paymentSessionSchema.parse(await c.req.json());
   const licence = await c.env.DB.prepare(`
-    SELECT l.id, l.price_cents, l.status, l.payment_reference, u.email, a.owner_id,
+    SELECT l.id, l.price_cents, l.credit_cost, l.status, l.payment_reference, u.email, a.owner_id,
       w.provider AS wallet_provider, w.provider_account_id, w.artist_share_percentage, w.status AS wallet_status,
       (SELECT COUNT(*) FROM marketplace_agreement_acceptances maa
        WHERE maa.user_id = l.buyer_id AND maa.context_type = 'checkout' AND maa.context_id = l.id
@@ -1930,7 +2099,7 @@ app.post("/api/payments/:licenceId/session", async (c) => {
     FROM licences l JOIN users u ON u.id = l.buyer_id JOIN assets a ON a.id = l.asset_id
     LEFT JOIN payout_wallets w ON w.contributor_id = a.owner_id AND w.provider = 'paystack' AND w.status = 'verified'
     WHERE l.id = ? AND l.organization_id = ? AND l.buyer_id = ?
-  `).bind(buyerAgreement.version, paymentDisclosure.version, c.req.param("licenceId"), user.organizationId, user.id).first<{ id: string; price_cents: number; status: string; payment_reference: string | null; email: string; owner_id: string; wallet_provider: string | null; provider_account_id: string | null; artist_share_percentage: number | null; wallet_status: string | null; agreement_count: number }>();
+  `).bind(buyerAgreement.version, paymentDisclosure.version, c.req.param("licenceId"), user.organizationId, user.id).first<{ id: string; price_cents: number; credit_cost: number; status: string; payment_reference: string | null; email: string; owner_id: string; wallet_provider: string | null; provider_account_id: string | null; artist_share_percentage: number | null; wallet_status: string | null; agreement_count: number }>();
   if (!licence) return c.json({ error: "Licence not found" }, 404);
   if (licence.status !== "pending") return c.json({ error: `Licence cannot be paid from status ${licence.status}` }, 409);
   if (Number(licence.agreement_count) !== 2) return c.json({ error: "Current buyer and payment terms must be accepted before payment" }, 409);
@@ -1950,7 +2119,7 @@ app.post("/api/payments/:licenceId/session", async (c) => {
       buyer: { id: user.id, email: licence.email },
       successUrl: payload.successUrl,
       cancelUrl: payload.cancelUrl,
-      metadata: { organizationId: user.organizationId, userId: user.id, productType: "licence", licenceId: licence.id },
+      metadata: { organizationId: user.organizationId, userId: user.id, productType: "licence", licenceId: licence.id, creditCost: String(licence.credit_cost || MEDIA_MEMBERSHIP_CREDITS) },
       ...(allocation && licence.provider_account_id ? { split: { type: "percentage" as const, bearerType: String(c.env.PAYSTACK_SPLIT_FEE_BEARER) === "subaccount" ? "subaccount" as const : "account" as const, subaccounts: [{ subaccount: licence.provider_account_id, share: allocation.artistSharePercentage }] } } : {}),
     });
     const providerReference = session.providerReference ?? session.id;
@@ -1962,7 +2131,7 @@ app.post("/api/payments/:licenceId/session", async (c) => {
         ON CONFLICT(licence_id) DO UPDATE SET provider_reference = excluded.provider_reference, contributor_id = excluded.contributor_id, provider_account_id = excluded.provider_account_id, artist_share_percentage = excluded.artist_share_percentage, artist_amount_cents = excluded.artist_amount_cents, platform_amount_cents = excluded.platform_amount_cents, status = 'configured', updated_at = CURRENT_TIMESTAMP`)
         .bind(crypto.randomUUID(), licence.id, providerReference, licence.owner_id, licence.provider_account_id, allocation.artistSharePercentage, allocation.artistAmountCents, allocation.platformAmountCents)] : []),
     ]);
-    return c.json({ licenceId: licence.id, provider: session.provider, checkoutUrl: session.checkoutUrl, status: session.status, split: allocation }, 201, { Location: `/api/payments/${licence.id}/session` });
+    return c.json({ licenceId: licence.id, provider: session.provider, checkoutUrl: session.checkoutUrl, status: session.status, creditCost: Number(licence.credit_cost || MEDIA_MEMBERSHIP_CREDITS), split: allocation }, 201, { Location: `/api/payments/${licence.id}/session` });
   } catch (error) {
     logEvent("error", "payment.checkout_session_failed", c.get("trace"), { licenceId: licence.id, provider: c.env.PAYMENT_PROVIDER, error: error instanceof Error ? error.message : "unknown" });
     return c.json({ error: "Payment provider could not create a checkout session" }, 503);
@@ -2017,7 +2186,7 @@ async function postSaleSettlement(env: Bindings, licenceId: string, payload: z.i
 app.get("/api/demo/payments/:licenceId/complete", async (c) => {
   if (!demoPaymentEnabled(c.env)) return c.json({ error: "Demo checkout is disabled" }, 404);
   const user = await requestUser(c);
-  if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, user ? 403 : 401);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, user ? 403 : 401);
   const licenceId = c.req.param("licenceId");
   const licence = await c.env.DB.prepare(`
     SELECT l.id, l.organization_id, l.buyer_id, l.price_cents, l.status, l.payment_provider, l.payment_reference,
@@ -2025,6 +2194,39 @@ app.get("/api/demo/payments/:licenceId/complete", async (c) => {
     FROM licences l JOIN assets a ON a.id = l.asset_id
     WHERE l.id = ? AND l.organization_id = ? AND l.buyer_id = ?
   `).bind(licenceId, user.organizationId, user.id).first<{ id: string; organization_id: string; buyer_id: string; price_cents: number; status: string; payment_provider: string | null; payment_reference: string | null; asset_title: string }>();
+  const creditPurchase = await c.env.DB.prepare(`
+    SELECT id, organization_id, buyer_id, credits, amount_cents, status, payment_provider, payment_reference
+    FROM buyer_credit_purchases
+    WHERE id = ? AND organization_id = ? AND buyer_id = ?
+  `).bind(licenceId, user.organizationId, user.id).first<{ id: string; organization_id: string; buyer_id: string; credits: number; amount_cents: number; status: string; payment_provider: string | null; payment_reference: string | null }>();
+  if (!licence && creditPurchase) {
+    if (creditPurchase.status !== "paid" && (creditPurchase.payment_provider !== "demo" || creditPurchase.payment_reference !== `demo:${creditPurchase.id}`)) {
+      return c.json({ error: "Start the demo checkout before completing this credit purchase" }, 409);
+    }
+    if (creditPurchase.status === "pending") {
+      const eventId = `demo:credit:${creditPurchase.id}`;
+      try {
+        await c.env.DB.batch([
+          c.env.DB.prepare("UPDATE buyer_credit_purchases SET status = 'paid', payment_provider = 'demo', payment_reference = ?, paid_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ? AND buyer_id = ? AND status = 'pending'").bind(eventId, creditPurchase.id, user.organizationId, user.id),
+          c.env.DB.prepare("INSERT OR IGNORE INTO buyer_credit_transactions (id, organization_id, buyer_id, transaction_type, credits, amount_cents, reference_type, reference_id, idempotency_key) VALUES (?, ?, ?, 'purchase', ?, ?, 'credit_purchase', ?, ?)").bind(crypto.randomUUID(), user.organizationId, user.id, creditPurchase.credits, creditPurchase.amount_cents, creditPurchase.id, eventId),
+          c.env.DB.prepare(`INSERT OR IGNORE INTO payment_webhook_events
+            (id, provider, provider_event_id, event_type, credit_purchase_id, product_type, amount_cents, currency, payload_json, status, processed_at)
+            VALUES (?, 'demo', ?, 'payment_succeeded', ?, 'credit_purchase', ?, 'ZAR', ?, 'processed', CURRENT_TIMESTAMP)`)
+            .bind(eventId, eventId, creditPurchase.id, creditPurchase.amount_cents, JSON.stringify({ provider: "demo", eventId, type: "payment_succeeded", productType: "credit_purchase", creditPurchaseId: creditPurchase.id, amountCents: creditPurchase.amount_cents, currency: "ZAR" })),
+        ]);
+        recordMetric(c.env, "payment_purchase", c.get("trace"), 1, [user.organizationId, "credit_purchase"]);
+        c.executionCtx.waitUntil(dispatchWebhookEvent(c.env, user.organizationId, "buyer.credits.purchased", { creditPurchaseId: creditPurchase.id, credits: creditPurchase.credits, amountCents: creditPurchase.amount_cents, currency: "ZAR", demo: true }));
+      } catch (error) {
+        logEvent("error", "demo.credit_completion_failed", c.get("trace"), { creditPurchaseId: creditPurchase.id, error: error instanceof Error ? error.message : "unknown" });
+        return c.json({ error: "Demo credit purchase could not be completed" }, 422);
+      }
+    }
+    const destination = new URL("/account", c.req.url);
+    destination.searchParams.set("credits", "complete");
+    destination.searchParams.set("purchase", creditPurchase.id);
+    destination.searchParams.set("demo", "1");
+    return c.redirect(destination.toString(), 303);
+  }
   if (!licence) return c.json({ error: "Licence not found" }, 404);
   if (licence.status !== "paid" && (licence.payment_provider !== "demo" || licence.payment_reference !== `demo:${licence.id}`)) {
     return c.json({ error: "Start the demo checkout before completing this licence" }, 409);
@@ -2077,17 +2279,21 @@ app.post("/api/payments/:licenceId/settled", async (c) => {
 app.get("/api/my/licences", async (c) => {
   const user = await requestUser(c);
   if (!user) return c.json({ error: "Authentication required" }, 401);
-  const rows = await c.env.DB.prepare(`SELECT l.id, l.licence_type, l.territory, l.duration_days, l.price_cents, l.status, l.approval_status, l.approval_method, l.approved_at, l.created_at,
-      a.id AS asset_id, a.title AS asset_title, a.preview_key
+  const rows = await c.env.DB.prepare(`SELECT l.id, l.licence_type, l.territory, l.duration_days, l.price_cents, l.credit_cost, l.payment_provider, l.status, l.approval_status, l.approval_method, l.approved_at, l.created_at,
+      a.id AS asset_id, a.title AS asset_title, a.preview_key, a.subscription_included
     FROM licences l JOIN assets a ON a.id = l.asset_id
     WHERE l.organization_id = ? AND l.buyer_id = ? ORDER BY l.created_at DESC`).bind(user.organizationId, user.id).all<Record<string, unknown>>();
-  return c.json({ results: rows.results.map((row) => ({
+  return c.json({ results: rows.results.map((row) => {
+    const includedWithMembership = row.payment_provider === "subscription";
+    const creditCost = includedWithMembership ? 0 : Number(row.credit_cost ?? 0) || archiveDomain.mediaLicenceCreditCost(Number(row.duration_days));
+    return {
     id: String(row.id), assetId: String(row.asset_id), assetTitle: String(row.asset_title),
     licenceType: row.licence_type, licence: archiveDomain.licenceDescription(String(row.licence_type) as LicenceRequest["licenceType"]), territory: String(row.territory), durationDays: Number(row.duration_days),
-    priceCents: Number(row.price_cents), status: row.status, approvalStatus: row.approval_status ?? "pending", approvalMethod: row.approval_method ?? null, approvedAt: row.approved_at ?? null, createdAt: String(row.created_at),
+    priceCents: Number(row.price_cents), creditCost, accessMode: includedWithMembership ? "subscription" : "credits", subscriptionIncluded: Number(row.subscription_included ?? 0) === 1, status: row.status, approvalStatus: row.approval_status ?? "pending", approvalMethod: row.approval_method ?? null, approvedAt: row.approved_at ?? null, createdAt: String(row.created_at),
     previewUrl: row.preview_key ? `/api/assets/${encodeURIComponent(String(row.asset_id))}/preview` : null,
     originalUrl: row.status === "paid" ? `/api/assets/${encodeURIComponent(String(row.asset_id))}/original` : null,
-  })) });
+    };
+  }) });
 });
 
 const photographerSubscriptionSchema = z.object({
@@ -2344,7 +2550,7 @@ app.post("/api/account/deletion", async (c) => {
 
 app.get("/api/subscription", async (c) => {
   const user = await buyerAccount(c);
-  if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, 403);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Buyer access required" }, 403);
   const configuration = buyerSubscriptionConfiguration(c.env);
   const subscription = await c.env.DB.prepare("SELECT * FROM buyer_subscriptions WHERE organization_id = ? AND buyer_id = ? ORDER BY created_at DESC LIMIT 1").bind(user.organizationId, user.id).first<Record<string, unknown>>();
   const payments = subscription ? await c.env.DB.prepare("SELECT provider_event_id, provider_reference, invoice_code, event_type, amount_cents, currency, status, period_start, period_end, paid_at, created_at FROM buyer_subscription_payments WHERE subscription_id = ? ORDER BY created_at DESC LIMIT 100").bind(subscription.id).all<Record<string, unknown>>() : { results: [] };
@@ -2353,7 +2559,7 @@ app.get("/api/subscription", async (c) => {
 
 app.post("/api/subscription/session", async (c) => {
   const user = await buyerAccount(c);
-  if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, 403);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Buyer access required" }, 403);
   const configuration = buyerSubscriptionConfiguration(c.env);
   if (!configuration.configured) return c.json({ error: "The Paystack subscription plan is not fully configured" }, 503);
   const payload = buyerSubscriptionSessionSchema.parse(await c.req.json());
@@ -2386,7 +2592,7 @@ app.post("/api/subscription/session", async (c) => {
 
 app.post("/api/subscription/manage-link", async (c) => {
   const user = await buyerAccount(c);
-  if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, 403);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Buyer access required" }, 403);
   const subscription = await c.env.DB.prepare("SELECT provider_subscription_code FROM buyer_subscriptions WHERE organization_id = ? AND buyer_id = ? AND status IN ('active', 'non-renewing', 'attention') ORDER BY created_at DESC LIMIT 1").bind(user.organizationId, user.id).first<{ provider_subscription_code: string | null }>();
   if (!subscription?.provider_subscription_code) return c.json({ error: "No manageable Paystack subscription was found" }, 404);
   try {
@@ -2418,39 +2624,39 @@ function paymentProviderConfigured(env: Pick<Bindings, "PAYMENT_PROVIDER" | "PAY
 
 app.post("/api/buyer/platform-subscription/checkout", async (c) => {
   const user = await buyerAccount(c);
-  if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, 403);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Buyer access required" }, 403);
   return c.json({ error: "This legacy subscription route is retired", replacement: "/api/subscription/session" }, 410);
 });
 
 app.get("/api/my/platform-subscription", async (c) => {
   const user = await buyerAccount(c);
-  if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, 403);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Buyer access required" }, 403);
   return c.redirect(new URL("/api/subscription", c.req.url).toString(), 308);
 });
 
 app.post("/api/my/platform-subscription/cancel", async (c) => {
   const user = await buyerAccount(c);
-  if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, 403);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Buyer access required" }, 403);
   return c.json({ error: "Recurring billing is managed by Paystack", replacement: "/api/subscription/manage-link" }, 410);
 });
 
 const creditPurchaseRequestSchema = z.object({
-  credits: z.number().int().min(1).max(1000),
+  credits: z.number().int().min(1).max(100000),
   successUrl: z.string().url().max(2048),
   cancelUrl: z.string().url().max(2048),
 });
 
 app.post("/api/buyer/credits/checkout", async (c) => {
   const user = await buyerAccount(c);
-  if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, 403);
-  if (!paymentProviderConfigured(c.env)) return c.json({ error: "Payment provider is not configured for credit purchases" }, 503);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, 403);
+  if (!licencePaymentProviderConfigured(c.env)) return c.json({ error: "Payment provider is not configured for credit purchases" }, 503);
   const payload = creditPurchaseRequestSchema.parse(await c.req.json());
   const amountCents = creditPurchaseAmountCents(payload.credits);
   const purchaseId = crypto.randomUUID();
   await c.env.DB.prepare("INSERT INTO buyer_credit_purchases (id, organization_id, buyer_id, credits, amount_cents, currency) VALUES (?, ?, ?, ?, ?, 'ZAR')")
     .bind(purchaseId, user.organizationId, user.id, payload.credits, amountCents).run();
   try {
-    const session = await new IntegrationContainer(c.env).payments.get(c.env.PAYMENT_PROVIDER!).createCheckoutSession({
+    const session = await new IntegrationContainer(c.env).payments.get(c.env.PAYMENT_PROVIDER ?? "demo").createCheckoutSession({
       idempotencyKey: `credit-purchase:${purchaseId}`,
       referenceId: purchaseId,
       productType: "credit_purchase",
@@ -2459,45 +2665,62 @@ app.post("/api/buyer/credits/checkout", async (c) => {
       buyer: { id: user.id, email: user.email },
       successUrl: payload.successUrl,
       cancelUrl: payload.cancelUrl,
-      metadata: { organizationId: user.organizationId, userId: user.id, productType: "credit_purchase", credits: String(payload.credits), creditUnitCents: String(CREDIT_UNIT_CENTS) },
+      metadata: { organizationId: user.organizationId, userId: user.id, productType: "credit_purchase", credits: String(payload.credits), creditUnitCents: String(CREDIT_REFERENCE_UNIT_CENTS) },
     });
     await c.env.DB.prepare("UPDATE buyer_credit_purchases SET payment_provider = ?, payment_reference = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?")
       .bind(c.env.PAYMENT_PROVIDER, session.providerReference ?? session.id, purchaseId, user.organizationId).run();
-    return c.json({ purchaseId, provider: session.provider, checkoutUrl: session.checkoutUrl, status: session.status, credits: payload.credits, amountCents, currency: "ZAR" }, 201, { Location: `/api/my/credits` });
+    return c.json({ purchaseId, provider: session.provider, checkoutUrl: session.checkoutUrl, status: session.status, credits: payload.credits, amountCents, currency: "CREDITS", showCurrencyReference: currencyReferenceEnabled(c.env), ...(currencyReferenceEnabled(c.env) ? { referenceAmountCents: amountCents } : {}) }, 201, { Location: `/api/my/credits` });
   } catch (error) {
     await c.env.DB.prepare("UPDATE buyer_credit_purchases SET status = 'failed', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ? AND status = 'pending'").bind(purchaseId, user.organizationId).run();
     logEvent("error", "payment.credit_checkout_failed", c.get("trace"), { purchaseId, provider: c.env.PAYMENT_PROVIDER, error: error instanceof Error ? error.message : "unknown" });
+    if (error instanceof IntegrationError && error.status === 504) {
+      return c.json({ error: "Checkout is taking too long to respond. No payment was completed; please try again." }, 504);
+    }
     return c.json({ error: "Payment provider could not create a credit checkout session" }, 503);
   }
 });
 
 app.get("/api/my/credits", async (c) => {
   const user = await buyerAccount(c);
-  if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, 403);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, 403);
   const [balance, transactions, pending] = await c.env.DB.batch([
     c.env.DB.prepare("SELECT COALESCE(SUM(credits), 0) AS balance FROM buyer_credit_transactions WHERE organization_id = ? AND buyer_id = ?").bind(user.organizationId, user.id),
     c.env.DB.prepare("SELECT id, transaction_type, credits, amount_cents, reference_type, reference_id, created_at FROM buyer_credit_transactions WHERE organization_id = ? AND buyer_id = ? ORDER BY created_at DESC LIMIT 100").bind(user.organizationId, user.id),
     c.env.DB.prepare("SELECT id, credits, amount_cents, currency, status, created_at FROM buyer_credit_purchases WHERE organization_id = ? AND buyer_id = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 20").bind(user.organizationId, user.id),
   ]);
-  return c.json({ oneCreditCents: CREDIT_UNIT_CENTS, balanceCredits: Number((balance.results[0] as Record<string, unknown> | undefined)?.balance ?? 0), transactions: transactions.results, pendingPurchases: pending.results });
+  const showCurrency = currencyReferenceEnabled(c.env);
+  return c.json({
+    creditPackCredits: MEDIA_MEMBERSHIP_CREDITS,
+    creditPackDurationDays: MEDIA_MEMBERSHIP_DURATION_DAYS,
+    balanceCredits: Number((balance.results[0] as Record<string, unknown> | undefined)?.balance ?? 0),
+    transactions: transactions.results,
+    pendingPurchases: pending.results,
+    currency: "CREDITS",
+    showCurrencyReference: showCurrency,
+    ...(showCurrency ? { referenceAmountCents: creditPurchaseAmountCents(MEDIA_MEMBERSHIP_CREDITS) } : {}),
+  });
 });
 
 app.get("/api/my/purchases", async (c) => {
   const user = await buyerAccount(c);
-  if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, user ? 403 : 401);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, user ? 403 : 401);
   const [licences, photographerSubscriptions, platformSubscriptions, platformPayments, creditPurchases] = await c.env.DB.batch([
-    c.env.DB.prepare(`SELECT l.id, l.asset_id, a.title AS asset_title, l.licence_type, l.territory, l.duration_days, l.price_cents, l.status, l.created_at, l.paid_at FROM licences l JOIN assets a ON a.id = l.asset_id WHERE l.organization_id = ? AND l.buyer_id = ?`).bind(user.organizationId, user.id),
+    c.env.DB.prepare(`SELECT l.id, l.asset_id, a.title AS asset_title, a.subscription_included, l.licence_type, l.territory, l.duration_days, l.price_cents, l.credit_cost, l.payment_provider, l.status, l.created_at, l.paid_at FROM licences l JOIN assets a ON a.id = l.asset_id WHERE l.organization_id = ? AND l.buyer_id = ?`).bind(user.organizationId, user.id),
     c.env.DB.prepare("SELECT s.id, u.display_name AS photographer_name, s.price_cents, s.currency, s.status, s.duration_days, s.created_at, s.paid_at FROM photographer_subscriptions s JOIN users u ON u.id = s.photographer_id WHERE s.organization_id = ? AND s.subscriber_id = ?").bind(user.organizationId, user.id),
     c.env.DB.prepare("SELECT id, amount_cents AS price_cents, currency, status, interval, created_at FROM buyer_subscriptions WHERE organization_id = ? AND buyer_id = ?").bind(user.organizationId, user.id),
     c.env.DB.prepare(`SELECT p.provider_event_id AS event_id, p.subscription_id, p.event_type, p.amount_cents, p.currency, p.created_at AS received_at, p.status FROM buyer_subscription_payments p JOIN buyer_subscriptions s ON s.id = p.subscription_id WHERE s.organization_id = ? AND s.buyer_id = ? ORDER BY p.created_at DESC`).bind(user.organizationId, user.id),
     c.env.DB.prepare("SELECT id, credits, amount_cents, currency, status, created_at, paid_at FROM buyer_credit_purchases WHERE organization_id = ? AND buyer_id = ?").bind(user.organizationId, user.id),
   ]);
   const results = [
-    ...(licences.results as Record<string, unknown>[]).map((row) => ({ id: String(row.id), kind: "licence", title: String(row.asset_title), status: String(row.status), amountCents: Number(row.price_cents), currency: "ZAR", createdAt: String(row.created_at), details: `${row.licence_type} - ${row.territory} - ${row.duration_days} days`, referenceId: String(row.id), assetId: String(row.asset_id) })),
+    ...(licences.results as Record<string, unknown>[]).map((row) => {
+      const includedWithMembership = row.payment_provider === "subscription";
+      const creditCost = includedWithMembership ? 0 : Number(row.credit_cost ?? 0) || archiveDomain.mediaLicenceCreditCost(Number(row.duration_days));
+      return { id: String(row.id), kind: "licence", title: String(row.asset_title), status: String(row.status), amountCents: Number(row.price_cents), creditCost, accessMode: includedWithMembership ? "subscription" : "credits", subscriptionIncluded: Number(row.subscription_included ?? 0) === 1, currency: "CREDITS", createdAt: String(row.created_at), details: includedWithMembership ? `${row.licence_type} - ${row.territory} - ${row.duration_days} days - Included with Stockvel membership` : `${row.licence_type} - ${row.territory} - ${row.duration_days} days`, referenceId: String(row.id), assetId: String(row.asset_id) };
+    }),
     ...(photographerSubscriptions.results as Record<string, unknown>[]).map((row) => ({ id: String(row.id), kind: "photographer_subscription", title: `Subscription to ${String(row.photographer_name)}`, status: String(row.status), amountCents: Number(row.price_cents), currency: String(row.currency), createdAt: String(row.created_at), details: `${row.duration_days} days`, referenceId: String(row.id) })),
-    ...(platformSubscriptions.results as Record<string, unknown>[]).map((row) => ({ id: String(row.id), kind: "platform_subscription", title: "Veld Archive membership", status: String(row.status), amountCents: Number(row.price_cents), currency: String(row.currency), createdAt: String(row.created_at), details: `${String(row.interval)} Paystack plan`, referenceId: String(row.id) })),
-    ...(platformPayments.results as Record<string, unknown>[]).map((row) => ({ id: String(row.event_id), kind: "platform_subscription_payment", title: "Veld Archive membership payment", status: String(row.status), amountCents: Number(row.amount_cents ?? 0), currency: String(row.currency ?? "ZAR"), createdAt: String(row.received_at), details: String(row.event_type), referenceId: String(row.subscription_id) })),
-    ...(creditPurchases.results as Record<string, unknown>[]).map((row) => ({ id: String(row.id), kind: "credit_purchase", title: `${Number(row.credits)} archive credit${Number(row.credits) === 1 ? "" : "s"}`, status: String(row.status), amountCents: Number(row.amount_cents), currency: String(row.currency), createdAt: String(row.created_at), details: "1 credit = R100", referenceId: String(row.id) })),
+    ...(platformSubscriptions.results as Record<string, unknown>[]).map((row) => ({ id: String(row.id), kind: "platform_subscription", title: "Stockvel membership", status: String(row.status), amountCents: Number(row.price_cents), currency: String(row.currency), createdAt: String(row.created_at), details: `${String(row.interval)} Paystack plan`, referenceId: String(row.id) })),
+    ...(platformPayments.results as Record<string, unknown>[]).map((row) => ({ id: String(row.event_id), kind: "platform_subscription_payment", title: "Stockvel membership payment", status: String(row.status), amountCents: Number(row.amount_cents ?? 0), currency: String(row.currency ?? "ZAR"), createdAt: String(row.received_at), details: String(row.event_type), referenceId: String(row.subscription_id) })),
+    ...(creditPurchases.results as Record<string, unknown>[]).map((row) => ({ id: String(row.id), kind: "credit_purchase", title: `${Number(row.credits)} media credit${Number(row.credits) === 1 ? "" : "s"}`, status: String(row.status), amountCents: Number(row.amount_cents), credits: Number(row.credits), currency: "CREDITS", createdAt: String(row.created_at), details: `${Number(row.credits)} credits · valid for media access`, referenceId: String(row.id) })),
   ].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   return c.json({ results, summary: { total: results.length, paid: results.filter((item) => item.status === "paid" || item.status === "payment_succeeded").length, totalPaidCents: results.filter((item) => item.status === "paid" || item.status === "payment_succeeded").reduce((sum, item) => sum + item.amountCents, 0) } });
 });
@@ -2643,8 +2866,12 @@ app.post("/api/webhooks/payments", async (c) => {
         await c.env.DB.prepare("UPDATE buyer_credit_purchases SET status = 'failed', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'").bind(purchase.id).run();
       } else if (payload.type === "refund" || payload.type === "chargeback") {
         if (purchase.status !== "paid") throw new Error("Credit purchase is not paid");
-        if (payload.amountCents % CREDIT_UNIT_CENTS !== 0 || payload.amountCents > Number(purchase.amount_cents)) throw new Error("Credit refund must be a whole number of purchased credits");
-        const credits = payload.amountCents / CREDIT_UNIT_CENTS;
+        const credits = payload.amountCents === Number(purchase.amount_cents)
+          ? Number(purchase.credits)
+          : payload.amountCents % CREDIT_REFERENCE_UNIT_CENTS === 0 && payload.amountCents <= Number(purchase.amount_cents)
+            ? payload.amountCents / CREDIT_REFERENCE_UNIT_CENTS
+            : 0;
+        if (!Number.isInteger(credits) || credits < 1 || credits > Number(purchase.credits)) throw new Error("Credit refund must be a whole number of purchased credits");
         await c.env.DB.batch([
           c.env.DB.prepare("UPDATE buyer_credit_purchases SET status = 'refunded', updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(purchase.id),
           c.env.DB.prepare("INSERT OR IGNORE INTO buyer_credit_transactions (id, organization_id, buyer_id, transaction_type, credits, amount_cents, reference_type, reference_id, idempotency_key) VALUES (?, ?, ?, 'refund', ?, ?, 'credit_purchase', ?, ?)").bind(crypto.randomUUID(), purchase.organization_id, purchase.buyer_id, -credits, -payload.amountCents, purchase.id, `${payload.provider}:${payload.eventId}`),
@@ -2724,13 +2951,14 @@ app.get("/api/ops/reconciliation/payments", async (c) => {
   const user = await requestUser(c);
   if (!user || user.role !== "admin") return c.json({ error: "Organization administrator required" }, 403);
   const rows = await c.env.DB.prepare(`
-    SELECT l.id AS licence_id, l.status AS licence_status, l.price_cents,
+    SELECT l.id AS licence_id, l.status AS licence_status, l.price_cents, l.credit_cost,
+      COALESCE(NULLIF(l.price_cents, 0), COALESCE(l.credit_cost, 0) * ?) AS expected_settlement_cents,
       COALESCE(SUM(CASE WHEN t.transaction_type = 'sale' THEN t.amount_cents ELSE 0 END), 0) AS sale_ledger_cents,
       COALESCE(SUM(CASE WHEN t.transaction_type = 'refund' THEN t.amount_cents ELSE 0 END), 0) AS refund_ledger_cents
     FROM licences l LEFT JOIN ledger_transactions t ON t.licence_id = l.id
     WHERE l.organization_id = ? GROUP BY l.id ORDER BY l.created_at DESC LIMIT 500
-  `).bind(user.organizationId).all<Record<string, unknown>>();
-  const report = (rows.results as Record<string, unknown>[]).map((row) => ({ ...row, discrepancy: row.licence_status !== "pending" && (Number(row.price_cents ?? 0) !== Number(row.sale_ledger_cents ?? 0) || Number(row.refund_ledger_cents ?? 0) > Number(row.sale_ledger_cents ?? 0)) }));
+  `).bind(CREDIT_REFERENCE_UNIT_CENTS, user.organizationId).all<Record<string, unknown>>();
+  const report = (rows.results as Record<string, unknown>[]).map((row) => ({ ...row, discrepancy: row.licence_status !== "pending" && (Number(row.expected_settlement_cents ?? 0) !== Number(row.sale_ledger_cents ?? 0) || Number(row.refund_ledger_cents ?? 0) > Number(row.sale_ledger_cents ?? 0)) }));
   return c.json({ checkedAt: new Date().toISOString(), results: report, discrepancyCount: report.filter((row) => row.discrepancy).length });
 });
 
@@ -2754,7 +2982,7 @@ async function processPayoutBatch(env: Bindings, batchId: string): Promise<void>
         reference,
         recipient: { id: String(item.contributor_id), name: String(item.account_holder_name), email: String(item.email), country: "ZA", providerAccountId: (item.provider_account_id as string | null) ?? undefined, stripeAccountId: String(item.provider) === "stripe_connect" ? String(item.provider_account_id) : undefined },
         money: { amountMinor: Number(item.amount_cents), currency: String(item.currency) },
-        description: `Veld Archive royalty payout ${String(batch.period_start)} to ${String(batch.period_end)}`,
+        description: `Stockvel royalty payout ${String(batch.period_start)} to ${String(batch.period_end)}`,
         metadata: { batchId, contractId: String(item.contract_id) },
       });
       const transactionId = crypto.randomUUID();
@@ -2882,7 +3110,7 @@ function logChaos(c: { env: Bindings }, trace: TraceContext, scenario: string, p
 
 app.get("/api/health", (c) => c.json(validateContractResponse("GET /api/health 200", healthResponseSchema, {
   ok: true,
-  service: "veld-archive-api",
+  service: "stockvel-api",
   environment: c.env.APP_ENV ?? "unknown",
 })));
 
@@ -3669,10 +3897,11 @@ app.get("/api/assets/:id/preview-access", async (c) => {
   const freeLimit = Math.max(0, Math.min(5, Number(c.env.INTRODUCTORY_FREE_DOWNLOAD_LIMIT ?? 3)));
   const row = await c.env.DB.prepare(`
     SELECT a.organization_id, a.owner_id, a.kind, a.rights_status, a.free_download_enabled,
+      a.subscription_included,
       EXISTS(
         SELECT 1 FROM licences l
         WHERE l.asset_id = a.id AND l.organization_id = a.organization_id
-          AND l.buyer_id = ? AND l.status = 'paid'
+          AND l.buyer_id = ? AND l.status = 'paid' AND COALESCE(l.payment_provider, '') <> 'subscription'
       ) AS paid_entitlement,
       EXISTS(
         SELECT 1 FROM photographer_subscriptions s
@@ -3683,7 +3912,8 @@ app.get("/api/assets/:id/preview-access", async (c) => {
       EXISTS(
         SELECT 1 FROM buyer_subscriptions bs
         WHERE bs.organization_id = a.organization_id AND bs.buyer_id = ?
-          AND bs.status IN ('active', 'non-renewing')
+          AND bs.status IN ('active', 'non-renewing') AND a.subscription_included = 1
+          AND a.monetization_model <> 'custom_quote'
       ) AS platform_subscription_entitlement,
       EXISTS(
         SELECT 1 FROM buyer_free_downloads fd
@@ -3702,7 +3932,7 @@ app.get("/api/assets/:id/preview-access", async (c) => {
 
 app.get("/api/my/free-downloads", async (c) => {
   const user = await buyerAccount(c);
-  if (!user || !allowedRole(user, ["buyer", "admin"])) return c.json({ error: "Buyer access required" }, user ? 403 : 401);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Buyer access required" }, user ? 403 : 401);
   const limit = Math.max(0, Math.min(5, Number(c.env.INTRODUCTORY_FREE_DOWNLOAD_LIMIT ?? 3)));
   const claims = await c.env.DB.prepare(`SELECT fd.id, fd.asset_id, a.title, fd.created_at
     FROM buyer_free_downloads fd JOIN assets a ON a.id = fd.asset_id
@@ -3728,11 +3958,12 @@ app.on(["GET", "HEAD"], "/api/assets/:id/original", async (c) => {
   const user = await requestUser(c);
   if (!user) return c.json({ error: "Authentication required" }, 401);
   const row = await c.env.DB.prepare(`
-    SELECT a.id, a.organization_id, a.kind, a.status, a.rights_status, a.source_file_name, a.original_key, a.owner_id, a.free_download_enabled,
+    SELECT a.id, a.organization_id, a.kind, a.status, a.rights_status, a.source_file_name, a.original_key, a.owner_id, a.free_download_enabled, a.license_credit_cost, a.monetization_model,
+      a.subscription_included,
       EXISTS(
         SELECT 1 FROM licences l
         WHERE l.asset_id = a.id AND l.organization_id = a.organization_id
-          AND l.buyer_id = ? AND l.status = 'paid'
+          AND l.buyer_id = ? AND l.status = 'paid' AND COALESCE(l.payment_provider, '') <> 'subscription'
       ) AS paid_entitlement,
       EXISTS(
         SELECT 1 FROM photographer_subscriptions s
@@ -3743,7 +3974,8 @@ app.on(["GET", "HEAD"], "/api/assets/:id/original", async (c) => {
       EXISTS(
         SELECT 1 FROM buyer_subscriptions bs
         WHERE bs.organization_id = a.organization_id AND bs.buyer_id = ?
-          AND bs.status IN ('active', 'non-renewing')
+          AND bs.status IN ('active', 'non-renewing') AND a.subscription_included = 1
+          AND a.monetization_model <> 'custom_quote'
       ) AS platform_subscription_entitlement,
       EXISTS(
         SELECT 1 FROM buyer_free_downloads fd
@@ -3785,21 +4017,17 @@ app.on(["GET", "HEAD"], "/api/assets/:id/original", async (c) => {
       .bind(claimId, user.organizationId, user.id, row.id, originalKey, user.organizationId, user.id, freeLimit).run();
     freeClaimed = Number(claim.meta.changes ?? 0) === 1 || existingFree;
   }
-  let creditClaimed = false;
-  if (!elevated && String(row.owner_id) !== user.id && !Number(row.paid_entitlement) && !Number(row.subscription_entitlement) && !platformSubscription && !freeClaimed && c.req.method === "GET") {
-    const idempotencyKey = c.req.header("Idempotency-Key")?.trim().slice(0, 180) || crypto.randomUUID();
-    const spendKey = `download:${user.id}:${row.id}:${idempotencyKey}`;
-    const spend = await c.env.DB.prepare(`INSERT OR IGNORE INTO buyer_credit_transactions (id, organization_id, buyer_id, transaction_type, credits, amount_cents, reference_type, reference_id, idempotency_key)
-      SELECT ?, ?, ?, 'spend', -1, 0, 'asset_download', ?, ?
-      WHERE (SELECT COALESCE(SUM(ct.credits), 0) FROM buyer_credit_transactions ct WHERE ct.organization_id = ? AND ct.buyer_id = ?) > 0`)
-      .bind(crypto.randomUUID(), user.organizationId, user.id, row.id, spendKey, user.organizationId, user.id).run();
-    creditClaimed = Number(spend.meta.changes ?? 0) === 1;
-    if (!creditClaimed) creditClaimed = Boolean(await c.env.DB.prepare("SELECT id FROM buyer_credit_transactions WHERE organization_id = ? AND buyer_id = ? AND idempotency_key = ?").bind(user.organizationId, user.id, spendKey).first<{ id: string }>());
-  }
-  const entitled = elevated || String(row.owner_id) === user.id || Number(row.paid_entitlement) === 1 || Number(row.subscription_entitlement) === 1 || platformSubscription || freeClaimed || creditClaimed;
+  const creditCost = Math.max(1, Number(row.license_credit_cost ?? MEDIA_MEMBERSHIP_CREDITS));
+  const customBuying = row.monetization_model === "custom_quote";
+  const entitled = elevated || String(row.owner_id) === user.id || Number(row.paid_entitlement) === 1 || Number(row.subscription_entitlement) === 1 || platformSubscription || freeClaimed;
   if (!entitled) {
     const used = Number((await c.env.DB.prepare("SELECT COUNT(*) AS total FROM buyer_free_downloads WHERE organization_id = ? AND buyer_id = ?").bind(user.organizationId, user.id).first<{ total: number }>())?.total ?? 0);
-    return c.json({ error: freeEligible && archiveDomain.introductoryDownloadsRemaining(used, freeLimit) === 0 ? "Your introductory free photo downloads are used. Choose a bundle or unlimited subscription to continue." : "A licence, bundle, or subscription is required to download this original", code: freeEligible ? "free_download_limit_reached" : "download_entitlement_required", freeDownloadsRemaining: archiveDomain.introductoryDownloadsRemaining(used, freeLimit) }, 403);
+    const error = customBuying
+      ? "Enable custom buying in Search and complete the seller-listed credit purchase before downloading this original."
+      : freeEligible && archiveDomain.introductoryDownloadsRemaining(used, freeLimit) === 0
+        ? "Your introductory free photo downloads are used. Choose a credit purchase or unlimited subscription to continue."
+        : `A paid ${creditCost}-credit media licence or subscription is required to download this original`;
+    return c.json({ error, code: customBuying ? "custom_buying_opt_in_required" : freeEligible ? "free_download_limit_reached" : "download_entitlement_required", creditCost, freeDownloadsRemaining: archiveDomain.introductoryDownloadsRemaining(used, freeLimit) }, 403);
   }
   const entitlementType = elevated ? "staff" : String(row.owner_id) === user.id ? "owner" : platformSubscription || Number(row.subscription_entitlement) === 1 ? "subscription" : "licence";
   if (!freeClaimed || entitlementType !== "licence") {
@@ -3957,68 +4185,12 @@ app.get("/api/licence-products", async (c) => {
 });
 
 app.post("/api/search/visual", async (c) => {
-  const requestContentType = c.req.raw.headers.get("content-type")?.toLowerCase() ?? "";
-  if (!requestContentType.startsWith("multipart/form-data")) {
-    return new Response(JSON.stringify({ error: "Upload an image file in the image field" }), { status: 400, headers: { "Content-Type": "application/json" } });
-  }
-  if (!c.env.AI || !c.env.PHOTO_INDEX) return c.json({ error: "Visual search is not configured", code: "visual_search_unavailable" }, 503);
-  const contentLength = Number(c.req.header("content-length") ?? 0);
-  if (contentLength > 12 * 1024 * 1024) return c.json({ error: "Visual search images must be 10 MB or smaller" }, 413);
-  let form: FormData;
-  try {
-    form = await c.req.raw.formData();
-  } catch {
-    return c.json({ error: "Upload an image file in the image field" }, 400);
-  }
-  const file = form.get("image");
-  if (!(file instanceof File) || !file.type.startsWith("image/")) return c.json({ error: "Upload an image file in the image field" }, 400);
-  if (file.size > 10 * 1024 * 1024) return c.json({ error: "Visual search images must be 10 MB or smaller" }, 413);
-
-  let visualStage = "image_prepare";
-  try {
-    const source = new Uint8Array(await file.arrayBuffer());
-    let image: Uint8Array<ArrayBufferLike> = source;
-    let contentType = file.type.toLowerCase();
-    if (source.byteLength > 8_000_000 || !["image/jpeg", "image/png"].includes(contentType)) {
-      let transformed: Uint8Array<ArrayBufferLike> | null = null;
-      for (const options of [{ width: 1600, quality: 75 }, { width: 1200, quality: 70 }, { width: 900, quality: 65 }]) {
-        const input = new Response(source).body;
-        if (!input) throw new Error("Visual search image stream is unavailable");
-        const output = await c.env.IMAGES.input(input).transform({ width: options.width })
-          .output({ format: "image/jpeg", quality: options.quality });
-        const candidate = new Uint8Array(await new Response(output.image()).arrayBuffer());
-        if (candidate.byteLength > 0 && candidate.byteLength <= 8_000_000) { transformed = candidate; break; }
-      }
-      if (!transformed) return c.json({ error: "The image could not be prepared for visual search" }, 422);
-      image = transformed;
-      contentType = "image/jpeg";
-    }
-    const aiImage = `data:${contentType};base64,${base64Bytes(image)}`;
-    const model = c.env.PHOTO_VISION_PROVIDER === "ollama-tunnel"
-      ? `ollama:${c.env.LOCAL_VISION_MODEL?.trim() || "qwen3-vl:8b"}`
-      : (c.env.PHOTO_VISION_MODEL ?? "@cf/moondream/moondream3.1-9B-A2B");
-    visualStage = "vision_provider";
-    const vision = await runPhotoVision(photoPipeline(c.env), model, image, aiImage);
-    const metadata = classifyVisionResult(vision).metadata;
-    const description = [metadata.description, ...metadata.subjectTags, metadata.locationType, metadata.sceneContext, metadata.primaryCategory, ...metadata.sceneAttributes]
-      .filter((value) => value && value !== "unknown" && value !== "other").join(" ").trim().slice(0, 1200);
-    if (!description) return c.json({ error: "The image could not be described for visual search" }, 422);
-    visualStage = "semantic_lookup";
-    const semantic = await searchPhotoIndex(photoPipeline(c.env), description, { kind: "image", status: "published", excludeDemo: String(c.env.APP_ENV) === "production" });
-    return c.json({
-      query: metadata.description || description,
-      mode: semantic.usedVectorIndex ? "visual-to-semantic" : "visual-to-keyword",
-      results: semantic.rows.map((row) => assetRowToDomain(row, c.env)),
-      usedVectorIndex: semantic.usedVectorIndex,
-    });
-  } catch (error) {
-    logEvent("error", "photo.search.visual_failed", c.get("trace"), { error: error instanceof Error ? error.message : "unknown-error" });
-    c.header("X-Visual-Search-Failure-Stage", visualStage);
-    return c.json({ error: "Visual search is temporarily unavailable", code: "visual_search_failed" }, 503);
-  }
+  logEvent("info", "search.visual_disabled", c.get("trace"), { reason: "live-search-is-metadata-only" });
+  return c.json({ error: "Visual search is unavailable while live search uses approved metadata only", code: "visual_search_disabled" }, 503);
 });
 
-app.get("/api/assets", async (c) => {
+const searchAssetsHandler = async (c: Context<{ Bindings: Bindings; Variables: Variables }>) => {
+  const startedAt = performance.now();
   const params = searchSchema.parse({
     q: c.req.query("q") ?? "",
     kind: c.req.query("kind") ?? "all",
@@ -4030,21 +4202,30 @@ app.get("/api/assets", async (c) => {
   });
 
   let rows: Record<string, unknown>[] = [];
-  let searchHandled = false;
   let searchMode: SearchResponse["mode"] = "keyword";
-  if (params.q && params.status === "published") {
+  let searchSuggestions: string[] = [];
+  let searchStages: import("./photo-indexing").MetadataSearchStage[] = [];
+  if (params.q) {
     try {
-      const semantic = await searchPhotoIndex(photoPipeline(c.env), params.q, { ...params, excludeDemo: String(c.env.APP_ENV) === "production" });
-      rows = semantic.rows;
-      searchMode = semantic.mode;
-      if (semantic.fallbackReason) c.header("X-Search-Fallback-Reason", semantic.fallbackReason);
-      searchHandled = true;
+      const metadataSearch = await searchPhotoIndex(photoPipeline(c.env), params.q, {
+        kind: params.kind,
+        status: params.status,
+        location: params.location,
+        locationType: params.locationType,
+        category: params.category,
+        verified: params.verified === "true",
+        excludeDemo: String(c.env.APP_ENV) === "production",
+      });
+      rows = metadataSearch.rows;
+      searchMode = metadataSearch.mode;
+      searchSuggestions = metadataSearch.suggestions;
+      searchStages = metadataSearch.stages;
+      if (metadataSearch.fallbackReason) c.header("X-Search-Fallback-Reason", metadataSearch.fallbackReason);
     } catch (error) {
-      logEvent("error", "photo.search.hybrid_failed", c.get("trace"), { error: error instanceof Error ? error.message : "unknown-error" });
+      logEvent("error", "search.failed", c.get("trace"), { query: params.q, query_type: "metadata", error: error instanceof Error ? error.message : "unknown-error" });
+      return c.json({ error: "The verified metadata search service is temporarily unavailable", code: "search_unavailable" }, 503);
     }
-  }
-
-  if (!searchHandled) {
+  } else {
     const clauses = [params.status === "all" ? "1 = 1" : "a.status = ?", "a.id NOT LIKE 'asset-test-photo-%'", ...(String(c.env.APP_ENV) === "production" ? ["COALESCE(a.demo_seed, 0) = 0", "a.id NOT LIKE 'asset-demo-%'"] : [])];
     const values: string[] = params.status === "all" ? [] : [params.status];
 
@@ -4060,12 +4241,6 @@ app.get("/api/assets", async (c) => {
     if (params.locationType) { clauses.push("a.visual_location_type = ?"); values.push(params.locationType); }
     if (params.category) { clauses.push("a.primary_category = ?"); values.push(params.category); }
     if (params.verified) clauses.push("a.human_verified = 1");
-    if (params.q) {
-      clauses.push("(a.title LIKE ? OR a.description LIKE ? OR a.caption LIKE ? OR a.subject_tags LIKE ? OR a.cultural_tags LIKE ? OR a.ai_tags LIKE ? OR a.ocr_text LIKE ? OR a.visual_location_type LIKE ? OR a.scene_context LIKE ? OR a.primary_category LIKE ? OR a.scene_attributes LIKE ?)");
-      const query = `%${params.q}%`;
-      values.push(query, query, query, query, query, query, query, query, query, query, query);
-    }
-
     const result = await c.env.DB.prepare(`
       SELECT a.*, u.display_name AS contributor
       FROM assets a JOIN users u ON u.id = a.owner_id
@@ -4078,11 +4253,7 @@ app.get("/api/assets", async (c) => {
   }
   if (params.verified) rows = rows.filter((row) => Boolean(row.human_verified));
   const domainAssets = rows.map((row) => assetRowToDomain(row, c.env));
-  // Vectorize has already ranked semantic candidates. Applying the lexical
-  // relevance gate again would discard valid intent matches such as "warm forest".
-  const matchedAssets = searchMode === "keyword"
-    ? archiveDomain.rankSearchAssets(domainAssets, params.q)
-    : domainAssets;
+  const matchedAssets = domainAssets;
   const countBy = <T extends string>(values: (T | null | undefined)[]): Map<string, number> => {
     const counts = new Map<string, number>();
     for (const value of values) if (value) counts.set(value, (counts.get(value) ?? 0) + 1);
@@ -4100,17 +4271,41 @@ app.get("/api/assets", async (c) => {
     query: params.q,
     mode: searchMode,
     results: matchedAssets,
+    suggestions: searchSuggestions,
     facets: [
       { label: "Human verified", value: "verified", count: matchedAssets.filter((asset) => asset.humanVerified).length },
       ...kindFacets,
       ...provinceFacets,
       ...categoryFacets,
     ],
+    total: matchedAssets.length,
   };
 
+  const confidence = Number(rows[0]?.metadata_score ?? 0) / 100;
+  for (const stage of searchStages) {
+    logEvent("info", `search.stage.${stage.stage}`, c.get("trace"), {
+      query: params.q,
+      query_type: stage.queryType,
+      result_count: stage.resultCount,
+      latency_ms: stage.latencyMs,
+      confidence: stage.confidence,
+      skipped: Boolean(stage.skipped),
+    });
+    recordMetric(c.env, "search_stage_latency_ms", c.get("trace"), stage.latencyMs, [stage.stage, stage.queryType]);
+  }
+  logEvent("info", "search.request", c.get("trace"), {
+    query: params.q,
+    query_type: params.q ? "metadata" : "browse",
+    result_count: matchedAssets.length,
+    latency_ms: Math.round((performance.now() - startedAt) * 100) / 100,
+    confidence,
+  });
   recordMetric(c.env, "asset_search", c.get("trace"), matchedAssets.length, [params.kind, params.status]);
-  return c.json(validateContractResponse("GET /api/assets 200", searchResponseSchema, response));
-});
+  return c.json(validateContractResponse(`${c.req.method} ${c.req.path} 200`, searchResponseSchema, response));
+};
+
+app.get("/api/search", searchAssetsHandler);
+app.get("/api/assets", searchAssetsHandler);
 
 function recentAttestation(value: string | undefined, maxAgeDays = 90): boolean {
   if (!value) return false;
@@ -4485,17 +4680,17 @@ app.get("/api/analytics/contributor/revenue", async (c) => {
   if (!user || !allowedRole(user, ["contributor", "admin"])) return c.json({ error: "Contributor revenue access required" }, 403);
   const [licences, ledger, subscriptions, payouts, mediaInventory, mediaCount, mediaShape, paymentStatuses, packageMix, performanceAssets] = await c.env.DB.batch([
     c.env.DB.prepare(`SELECT l.id, a.id AS asset_id, a.title AS asset_title, a.kind, l.licence_type, l.territory,
-        l.duration_days, l.price_cents, l.status, l.paid_at, l.created_at,
+        l.duration_days, l.price_cents, l.credit_cost, l.payment_provider, a.monetization_model, a.subscription_included, l.status, l.paid_at, l.created_at,
         buyer.display_name AS buyer_name,
         COALESCE(SUM(CASE WHEN le.entry_type = 'sale' THEN le.amount_cents ELSE 0 END), 0) AS royalty_cents,
         COALESCE(SUM(CASE WHEN le.entry_type = 'platform_fee' THEN ABS(le.amount_cents) ELSE 0 END), 0) AS platform_fee_cents,
         COALESCE(SUM(CASE WHEN le.entry_type = 'refund' THEN ABS(le.amount_cents) ELSE 0 END), 0) AS refunded_cents
       FROM licences l
-        JOIN assets a ON a.id = l.asset_id AND a.organization_id = ? AND a.owner_id = ? AND a.monetization_model = 'individual_license'
+        JOIN assets a ON a.id = l.asset_id AND a.organization_id = ? AND a.owner_id = ?
         JOIN users buyer ON buyer.id = l.buyer_id
         LEFT JOIN ledger_entries le ON le.licence_id = l.id AND le.contributor_id = ?
       WHERE l.organization_id = ? AND l.status IN ('paid', 'refunded')
-      GROUP BY l.id, a.id, a.title, a.kind, l.licence_type, l.territory, l.duration_days, l.price_cents, l.status, l.paid_at, l.created_at, buyer.display_name
+      GROUP BY l.id, a.id, a.title, a.kind, l.licence_type, l.territory, l.duration_days, l.price_cents, l.credit_cost, l.payment_provider, a.monetization_model, a.subscription_included, l.status, l.paid_at, l.created_at, buyer.display_name
       ORDER BY COALESCE(l.paid_at, l.created_at) DESC`).bind(user.organizationId, user.id, user.id, user.organizationId),
     c.env.DB.prepare(`SELECT
         COALESCE(SUM(CASE WHEN entry_type = 'sale' THEN amount_cents ELSE 0 END), 0) AS royalty_cents,
@@ -4503,41 +4698,44 @@ app.get("/api/analytics/contributor/revenue", async (c) => {
         COALESCE(SUM(CASE WHEN entry_type = 'refund' THEN ABS(amount_cents) ELSE 0 END), 0) AS refunded_cents
       FROM ledger_entries le
         JOIN licences l ON l.id = le.licence_id AND l.organization_id = ?
-        JOIN assets a ON a.id = l.asset_id AND a.owner_id = ? AND a.monetization_model = 'individual_license'
+        JOIN assets a ON a.id = l.asset_id AND a.owner_id = ?
       WHERE le.contributor_id = ?`)
       .bind(user.organizationId, user.id, user.id),
-    c.env.DB.prepare(`SELECT COUNT(CASE WHEN paid_at IS NOT NULL THEN 1 END) AS subscription_count,
-        COALESCE(SUM(CASE WHEN paid_at IS NOT NULL THEN price_cents ELSE 0 END), 0) AS subscription_gross_cents
-      FROM photographer_subscriptions WHERE organization_id = ? AND photographer_id = ?`)
-      .bind(user.organizationId, user.id),
+    c.env.DB.prepare(`SELECT COUNT(CASE WHEN p.paid_at IS NOT NULL THEN 1 END) AS subscription_count,
+        COALESCE(SUM(CASE WHEN p.paid_at IS NOT NULL THEN p.amount_cents ELSE 0 END), 0) AS subscription_gross_cents
+      FROM buyer_subscription_payments p JOIN buyer_subscriptions s ON s.id = p.subscription_id
+      WHERE s.organization_id = ? AND p.status = 'success'`)
+      .bind(user.organizationId),
     c.env.DB.prepare(`SELECT
         COALESCE(SUM(CASE WHEN item.status = 'paid' THEN item.amount_cents ELSE 0 END), 0) AS paid_out_cents,
         COALESCE(SUM(CASE WHEN item.status IN ('pending', 'processing') THEN item.amount_cents ELSE 0 END), 0) AS in_flight_cents,
         COALESCE(SUM(CASE WHEN item.status = 'failed' THEN item.amount_cents ELSE 0 END), 0) AS failed_cents
       FROM payout_batch_items item JOIN payout_batches batch ON batch.id = item.batch_id
       WHERE batch.organization_id = ? AND item.contributor_id = ?`).bind(user.organizationId, user.id),
-    c.env.DB.prepare(`SELECT id, title, kind, status, monetization_model, license_price_cents
+    c.env.DB.prepare(`SELECT id, title, kind, status, monetization_model, license_price_cents, license_credit_cost, subscription_included
       FROM assets WHERE organization_id = ? AND owner_id = ? ORDER BY created_at DESC`).bind(user.organizationId, user.id),
     c.env.DB.prepare("SELECT COUNT(*) AS total FROM assets WHERE organization_id = ? AND owner_id = ?").bind(user.organizationId, user.id),
     c.env.DB.prepare(`SELECT kind, monetization_model, COUNT(*) AS total,
         SUM(CASE WHEN status = 'published' THEN 1 ELSE 0 END) AS published_count
       FROM assets WHERE organization_id = ? AND owner_id = ? GROUP BY kind, monetization_model ORDER BY kind, monetization_model`).bind(user.organizationId, user.id),
-    c.env.DB.prepare(`SELECT l.status, COUNT(*) AS transaction_count, COALESCE(SUM(l.price_cents), 0) AS amount_cents
+    c.env.DB.prepare(`SELECT l.status, COUNT(*) AS transaction_count,
+        COALESCE(SUM(COALESCE(NULLIF(l.price_cents, 0), COALESCE(l.credit_cost, 0) * ?)), 0) AS amount_cents
       FROM licences l JOIN assets a ON a.id = l.asset_id AND a.organization_id = ? AND a.owner_id = ?
-      WHERE l.organization_id = ? GROUP BY l.status ORDER BY l.status`).bind(user.organizationId, user.id, user.organizationId),
+      WHERE l.organization_id = ? GROUP BY l.status ORDER BY l.status`).bind(CREDIT_REFERENCE_UNIT_CENTS, user.organizationId, user.id, user.organizationId),
     c.env.DB.prepare(`SELECT l.licence_type, l.duration_days, l.territory, COUNT(*) AS transaction_count,
-        COALESCE(SUM(l.price_cents), 0) AS purchase_cents,
+        COALESCE(SUM(COALESCE(NULLIF(l.price_cents, 0), COALESCE(l.credit_cost, 0) * ?)), 0) AS purchase_cents,
+        COALESCE(SUM(CASE WHEN l.payment_provider = 'credits' THEN COALESCE(l.credit_cost, 0) ELSE 0 END), 0) AS credits_used,
         COALESCE(SUM(CASE WHEN le.entry_type = 'sale' THEN le.amount_cents ELSE 0 END), 0) AS royalty_cents,
         COALESCE(SUM(CASE WHEN le.entry_type = 'refund' THEN ABS(le.amount_cents) ELSE 0 END), 0) AS refunded_cents
       FROM licences l JOIN assets a ON a.id = l.asset_id AND a.organization_id = ? AND a.owner_id = ?
         LEFT JOIN ledger_entries le ON le.licence_id = l.id AND le.contributor_id = ?
       WHERE l.organization_id = ? AND l.status IN ('paid', 'refunded')
-      GROUP BY l.licence_type, l.duration_days, l.territory ORDER BY purchase_cents DESC`).bind(user.organizationId, user.id, user.id, user.organizationId),
+      GROUP BY l.licence_type, l.duration_days, l.territory ORDER BY purchase_cents DESC`).bind(CREDIT_REFERENCE_UNIT_CENTS, user.organizationId, user.id, user.id, user.organizationId),
     c.env.DB.prepare(`SELECT a.id, a.title, a.kind,
         COALESCE((SELECT SUM(ad.count) FROM analytics_daily ad WHERE ad.asset_id = a.id AND ad.metric_type = 'asset_view' AND ad.metric_date >= date('now', '-30 day')), 0) AS views_30d,
         COALESCE((SELECT COUNT(*) FROM licences l WHERE l.asset_id = a.id AND l.organization_id = a.organization_id AND l.status IN ('paid', 'refunded')), 0) AS licence_count,
         COALESCE((SELECT COUNT(*) FROM media_download_events de WHERE de.asset_id = a.id AND de.organization_id = a.organization_id AND de.created_at >= datetime('now', '-30 day')), 0) AS download_count,
-        COALESCE((SELECT COUNT(*) FROM media_download_events de JOIN photographer_subscriptions s ON s.subscriber_id = de.user_id AND s.photographer_id = a.owner_id AND s.organization_id = a.organization_id WHERE de.asset_id = a.id AND de.entitlement_type = 'subscription' AND de.created_at >= datetime('now', '-30 day')), 0) AS subscription_download_count,
+        COALESCE((SELECT COUNT(*) FROM media_download_events de WHERE de.asset_id = a.id AND de.organization_id = a.organization_id AND de.entitlement_type = 'subscription' AND de.created_at >= datetime('now', '-30 day')), 0) AS subscription_download_count,
         COALESCE((SELECT SUM(CASE WHEN le.entry_type = 'sale' THEN le.amount_cents ELSE 0 END) FROM ledger_entries le JOIN licences l ON l.id = le.licence_id WHERE l.asset_id = a.id AND l.organization_id = a.organization_id AND le.contributor_id = a.owner_id), 0) AS royalty_cents
       FROM assets a WHERE a.organization_id = ? AND a.owner_id = ? ORDER BY royalty_cents DESC, views_30d DESC`).bind(user.organizationId, user.id),
   ]);
@@ -4558,30 +4756,44 @@ app.get("/api/analytics/contributor/revenue", async (c) => {
   const inFlightCents = Number(payoutRow.in_flight_cents ?? 0);
   const failedPayoutCents = Number(payoutRow.failed_cents ?? 0);
   const payoutSchedule = monthlyPayoutSchedule();
-  const customLicenceRows = rows(licences).map((row) => ({
-    id: String(row.id),
-    assetId: String(row.asset_id),
-    assetTitle: String(row.asset_title),
-    kind: String(row.kind),
-    licenceType: String(row.licence_type),
-    territory: String(row.territory),
-    durationDays: Number(row.duration_days),
-    purchaseCents: Number(row.price_cents),
-    royaltyCents: Number(row.royalty_cents ?? 0),
-    platformFeeCents: Number(row.platform_fee_cents ?? 0),
-    refundedCents: Number(row.refunded_cents ?? 0),
-    status: String(row.status),
-    buyerName: String(row.buyer_name ?? "Buyer identity unavailable"),
-    paidAt: row.paid_at ? String(row.paid_at) : null,
-    createdAt: String(row.created_at),
-  }));
+  const customLicenceRows = rows(licences).map((row) => {
+    const creditCost = Number(row.credit_cost ?? 0);
+    const includedWithMembership = String(row.payment_provider ?? "") === "subscription";
+    const purchaseCents = includedWithMembership
+      ? 0
+      : Number(row.price_cents ?? 0) > 0
+        ? Number(row.price_cents)
+        : creditCost * CREDIT_REFERENCE_UNIT_CENTS;
+    return {
+      id: String(row.id),
+      assetId: String(row.asset_id),
+      assetTitle: String(row.asset_title),
+      kind: String(row.kind),
+      licenceType: String(row.licence_type),
+      territory: String(row.territory),
+      durationDays: Number(row.duration_days),
+      creditCost,
+      accessMode: includedWithMembership ? "subscription" : "credits",
+      subscriptionIncluded: Number(row.subscription_included ?? 0) === 1,
+      purchaseCents,
+      royaltyCents: Number(row.royalty_cents ?? 0),
+      platformFeeCents: Number(row.platform_fee_cents ?? 0),
+      refundedCents: Number(row.refunded_cents ?? 0),
+      status: String(row.status),
+      buyerName: String(row.buyer_name ?? "Buyer identity unavailable"),
+      paidAt: row.paid_at ? String(row.paid_at) : null,
+      createdAt: String(row.created_at),
+    };
+  });
   return c.json({
     statement: {
       currency: "ZAR",
+      creditCurrency: "CREDITS",
       generatedAt: new Date().toISOString(),
       customPricedLicences: {
         results: customLicenceRows,
         total: customLicenceRows.length,
+        creditsUsed: customLicenceRows.reduce((sum, row) => sum + (row.accessMode === "credits" ? row.creditCost : 0), 0),
         purchaseCents: customLicenceRows.reduce((sum, row) => sum + row.purchaseCents, 0),
         royaltyCents,
         platformFeeCents: Number(ledgerRow.platform_fee_cents ?? 0),
@@ -4591,13 +4803,13 @@ app.get("/api/analytics/contributor/revenue", async (c) => {
         total: Number(mediaCountRow.total ?? mediaRows.length),
         results: mediaRows.map((row) => ({
           id: String(row.id), title: String(row.title), kind: String(row.kind), status: String(row.status),
-          monetizationModel: String(row.monetization_model), licensePriceCents: row.license_price_cents === null ? null : Number(row.license_price_cents),
+          monetizationModel: String(row.monetization_model), licensePriceCents: row.license_price_cents === null ? null : Number(row.license_price_cents), licenseCreditCost: Number(row.license_credit_cost ?? MEDIA_MEMBERSHIP_CREDITS), subscriptionIncluded: Number(row.subscription_included ?? 0) === 1,
         })),
         byTypeAndPackage: mediaShapeRows.map((row) => ({ kind: String(row.kind), monetizationModel: String(row.monetization_model), total: Number(row.total ?? 0), published: Number(row.published_count ?? 0) })),
       },
       paymentFlow: {
         byStatus: paymentStatusRows.map((row) => ({ status: String(row.status), transactionCount: Number(row.transaction_count ?? 0), amountCents: Number(row.amount_cents ?? 0) })),
-        packageMix: packageRows.map((row) => ({ licenceType: String(row.licence_type), durationDays: Number(row.duration_days), territory: String(row.territory), transactionCount: Number(row.transaction_count ?? 0), purchaseCents: Number(row.purchase_cents ?? 0), royaltyCents: Number(row.royalty_cents ?? 0), refundedCents: Number(row.refunded_cents ?? 0) })),
+        packageMix: packageRows.map((row) => ({ licenceType: String(row.licence_type), durationDays: Number(row.duration_days), territory: String(row.territory), transactionCount: Number(row.transaction_count ?? 0), creditsUsed: Number(row.credits_used ?? 0), purchaseCents: Number(row.purchase_cents ?? 0), royaltyCents: Number(row.royalty_cents ?? 0), refundedCents: Number(row.refunded_cents ?? 0) })),
         transactionCount: paymentStatusRows.reduce((sum, row) => sum + Number(row.transaction_count ?? 0), 0),
       },
       performance: {
@@ -4609,7 +4821,7 @@ app.get("/api/analytics/contributor/revenue", async (c) => {
           licensedAssets: performanceRows.filter((row) => Number(row.licence_count ?? 0) > 0).length,
           royaltyCents,
           roiStatus: "not_available",
-          roiExplanation: "Seller costs are not recorded, so Veld does not calculate a literal seller ROI. Royalty yield is shown as a performance proxy instead.",
+          roiExplanation: "Seller costs are not recorded, so Stockvel does not calculate a literal seller ROI. Royalty yield is shown as a performance proxy instead.",
         },
         assets: performanceRows.map((row) => {
           const views = Number(row.views_30d ?? 0);
@@ -4617,13 +4829,13 @@ app.get("/api/analytics/contributor/revenue", async (c) => {
           return { id: String(row.id), title: String(row.title), kind: String(row.kind), views, downloads: Number(row.download_count ?? 0), subscriptionDownloads: Number(row.subscription_download_count ?? 0), licenceCount: Number(row.licence_count ?? 0), royaltyCents: royalty, royaltyPerThousandViewsCents: views ? Math.round((royalty * 1000) / views) : null };
         }),
       },
-      veldSubscriptionRoyalty: {
+      stockvelSubscriptionRoyalty: {
         status: "not_allocated",
         amountCents: 0,
         period: null,
         subscriptionPurchases: Number(subscriptionRow.subscription_count ?? 0),
         subscriptionGrossCents: Number(subscriptionRow.subscription_gross_cents ?? 0),
-        explanation: "Veld has not posted a generic subscription royalty allocation for this account. Subscription access and any future royalty pool are tracked separately; no amount is estimated or promised here.",
+        explanation: "Stockvel has not posted a generic subscription royalty allocation for this account. Subscription access and any future royalty pool are tracked separately; no amount is estimated or promised here.",
       },
       payoutPosition: {
         postedRoyaltyCents: royaltyCents - refundedCents,
@@ -4631,7 +4843,7 @@ app.get("/api/analytics/contributor/revenue", async (c) => {
         inFlightCents,
         failedPayoutCents,
         outstandingCents: Math.max(0, royaltyCents - refundedCents - paidOutCents - inFlightCents),
-        note: "Payout batches and their payment status are controlled by the Veld finance workflow. This statement does not expose bank details or payment credentials.",
+        note: "Payout batches and their payment status are controlled by the Stockvel finance workflow. This statement does not expose bank details or payment credentials.",
       },
       payoutPolicy: {
         cadence: "monthly",
@@ -4641,7 +4853,7 @@ app.get("/api/analytics/contributor/revenue", async (c) => {
         nextScheduledPayoutDate: payoutSchedule.nextPayoutDate,
         amountExpectedCents: Math.max(0, royaltyCents - refundedCents - paidOutCents - inFlightCents),
         status: "scheduled_subject_to_approved_payout_batch",
-        explanation: "Veld's stated policy is to pay posted royalty amounts as one lump sum on the 25th of each month. The amount remains subject to refunds, the payout minimum, verified payout details, finance approval, and provider settlement.",
+        explanation: "Stockvel's stated policy is to pay posted royalty amounts as one lump sum on the 25th of each month. The amount remains subject to refunds, the payout minimum, verified payout details, finance approval, and provider settlement.",
       },
       privacy: {
         buyerIdentity: "Only the buyer display name attached to an owned licence is shown.",
@@ -4679,10 +4891,10 @@ app.get("/api/analytics/contributor/revenue.pdf", async (c) => {
 app.get("/api/analytics/buyer", async (c) => {
   const user = await requestUser(c);
   if (!user) return c.json({ error: "Authentication required" }, 401);
-  const result = await c.env.DB.prepare(`SELECT l.campaign_id AS id, COALESCE(NULLIF(l.campaign_name, ''), 'Untitled campaign') AS name, a.title AS asset_title, a.id AS asset_id, l.price_cents AS spend_cents, l.status, COALESCE((SELECT SUM(count) FROM analytics_daily ad WHERE ad.metric_type = 'campaign_impression' AND ad.campaign_id = l.campaign_id), 0) AS impressions, COALESCE((SELECT SUM(count) FROM analytics_daily ad WHERE ad.metric_type = 'campaign_conversion' AND ad.campaign_id = l.campaign_id), 0) AS conversions FROM licences l JOIN assets a ON a.id = l.asset_id WHERE l.organization_id = ? AND l.buyer_id = ? AND l.status IN ('paid', 'expired') GROUP BY l.id ORDER BY l.created_at DESC`).bind(user.organizationId, user.id).all<Record<string, unknown>>();
-  const campaigns = (result.results as Record<string, unknown>[]).map((row) => { const spendCents = Number(row.spend_cents ?? 0); const conversions = Number(row.conversions ?? 0); return { id: String(row.id), name: String(row.name), assetTitle: String(row.asset_title), assetId: String(row.asset_id), spendCents, impressions: Number(row.impressions ?? 0), conversions, roi: spendCents ? Math.round(((conversions * 420 - spendCents) / spendCents) * 100) : 0, status: String(row.status) }; });
-  const spendCents = campaigns.reduce((sum, row) => sum + row.spendCents, 0); const impressions = campaigns.reduce((sum, row) => sum + row.impressions, 0); const conversions = campaigns.reduce((sum, row) => sum + row.conversions, 0); const roi = spendCents ? Math.round(((conversions * 420 - spendCents) / spendCents) * 100) : 0;
-  const response: BuyerAnalytics = { role: "buyer", range: "Last 30 days", summary: { spendCents, licensedAssets: campaigns.length, impressions, conversions, roi }, campaigns, performance: campaigns.map((row) => ({ label: row.name, value: row.impressions })) };
+  const result = await c.env.DB.prepare(`SELECT l.campaign_id AS id, COALESCE(NULLIF(l.campaign_name, ''), 'Untitled campaign') AS name, a.title AS asset_title, a.id AS asset_id, COALESCE(NULLIF(l.credit_cost, 0), CASE WHEN l.price_cents > 0 THEN CAST(ROUND(l.price_cents / 299.0) AS INTEGER) ELSE 0 END, 0) AS credits_used, l.status, COALESCE((SELECT SUM(count) FROM analytics_daily ad WHERE ad.metric_type = 'campaign_impression' AND ad.campaign_id = l.campaign_id), 0) AS impressions, COALESCE((SELECT SUM(count) FROM analytics_daily ad WHERE ad.metric_type = 'campaign_conversion' AND ad.campaign_id = l.campaign_id), 0) AS conversions FROM licences l JOIN assets a ON a.id = l.asset_id WHERE l.organization_id = ? AND l.buyer_id = ? AND l.status IN ('paid', 'expired') GROUP BY l.id ORDER BY l.created_at DESC`).bind(user.organizationId, user.id).all<Record<string, unknown>>();
+  const campaigns = (result.results as Record<string, unknown>[]).map((row) => { const creditsUsed = Number(row.credits_used ?? 0); const conversions = Number(row.conversions ?? 0); return { id: String(row.id), name: String(row.name), assetTitle: String(row.asset_title), assetId: String(row.asset_id), creditsUsed, impressions: Number(row.impressions ?? 0), conversions, roi: creditsUsed ? Math.round(((conversions * 1.4 - creditsUsed) / creditsUsed) * 100) : 0, status: String(row.status) }; });
+  const creditsUsed = campaigns.reduce((sum, row) => sum + row.creditsUsed, 0); const impressions = campaigns.reduce((sum, row) => sum + row.impressions, 0); const conversions = campaigns.reduce((sum, row) => sum + row.conversions, 0); const roi = creditsUsed ? Math.round(((conversions * 1.4 - creditsUsed) / creditsUsed) * 100) : 0;
+  const response: BuyerAnalytics = { role: "buyer", range: "Last 30 days", summary: { creditsUsed, licensedAssets: campaigns.length, impressions, conversions, roi }, campaigns, performance: campaigns.map((row) => ({ label: row.name, value: row.impressions })) };
   return c.json(response);
 });
 

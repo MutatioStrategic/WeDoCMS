@@ -1,8 +1,7 @@
 const base = process.argv[2] ?? process.env.QA_URL;
 if (!base) throw new Error("Usage: npm run test:live -- https://your-deployment.example");
 
-let visualSeed;
-for (const path of ["/api/health", "/api/auth/config", "/api/assets?q=forest&kind=image&status=published", "/api/creators", "/api/licence-products"]) {
+for (const path of ["/api/health", "/api/auth/config", "/api/search?q=forest&kind=image&status=published", "/api/creators", "/api/licence-products"]) {
   let response;
   try {
     response = await fetch(new URL(path, base));
@@ -21,22 +20,15 @@ for (const path of ["/api/health", "/api/auth/config", "/api/assets?q=forest&kin
     if (process.env.LIVE_EXPECTED_AUTH_PROVIDER && auth.provider !== process.env.LIVE_EXPECTED_AUTH_PROVIDER) throw new Error(`Expected ${process.env.LIVE_EXPECTED_AUTH_PROVIDER} auth but received ${auth.provider}.`);
     console.log(`OK ${path}: provider=${auth.provider}, publishableKeyPresent=${auth.provider === "supabase"}`);
   }
-  if (path.startsWith("/api/assets?q=")) {
+  if (path.startsWith("/api/search?q=")) {
     const body = await response.json();
-    if (body.mode === "keyword") throw new Error(`${path} fell back to keyword mode; Workers AI or Vectorize was not exercised successfully.`);
-    visualSeed = body.results?.find((asset) => typeof asset.previewUrl === "string" && asset.previewUrl);
+    if (body.mode !== "keyword") throw new Error(`${path} did not return deterministic metadata mode.`);
   }
 }
 
-if (!visualSeed) throw new Error("Semantic search returned no preview-backed image for the visual-search smoke.");
-const preview = await fetch(new URL(visualSeed.previewUrl, base));
-const previewType = preview.headers.get("content-type")?.split(";")[0]?.trim() ?? "";
-if (!preview.ok || !previewType.startsWith("image/")) throw new Error(`Visual-search seed preview returned ${preview.status} ${previewType}.`);
-const visualForm = new FormData();
-visualForm.set("image", new File([await preview.arrayBuffer()], `visual-smoke.${previewType.split("/")[1] || "jpg"}`, { type: previewType }));
-const visual = await fetch(new URL("/api/search/visual", base), { method: "POST", body: visualForm });
+const visual = await fetch(new URL("/api/search/visual", base), { method: "POST" });
 const visualBody = await visual.json();
-if (!visual.ok || visualBody.mode !== "visual-to-semantic" || visualBody.usedVectorIndex !== true) {
-  throw new Error(`/api/search/visual did not complete visual-to-semantic search (HTTP ${visual.status}, mode ${visualBody.mode ?? "none"}).`);
+if (visual.status !== 503 || visualBody.code !== "visual_search_disabled") {
+  throw new Error(`/api/search/visual did not report the intentional metadata-only disablement (HTTP ${visual.status}, code ${visualBody.code ?? "none"}).`);
 }
-console.log(`OK /api/search/visual: ${visual.status} ${visualBody.mode}`);
+console.log(`OK /api/search/visual: ${visual.status} ${visualBody.code}`);

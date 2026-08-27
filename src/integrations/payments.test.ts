@@ -97,6 +97,27 @@ describe("JsonPaymentAdapter", () => {
 });
 
 describe("PaystackPaymentAdapter", () => {
+  it("fails promptly and makes the checkout request retryable when the provider does not respond", async () => {
+    const adapter = new PaystackPaymentAdapter({
+      endpoint: "https://api.paystack.co/transaction/initialize",
+      secretKey: "test-secret",
+      requestTimeoutMs: 1,
+      fetcher: async (_input, init) => new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+      }),
+    });
+    await expect(adapter.createCheckoutSession({
+      idempotencyKey: "credit-purchase:timeout",
+      referenceId: "credit-timeout",
+      productType: "credit_purchase",
+      amountCents: 29900,
+      currency: "ZAR",
+      buyer: { id: "buyer-1", email: "buyer@example.com" },
+      successUrl: "https://app.example/success",
+      cancelUrl: "https://app.example/cancel",
+    })).rejects.toMatchObject({ provider: "paystack", status: 504, retryable: true });
+  });
+
   it("invokes the Worker global fetch with a valid receiver", async () => {
     const originalFetch = globalThis.fetch;
     let called = false;

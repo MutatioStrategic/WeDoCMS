@@ -1,6 +1,6 @@
 # CMS engineering and UX guardrails
 
-These instructions apply to the Veld Archive CMS repository. The goal is to make
+These instructions apply to the Stockvel CMS repository. The goal is to make
 the first implementation correct enough that later work is refinement, not a
 cycle of avoidable UX, security, and architecture repairs.
 

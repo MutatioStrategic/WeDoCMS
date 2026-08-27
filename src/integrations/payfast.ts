@@ -152,8 +152,8 @@ export class PayFastPaymentAdapter implements PaymentProvider {
       email_address: request.buyer.email,
       m_payment_id: reference,
       amount: (request.amountCents / 100).toFixed(2),
-      item_name: request.productType === "credit_purchase" ? "Veld Archive credits" : request.productType === "platform_subscription" ? "Veld Archive monthly membership" : "Veld Archive licence",
-      item_description: `Veld Archive ${request.productType ?? "licence"}`,
+      item_name: request.productType === "credit_purchase" ? "Stockvel credits" : request.productType === "platform_subscription" ? "Stockvel monthly membership" : "Stockvel licence",
+      item_description: `Stockvel ${request.productType ?? "licence"}`,
       ...metadataFields(request),
     };
     if (request.recurring) {

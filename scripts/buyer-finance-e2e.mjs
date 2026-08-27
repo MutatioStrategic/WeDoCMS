@@ -31,16 +31,20 @@ try {
   expect(purchases.body.results).toEqual(expect.any(Array));
   expect(purchases.body.summary).toEqual(expect.objectContaining({ total: expect.any(Number), totalPaidCents: expect.any(Number) }));
   expect(credits.status, "credit ledger API").toBe(200);
-  expect(credits.body.oneCreditCents, "credit unit price").toBe(10000);
+  expect(credits.body.creditPackCredits, "standard credit pack").toBe(100);
+  expect(credits.body.creditPackDurationDays, "standard credit duration").toBe(365);
+  expect(credits.body.currency, "buyer credit currency").toBe("CREDITS");
   expect(credits.body.balanceCredits).toEqual(expect.any(Number));
   expect(membership.status, "membership API").toBe(200);
 
   await page.reload({ waitUntil: "networkidle" });
   await page.getByRole("button", { name: "Buyer ROI" }).click();
   await expect(page.getByRole("heading", { name: /Your purchase history and buying power/ })).toBeVisible();
-  await expect(page.getByRole("heading", { name: /Keep access ready for the next brief/ })).toBeVisible();
-  await expect(page.getByLabel("Credits to buy")).toBeVisible();
-  await expect(page.getByText("1 credit = R100").first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: /Buy 100 credits.*access this media for 12 months/ })).toBeVisible();
+  await expect(page.getByText("Price: 100 credits", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Purchase 100 credits", exact: true })).toBeVisible();
+  await expect(page.getByLabel("Credits to buy")).toHaveCount(0);
+  await expect(page.getByText("1 credit = R100")).toHaveCount(0);
   const accessibility = await new AxeBuilder({ page }).include("#buyer-finance").withTags(["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"]).analyze();
   expect(accessibility.violations, "buyer finance WCAG 2.2 AA scan").toEqual([]);
 

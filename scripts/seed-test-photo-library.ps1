@@ -115,7 +115,7 @@ SELECT
   'reviewed', 'Synthetic metadata used to exercise prompt search and empty results.',
   'editor',
   NULL,
-  'Local test fixture', 'Veld Archive development team', 0, 1, 1, 1,
+  'Local test fixture', 'Stockvel development team', 0, 1, 1, 1,
   CASE ((n - 1) % 10) WHEN 0 THEN 'urban_street' WHEN 1 THEN 'rural_landscape' WHEN 2 THEN 'coastal_landscape' WHEN 3 THEN 'market_scene' WHEN 4 THEN 'transport' WHEN 5 THEN 'urban_street' WHEN 6 THEN 'food' WHEN 7 THEN 'nature' WHEN 8 THEN 'sports' ELSE 'indoor' END,
   CASE ((n - 1) % 10) WHEN 0 THEN 'nature' WHEN 1 THEN 'nature' WHEN 2 THEN 'travel' WHEN 3 THEN 'food' WHEN 4 THEN 'travel' WHEN 5 THEN 'architecture' WHEN 6 THEN 'food' WHEN 7 THEN 'nature' WHEN 8 THEN 'sport' ELSE 'arts_culture' END,
   '["synthetic test metadata"]',

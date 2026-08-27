@@ -7,7 +7,7 @@ const statement = {
   customPricedLicences: { purchaseCents: 420000, royaltyCents: 336000, results: [{ id: "lic-1", buyerName: "Buyer", assetTitle: "Mountain", kind: "image", licenceType: "advertising", territory: "ZA", purchaseCents: 420000, royaltyCents: 336000, refundedCents: 0, status: "paid", paidAt: "2026-08-13", createdAt: "2026-08-12" }] },
   payoutPosition: { paidOutCents: 0, inFlightCents: 0, outstandingCents: 336000 },
   payoutPolicy: { payoutDayOfMonth: 25, method: "lump_sum", nextScheduledPayoutDate: "2026-08-25", amountExpectedCents: 336000, status: "scheduled_subject_to_approved_payout_batch" },
-  veldSubscriptionRoyalty: { status: "not_allocated" },
+  stockvelSubscriptionRoyalty: { status: "not_allocated" },
   mediaInventory: { results: [{ id: "asset-1", title: "Mountain", kind: "image", status: "published", monetizationModel: "individual_license", licensePriceCents: 420000 }] },
   paymentFlow: { byStatus: [{ status: "paid", transactionCount: 1, amountCents: 420000 }], packageMix: [{ licenceType: "advertising", durationDays: 90, territory: "ZA", transactionCount: 1, purchaseCents: 420000, royaltyCents: 336000, refundedCents: 0 }] },
   performance: { summary: { views: 1000, licensedAssets: 1, roiExplanation: "Costs unavailable" }, assets: [{ title: "Mountain", kind: "image", views: 1000, licenceCount: 1, royaltyCents: 336000, royaltyPerThousandViewsCents: 336000 }] },

@@ -80,8 +80,8 @@ describe("provider abstraction layer", () => {
 
   it("sends transactional notifications through the native Cloudflare binding", async () => {
     const send = vi.fn().mockResolvedValue({ messageId: "cf-message-1" });
-    const adapter = new CloudflareEmailAdapter({ send } as unknown as SendEmail, { email: "notifications@example.com", name: "Veld Archive" });
+    const adapter = new CloudflareEmailAdapter({ send } as unknown as SendEmail, { email: "notifications@example.com", name: "Stockvel" });
     await expect(adapter.send({ to: "buyer@example.com", subject: "Asset approved", text: "Your asset is approved.", idempotencyKey: "notify-1" })).resolves.toEqual({ id: "cf-message-1", provider: "cloudflare_email_service", accepted: true });
-    expect(send).toHaveBeenCalledWith(expect.objectContaining({ from: { email: "notifications@example.com", name: "Veld Archive" }, to: "buyer@example.com", subject: "Asset approved", text: "Your asset is approved." }));
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ from: { email: "notifications@example.com", name: "Stockvel" }, to: "buyer@example.com", subject: "Asset approved", text: "Your asset is approved." }));
   });
 });

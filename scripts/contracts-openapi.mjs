@@ -10,7 +10,7 @@ const cases = [
   {
     method: "GET",
     path: "/api/health",
-    response: [200, { ok: true, service: "veld-archive-api", environment: "test" }],
+    response: [200, { ok: true, service: "stockvel-api", environment: "test" }],
   },
   {
     method: "GET",

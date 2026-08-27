@@ -1,10 +1,10 @@
 {
   "expo": {
-    "name": "Veld Archive",
-    "slug": "veld-archive-mobile",
+    "name": "Stockvel",
+    "slug": "stockvel-mobile",
     "version": "1.0.0",
     "orientation": "portrait",
-    "scheme": "veldarchive",
+    "scheme": "stockvel",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
     "plugins": [
@@ -12,7 +12,7 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "Veld Archive needs access to selected photos for editorial submission."
+          "photosPermission": "Stockvel needs access to selected photos for editorial submission."
         }
       ]
     ],

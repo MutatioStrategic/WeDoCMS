@@ -194,7 +194,7 @@ function routeItemFor(route) {
   const headers = [{ key: "Accept", value: "application/json" }];
   if (body !== undefined) headers.push({ key: "Content-Type", value: "application/json" });
   if (route.method !== "GET" && route.method !== "HEAD" && route.method !== "OPTIONS") {
-    headers.push({ key: "Authorization", value: "VeldSession {{sessionToken}}" });
+    headers.push({ key: "Authorization", value: "StockvelSession {{sessionToken}}" });
     headers.push({ key: "X-CSRF-Token", value: "{{csrfToken}}" });
   }
   return {
@@ -306,7 +306,7 @@ const signupBoundaryItems = signupBoundaryEnabled ? [
 
 const collection = {
   info: {
-    name: "Veld Archive — endpoint test plan",
+    name: "Stockvel — endpoint test plan",
     _postman_id: "veld-archive-route-sweep",
     schema: "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     description: "Generated from the API route declarations in src/worker/index.ts. Start with the setup folder, select a demoRole, and run the collection. The export mode omits the external Supabase signup boundary, skips data-changing and external requests by default, and leaves credential-like variables blank.",
@@ -342,7 +342,7 @@ const collection = {
       name: "00 - Optional identity exchange",
       description: "Set identityToken and runExternalWrites=true only when a verified external JWT is available.",
       item: [{
-        name: "Veld identity exchange",
+        name: "Stockvel identity exchange",
         request: {
           method: "POST",
           header: [
