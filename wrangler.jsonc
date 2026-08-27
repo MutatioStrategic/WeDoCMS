@@ -396,7 +396,7 @@
 			}
 		},
 		"production": {
-			"name": "veld-archive-api",
+			"name": "veld-archive-api-production",
 			"main": "src/worker/index.ts",
 			"compatibility_date": "2026-08-13",
 			"compatibility_flags": [

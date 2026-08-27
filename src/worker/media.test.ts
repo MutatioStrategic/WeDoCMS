@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createMediaResponse, getReadableMedia, headReadableMedia, previewMediaKey, previewObjectKey, publicMediaKey } from "./index";
+import { createMediaResponse, getReadableMedia, headReadableMedia, previewMediaKey, previewObjectKey, publicMediaKey, shouldStreamOriginalDownload } from "./index";
 
 function mediaObject(range?: { offset: number; length: number }): R2ObjectBody {
   return {
@@ -14,6 +14,13 @@ function mediaObject(range?: { offset: number; length: number }): R2ObjectBody {
 }
 
 describe("media preview responses", () => {
+  it("streams demo originals from the private binding when signing is intentionally unavailable", () => {
+    expect(shouldStreamOriginalDownload("demo", "primary", null)).toBe(true);
+    expect(shouldStreamOriginalDownload("production", "primary", null)).toBe(false);
+    expect(shouldStreamOriginalDownload("production", "primary", "https://signed.example/original")).toBe(false);
+    expect(shouldStreamOriginalDownload("production", "library", null)).toBe(true);
+  });
+
   it("never exposes an image original when a generated preview is not available", () => {
     expect(publicMediaKey({ kind: "image", preview_key: null, original_key: "originals/uploads/mountain.jpg" })).toBeNull();
     expect(publicMediaKey({ kind: "video", preview_key: null, original_key: "originals/uploads/mountain.mp4" })).toBeNull();

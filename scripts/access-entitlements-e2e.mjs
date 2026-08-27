@@ -37,6 +37,15 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+async function assertDownload(response, label) {
+  assert([200, 302].includes(response.status), `${label} did not return a downloadable response: ${response.status}`);
+  if (response.status === 200) {
+    assert((response.headers.get("content-disposition") ?? "").startsWith("attachment"), `${label} did not set attachment disposition`);
+    assert(Number(response.headers.get("content-length") ?? 0) > 0, `${label} did not return a non-empty media object`);
+    await response.body?.cancel();
+  }
+}
+
 async function login(role) {
   const endpoint = role === "buyer" ? ["/api/auth/demo-login", "/api/auth/dev-login"] : ["/api/auth/demo-login", "/api/auth/dev-login"];
   let response;
@@ -78,13 +87,13 @@ if (firstAssetClaimed) assert(accessBeforeBody.paid === true, "preview access di
 let afterSecond = allowance;
 if (allowance.remaining > 0 && unclaimedFreeAssets.length > 0) {
   const firstDownload = await call(`/api/assets/${encodeURIComponent(firstAsset.id)}/original`);
-  assert(firstDownload.status === 302, `first free download did not return a signed redirect: ${firstDownload.status}`);
+  await assertDownload(firstDownload, "first free download");
   const afterFirst = await json(await call("/api/my/free-downloads"));
   assert(afterFirst.used === usedAtStart + 1 && afterFirst.remaining === allowance.remaining - 1, "first free download did not consume exactly one allowance");
 
   // A retry of the same buyer+asset is idempotent and must not spend another free slot.
   const retryDownload = await call(`/api/assets/${encodeURIComponent(firstAsset.id)}/original`);
-  assert(retryDownload.status === 302, `free-download retry failed: ${retryDownload.status}`);
+  await assertDownload(retryDownload, "free-download retry");
   const afterRetry = await json(await call("/api/my/free-downloads"));
   assert(afterRetry.used === usedAtStart + 1, "retrying the same free asset consumed another allowance");
   afterSecond = afterRetry;
@@ -92,7 +101,7 @@ if (allowance.remaining > 0 && unclaimedFreeAssets.length > 0) {
   const secondAsset = unclaimedFreeAssets.find((asset) => asset.id !== firstAsset.id);
   if (allowance.remaining > 1 && secondAsset) {
     const secondDownload = await call(`/api/assets/${encodeURIComponent(secondAsset.id)}/original`);
-    assert(secondDownload.status === 302, `second free download did not return a signed redirect: ${secondDownload.status}`);
+    await assertDownload(secondDownload, "second free download");
     afterSecond = await json(await call("/api/my/free-downloads"));
     assert(afterSecond.used === usedAtStart + 2 && afterSecond.remaining === allowance.remaining - 2, "second free download did not update the allowance");
   }
@@ -103,7 +112,7 @@ if (allowance.remaining > 0 && unclaimedFreeAssets.length > 0) {
   const claimedAsset = freeAssets.find((asset) => claimedAssetIds.has(String(asset.id)));
   assert(claimedAsset, "no free-photo candidate is available for the stable demo buyer");
   const retryDownload = await call(`/api/assets/${encodeURIComponent(claimedAsset.id)}/original`);
-  assert(retryDownload.status === 302, `exhausted free-download retry failed: ${retryDownload.status}`);
+  await assertDownload(retryDownload, "exhausted free-download retry");
   afterSecond = await json(await call("/api/my/free-downloads"));
   assert(afterSecond.used === usedAtStart, "retrying an already-claimed free asset changed the allowance");
 }

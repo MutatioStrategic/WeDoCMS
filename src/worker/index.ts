@@ -922,6 +922,10 @@ export function createMediaResponse(request: Request, object: R2ObjectBody, fall
 
 type ReadableMediaSource = { source: "primary" | "library"; object: R2Object };
 
+export function shouldStreamOriginalDownload(environment: unknown, source: ReadableMediaSource["source"], signedUrl: string | null): boolean {
+  return source === "library" || (String(environment) === "demo" && !signedUrl);
+}
+
 export async function resolveReadableMediaHead(env: MediaReadBindings, key: string): Promise<ReadableMediaSource | null> {
   const primary = await env.MEDIA_BUCKET.head(key);
   if (primary) return { source: "primary", object: primary };
@@ -3768,8 +3772,11 @@ app.on(["GET", "HEAD"], "/api/assets/:id/original", async (c) => {
     contentType: originalContentType(row),
   }) : null;
   // Do not consume a free allowance or bundle credit if the delivery URL
-  // cannot be produced for this deployment.
-  if (mediaSource.source === "primary" && !signedUrl) return c.json({ error: "Original download signing is unavailable" }, 503);
+  // cannot be produced for this deployment. Demo deliberately has no R2
+  // signing secret; its private R2 binding is streamed after entitlement is
+  // checked instead of exposing an object key or failing the free offer.
+  const streamFromBinding = shouldStreamOriginalDownload(c.env.APP_ENV, mediaSource.source, signedUrl);
+  if (mediaSource.source === "primary" && !signedUrl && !streamFromBinding) return c.json({ error: "Original download signing is unavailable" }, 503);
 
   if (!elevated && String(row.owner_id) !== user.id && !Number(row.paid_entitlement) && !Number(row.subscription_entitlement) && !platformSubscription && !existingFree && freeEligible && c.req.method === "GET") {
     const claimId = crypto.randomUUID();
@@ -3800,7 +3807,7 @@ app.on(["GET", "HEAD"], "/api/assets/:id/original", async (c) => {
       .bind(crypto.randomUUID(), user.organizationId, row.id, user.id, entitlementType, originalKey).run();
   }
   recordMetric(c.env, "asset_download", c.get("trace"), 1, [user.organizationId, String(row.id), entitlementType]);
-  if (mediaSource.source === "library") {
+  if (streamFromBinding) {
     if (c.req.method === "HEAD") {
       const headers = new Headers();
       mediaSource.object.writeHttpMetadata(headers);
@@ -3810,7 +3817,8 @@ app.on(["GET", "HEAD"], "/api/assets/:id/original", async (c) => {
       headers.set("Cache-Control", "private, no-store");
       return new Response(null, { status: 200, headers });
     }
-    const fallback = await c.env.MEDIA_LIBRARY_BUCKET?.get(originalKey, c.req.header("Range") ? { range: c.req.raw.headers } : undefined);
+    const bucket = mediaSource.source === "library" ? c.env.MEDIA_LIBRARY_BUCKET : c.env.MEDIA_BUCKET;
+    const fallback = await bucket?.get(originalKey, c.req.header("Range") ? { range: c.req.raw.headers } : undefined);
     if (!fallback) return c.json({ error: "Original media is unavailable" }, 404);
     const response = createMediaResponse(c.req.raw, fallback, originalContentType(row));
     response.headers.set("Content-Disposition", `attachment; filename="${filename}"`);
