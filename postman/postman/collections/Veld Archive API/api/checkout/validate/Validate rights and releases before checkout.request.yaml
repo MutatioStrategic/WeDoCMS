@@ -1,0 +1,18 @@
+$kind: http-request
+url: "{{baseUrl}}/api/checkout/validate"
+method: POST
+headers:
+  Content-Type: application/json
+  Accept: application/json
+body:
+  type: json
+  content: |-
+    {
+      "assetId": "string",
+      "licenceType": "social",
+      "territory": "string",
+      "durationDays": 1050
+    }
+settings: {}
+examples: ./.resources/Validate rights and releases before checkout.resources/examples
+order: 1000

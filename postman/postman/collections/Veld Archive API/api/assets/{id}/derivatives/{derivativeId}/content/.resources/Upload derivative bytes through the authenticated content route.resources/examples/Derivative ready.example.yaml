@@ -1,0 +1,43 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/assets/:id/derivatives/:derivativeId/content"
+  method: PUT
+  headers:
+    - key: Content-Type
+      value: application/octet-stream
+    - key: Accept
+      value: application/json
+    - key: va_session
+      value: <API Key>
+      description: "Added as a part of security scheme: apikey"
+  pathVariables:
+    id: string
+    derivativeId: string
+  body:
+    type: file
+    content: {}
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "id": "string",
+        "assetId": "string",
+        "editVersionId": "string",
+        "licenceId": "string",
+        "variant": "linkedin",
+        "status": "failed",
+        "contentType": "string",
+        "sizeBytes": 9597,
+        "contentUrl": "/",
+        "createdAt": "1991-12-19T06:58:51.724Z",
+        "campaignId": "string",
+        "width": 4388,
+        "height": 4387,
+        "auditEventId": "string"
+      }
+order: 1000

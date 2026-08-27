@@ -1,0 +1,145 @@
+$kind: http-example
+name: Public trends plus tenant-scoped saved searches and recommendations when authenticated
+request:
+  url: "{{baseUrl}}/api/discovery"
+  method: GET
+  headers:
+    Accept: application/json
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "trending": [
+          {
+            "query": "string",
+            "searchCount": 5873
+          },
+          {
+            "query": "string",
+            "searchCount": 459
+          }
+        ],
+        "savedSearches": [
+          {
+            "id": "string",
+            "name": "st",
+            "query": "string",
+            "mediaKind": "all",
+            "alertFrequency": "none",
+            "createdAt": "1972-12-15T09:03:13.199Z",
+            "updatedAt": "1988-10-13T23:57:04.463Z"
+          },
+          {
+            "id": "string",
+            "name": "string",
+            "query": "string",
+            "mediaKind": "all",
+            "alertFrequency": "none",
+            "createdAt": "2010-01-25T12:35:37.811Z",
+            "updatedAt": "2001-12-06T12:45:19.457Z"
+          }
+        ],
+        "recommendations": [
+          {
+            "asset": {
+              "id": "string",
+              "kind": "video",
+              "status": "needs_review",
+              "title": "string",
+              "description": "string",
+              "caption": "string",
+              "country": "string",
+              "province": "string",
+              "city": "string",
+              "locality": "string",
+              "landmark": "string",
+              "subjectTags": [
+                "string",
+                "string"
+              ],
+              "culturalTags": [
+                "string",
+                "string"
+              ],
+              "rightsStatus": "editorial_only",
+              "modelReleaseStatus": "verified",
+              "propertyReleaseStatus": "verified",
+              "authenticityConfidence": 0.2764508405319378,
+              "humanVerified": false,
+              "contributor": "string",
+              "workflowStage": "ingestion",
+              "aiTags": [
+                "string",
+                "string"
+              ],
+              "curatorNotes": "string",
+              "aiConfidence": 0.9325430082127194,
+              "metadataReviewStatus": "reviewed",
+              "metadataReviewNote": "string",
+              "metadataProvenance": "contributor",
+              "sourceFileName": "string",
+              "sourceUrl": "string",
+              "sourceLicense": "string",
+              "sourceAttribution": "string",
+              "monetizationModel": "individual_license",
+              "licensePriceCents": 6994,
+              "freeDownloadEnabled": false
+            },
+            "reason": "string"
+          },
+          {
+            "asset": {
+              "id": "string",
+              "kind": "image",
+              "status": "published",
+              "title": "string",
+              "description": "string",
+              "caption": "string",
+              "country": "string",
+              "province": "string",
+              "city": "string",
+              "locality": "string",
+              "landmark": "string",
+              "subjectTags": [
+                "string",
+                "string"
+              ],
+              "culturalTags": [
+                "string",
+                "string"
+              ],
+              "rightsStatus": "pending",
+              "modelReleaseStatus": "pending",
+              "propertyReleaseStatus": "pending",
+              "authenticityConfidence": 0.3685218720352571,
+              "humanVerified": false,
+              "contributor": "string",
+              "workflowStage": "approval",
+              "aiTags": [
+                "string",
+                "string"
+              ],
+              "curatorNotes": "string",
+              "aiConfidence": 0.627625913647477,
+              "metadataReviewStatus": "needs_context",
+              "metadataReviewNote": "string",
+              "metadataProvenance": "ai_suggested",
+              "sourceFileName": "string",
+              "sourceUrl": "string",
+              "sourceLicense": "string",
+              "sourceAttribution": "string",
+              "monetizationModel": "membership",
+              "licensePriceCents": 9967,
+              "freeDownloadEnabled": false
+            },
+            "reason": "string"
+          }
+        ],
+        "personalized": true
+      }
+order: 1000

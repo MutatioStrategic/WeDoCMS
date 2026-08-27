@@ -1,0 +1,27 @@
+$kind: http-request
+name: Verify and persist a timestamped Cloudflare Stream status callback
+url: "{{baseUrl}}/api/webhooks/stream"
+method: POST
+headers:
+  Webhook-Signature: string
+  Content-Type: application/json
+  Accept: application/json
+body:
+  type: json
+  content: |-
+    {
+      "uid": "string",
+      "state": "string",
+      "readyToStream": true,
+      "pctComplete": "string",
+      "status": "string",
+      "errorReasonCode": "string",
+      "errorReasonText": "string",
+      "key_0": false,
+      "key_1": true,
+      "key_2": 1981.026702678993,
+      "key_3": "string"
+    }
+settings: {}
+examples: ./.resources/Verify and persist a timestamped Cloudflare Stream status callba.resources/examples
+order: 1000

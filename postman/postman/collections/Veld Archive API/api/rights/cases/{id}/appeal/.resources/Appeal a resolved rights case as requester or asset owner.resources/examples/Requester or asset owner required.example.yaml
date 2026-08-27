@@ -1,0 +1,57 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/rights/cases/:id/appeal"
+  method: POST
+  headers:
+    - key: Content-Type
+      value: application/json
+    - key: Accept
+      value: application/json
+    - key: va_session
+      value: <API Key>
+      description: "Added as a part of security scheme: apikey"
+  pathVariables:
+    id: string
+  body:
+    type: json
+    content: |-
+      {
+        "summary": "stringstring",
+        "resolutionSummary": "stringstring",
+        "evidenceReferences": [
+          "string",
+          "string"
+        ]
+      }
+response:
+  statusCode: 403
+  statusText: Forbidden
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "error": "string",
+        "code": "string",
+        "retryAfter": 4141,
+        "quotaBytes": 2089,
+        "uploadId": "string",
+        "issues": [
+          {
+            "path": [
+              "",
+              ""
+            ],
+            "code": "string"
+          },
+          {
+            "path": [
+              "",
+              ""
+            ],
+            "code": "string"
+          }
+        ]
+      }
+order: 2000

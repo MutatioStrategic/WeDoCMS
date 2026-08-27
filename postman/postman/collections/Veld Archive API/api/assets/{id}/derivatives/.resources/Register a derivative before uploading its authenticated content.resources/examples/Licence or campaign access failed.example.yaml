@@ -1,0 +1,59 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/assets/:id/derivatives"
+  method: POST
+  headers:
+    - key: Content-Type
+      value: application/json
+    - key: Accept
+      value: application/json
+    - key: va_session
+      value: <API Key>
+      description: "Added as a part of security scheme: apikey"
+  pathVariables:
+    id: string
+  body:
+    type: json
+    content: |-
+      {
+        "editVersionId": "string",
+        "campaignId": "string",
+        "licenceId": "string",
+        "variant": "landscape",
+        "contentType": "string",
+        "sizeBytes": 1275739,
+        "width": 5786,
+        "height": 9870
+      }
+response:
+  statusCode: 403
+  statusText: Forbidden
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "error": "string",
+        "code": "string",
+        "retryAfter": 4141,
+        "quotaBytes": 2089,
+        "uploadId": "string",
+        "issues": [
+          {
+            "path": [
+              "",
+              ""
+            ],
+            "code": "string"
+          },
+          {
+            "path": [
+              "",
+              ""
+            ],
+            "code": "string"
+          }
+        ]
+      }
+order: 2000

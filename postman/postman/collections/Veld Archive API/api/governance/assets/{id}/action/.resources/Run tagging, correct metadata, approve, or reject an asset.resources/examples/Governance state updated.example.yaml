@@ -1,0 +1,57 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/governance/assets/:id/action"
+  method: POST
+  headers:
+    - key: Content-Type
+      value: application/json
+    - key: Accept
+      value: application/json
+    - key: va_session
+      value: <API Key>
+      description: "Added as a part of security scheme: apikey"
+  pathVariables:
+    id: string
+  body:
+    type: json
+    content: |-
+      {
+        "action": "run_ai_tagging",
+        "title": "string",
+        "caption": "string",
+        "subjectTags": [
+          "string",
+          "str"
+        ],
+        "culturalTags": [
+          "string",
+          "string"
+        ],
+        "curatorNotes": "string",
+        "rightsStatus": "editorial_only",
+        "modelReleaseStatus": "not_required",
+        "propertyReleaseStatus": "not_required",
+        "aiTags": [
+          "string",
+          "string"
+        ],
+        "monetizationModel": "membership",
+        "licensePriceCents": 10487052,
+        "freeDownloadEnabled": false
+      }
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "ok": true,
+        "assetId": "string",
+        "stage": "curator_correction",
+        "status": "needs_review",
+        "indexing": "string"
+      }
+order: 1000

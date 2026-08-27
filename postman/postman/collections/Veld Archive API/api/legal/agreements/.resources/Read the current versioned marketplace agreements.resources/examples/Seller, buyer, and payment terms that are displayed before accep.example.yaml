@@ -1,0 +1,74 @@
+$kind: http-example
+name: Seller, buyer, and payment terms that are displayed before acceptance
+request:
+  url: "{{baseUrl}}/api/legal/agreements"
+  method: GET
+  headers:
+    Accept: application/json
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "documents": [
+          {
+            "type": "seller",
+            "version": "string",
+            "title": "string",
+            "audience": "both",
+            "effectiveDate": "1968-02-18",
+            "draft": false,
+            "sections": [
+              {
+                "heading": "string",
+                "body": "string"
+              },
+              {
+                "heading": "string",
+                "body": "string"
+              }
+            ]
+          },
+          {
+            "type": "payment",
+            "version": "string",
+            "title": "string",
+            "audience": "seller",
+            "effectiveDate": "1970-10-14",
+            "draft": true,
+            "sections": [
+              {
+                "heading": "string",
+                "body": "string"
+              },
+              {
+                "heading": "string",
+                "body": "string"
+              }
+            ]
+          },
+          {
+            "type": "seller",
+            "version": "string",
+            "title": "string",
+            "audience": "seller",
+            "effectiveDate": "1985-08-15",
+            "draft": true,
+            "sections": [
+              {
+                "heading": "string",
+                "body": "string"
+              },
+              {
+                "heading": "string",
+                "body": "string"
+              }
+            ]
+          }
+        ]
+      }
+order: 1000

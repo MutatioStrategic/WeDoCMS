@@ -1,0 +1,17 @@
+$kind: http-request
+name: Get a residency- and organization-scoped verification case without private object keys
+url: "{{baseUrl}}/api/verification/cases/:caseId"
+method: GET
+headers:
+  Accept: application/json
+pathVariables:
+  caseId: string
+auth:
+  type: apikey
+  credentials:
+    key: va_session
+    value: "{{apiKey}}"
+    in: header
+settings: {}
+examples: ./.resources/Get a residency- and organization-scoped verification case witho.resources/examples
+order: 2000

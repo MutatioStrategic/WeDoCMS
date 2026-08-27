@@ -1,0 +1,14 @@
+$kind: http-request
+url: "{{baseUrl}}/api/lightboxes/:id/members"
+method: POST
+pathVariables:
+  id: string
+auth:
+  type: apikey
+  credentials:
+    key: va_session
+    value: "{{apiKey}}"
+    in: header
+settings: {}
+examples: ./.resources/Add an organization member as viewer or editor.resources/examples
+order: 1000

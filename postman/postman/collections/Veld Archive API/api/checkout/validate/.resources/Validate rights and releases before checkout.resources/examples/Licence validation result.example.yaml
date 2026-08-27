@@ -1,0 +1,48 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/checkout/validate"
+  method: POST
+  headers:
+    Content-Type: application/json
+    Accept: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "assetId": "string",
+        "licenceType": "social",
+        "territory": "string",
+        "durationDays": 1050
+      }
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "assetId": "string",
+        "priceCents": 448,
+        "currency": "ZAR",
+        "monetizationModel": "individual_license",
+        "allowed": true,
+        "checks": [
+          {
+            "label": "string",
+            "passed": false,
+            "detail": "string"
+          },
+          {
+            "label": "string",
+            "passed": false,
+            "detail": "string"
+          }
+        ],
+        "blockingReasons": [
+          "string",
+          "string"
+        ]
+      }
+order: 1000

@@ -1,0 +1,25 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/subscription/session"
+  method: POST
+  headers:
+    - key: Content-Type
+      value: application/json
+    - key: va_session
+      value: <API Key>
+      description: "Added as a part of security scheme: apikey"
+  body:
+    type: json
+    content: |-
+      {
+        "successUrl": "http://GHbdVrLl.zhiafSncENR33Dj4JFTgWmFlHwBD2ItMGsSL7,FNck7SmnF5J5zaeo2OGXb1IN",
+        "cancelUrl": "http://wh.oadxUZkc9.5-wQVWlygVEwdGJAWi0W8mss9IJ",
+        "plan": "monthly"
+      }
+response:
+  statusCode: 201
+  statusText: Created
+  body:
+    type: text
+    content: ""
+order: 1000

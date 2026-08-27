@@ -1,0 +1,45 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/auth/exchange"
+  method: POST
+  headers:
+    - key: Content-Type
+      value: application/json
+    - key: Accept
+      value: application/json
+    - key: Authorization
+      value: Bearer <token>
+      description: "Added as a part of security scheme: bearer"
+  body:
+    type: json
+    content: |-
+      {
+        "organizationId": "string",
+        "sessionTransport": "cookie",
+        "accountIntent": "seller"
+      }
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "authenticated": true,
+        "user": {
+          "id": "string",
+          "email": "Wh-4PwCZzTx@mWPwPevHSmWajHEkGsnJpHvRIJFxSO.ynho",
+          "displayName": "string",
+          "role": "string",
+          "onboardingStatus": "string",
+          "organizationId": "string",
+          "organizationName": "string",
+          "residencyRegion": "eu",
+          "sessionId": "string",
+          "csrfToken": "string"
+        },
+        "csrfToken": "string"
+      }
+order: 1000

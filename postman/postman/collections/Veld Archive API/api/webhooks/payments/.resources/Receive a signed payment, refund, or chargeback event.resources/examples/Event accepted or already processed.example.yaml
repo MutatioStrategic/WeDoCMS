@@ -1,0 +1,24 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/webhooks/payments"
+  method: POST
+  headers:
+    - key: x-payment-signature
+      value: string
+    - key: x-paystack-signature
+      value: stringstringstringstringstringstringstringstringstringstringstringstringstringstringstringstringstringstringstringstringstringst
+      description: Paystack HMAC-SHA512 signature over the raw JSON body
+    - key: Accept
+      value: application/json
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "key_0": 9596.71750391794
+      }
+order: 1000

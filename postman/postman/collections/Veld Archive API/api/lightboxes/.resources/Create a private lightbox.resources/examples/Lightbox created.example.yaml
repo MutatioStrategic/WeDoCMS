@@ -1,0 +1,42 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/lightboxes"
+  method: POST
+  headers:
+    - key: Content-Type
+      value: application/json
+    - key: Accept
+      value: application/json
+    - key: va_session
+      value: <API Key>
+      description: "Added as a part of security scheme: apikey"
+  body:
+    type: json
+    content: |-
+      {
+        "name": "string",
+        "description": "string",
+        "visibility": "private"
+      }
+response:
+  statusCode: 201
+  statusText: Created
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "id": "string",
+        "name": "string",
+        "description": "string",
+        "visibility": "private",
+        "assetIds": [
+          "string",
+          "string"
+        ],
+        "assetCount": 3930,
+        "createdAt": "string",
+        "updatedAt": "string"
+      }
+order: 1000

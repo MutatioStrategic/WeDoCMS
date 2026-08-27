@@ -1,0 +1,14 @@
+# Use this workspace to collaborate
+workspace:
+  id: 297dee21-1ae8-4668-84de-7ae8479be0b3
+
+localResources:
+  collections:
+    - ../veld-archive-route-sweep.postman_collection.json
+  environments:
+    - ../postman/environments/demo.environment.yaml
+    - ../postman/environments/prod.environment.yaml
+
+cloudResources:
+  collections:
+    ../postman/collections/Veld Archive API: 6bbfa602-8bd0-4e69-ae90-b8bf831300c9

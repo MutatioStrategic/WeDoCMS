@@ -1,0 +1,44 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/webhooks/payments"
+  method: POST
+  headers:
+    - key: x-payment-signature
+      value: string
+    - key: x-paystack-signature
+      value: stringstringstringstringstringstringstringstringstringstringstringstringstringstringstringstringstringstringstringstringstringst
+      description: Paystack HMAC-SHA512 signature over the raw JSON body
+    - key: Accept
+      value: application/json
+response:
+  statusCode: 401
+  statusText: Unauthorized
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "error": "string",
+        "code": "string",
+        "retryAfter": 4141,
+        "quotaBytes": 2089,
+        "uploadId": "string",
+        "issues": [
+          {
+            "path": [
+              "",
+              ""
+            ],
+            "code": "string"
+          },
+          {
+            "path": [
+              "",
+              ""
+            ],
+            "code": "string"
+          }
+        ]
+      }
+order: 2000

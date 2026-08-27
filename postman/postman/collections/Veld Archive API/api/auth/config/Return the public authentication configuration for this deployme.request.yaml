@@ -1,0 +1,9 @@
+$kind: http-request
+name: Return the public authentication configuration for this deployment
+url: "{{baseUrl}}/api/auth/config"
+method: GET
+headers:
+  Accept: application/json
+settings: {}
+examples: ./.resources/Return the public authentication configuration for this deployme.resources/examples
+order: 1000

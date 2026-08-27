@@ -1,0 +1,22 @@
+$kind: http-example
+name: Supabase, demo, or intentionally unavailable authentication configuration
+request:
+  url: "{{baseUrl}}/api/auth/config"
+  method: GET
+  headers:
+    Accept: application/json
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "provider": "supabase",
+        "supabaseUrl": "http://DnsnpvieFf.otheydUcATshQct74LKYuOP-Bt",
+        "publishableKey": "string",
+        "redirectUrl": "http://BmdcRdxZlySVIvPJtgtS.hbyx29WQzIxnuX"
+      }
+order: 1000

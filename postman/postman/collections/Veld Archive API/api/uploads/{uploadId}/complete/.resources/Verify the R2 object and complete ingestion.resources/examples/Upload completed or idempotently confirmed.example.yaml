@@ -1,0 +1,35 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/uploads/:uploadId/complete"
+  method: POST
+  headers:
+    - key: Content-Type
+      value: application/json
+    - key: Accept
+      value: application/json
+    - key: va_session
+      value: <API Key>
+      description: "Added as a part of security scheme: apikey"
+  pathVariables:
+    uploadId: string
+  body:
+    type: json
+    content: "{}"
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "uploadId": "string",
+        "status": "uploaded",
+        "assetId": "string",
+        "objectKey": "string",
+        "idempotent": true,
+        "enrichment": "string",
+        "etag": "string"
+      }
+order: 1000

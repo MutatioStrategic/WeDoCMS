@@ -1,0 +1,35 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/verification/documents/:documentId/ocr"
+  method: POST
+  headers:
+    - key: Accept
+      value: application/json
+    - key: va_session
+      value: <API Key>
+      description: "Added as a part of security scheme: apikey"
+  pathVariables:
+    documentId: string
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "resultId": "string",
+        "documentId": "string",
+        "model": "string",
+        "extracted": {
+          "key_0": 3775
+        },
+        "validation": {
+          "key_0": 4034.027987612482,
+          "key_1": true,
+          "key_2": 7908.655547223954,
+          "key_3": "string"
+        }
+      }
+order: 1000

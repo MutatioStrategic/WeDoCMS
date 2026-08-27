@@ -1,0 +1,27 @@
+$kind: http-request
+name: Register KYC document metadata before authenticated content upload
+url: "{{baseUrl}}/api/verification/cases/:caseId/documents"
+method: POST
+headers:
+  Content-Type: application/json
+  Accept: application/json
+pathVariables:
+  caseId: string
+body:
+  type: json
+  content: |-
+    {
+      "documentType": "business_registration",
+      "contentSha256": "9ad3cc35e220dee1661df8737831f0c94d449d9d408b1f15786f05b6ef6e4076",
+      "issuedCountry": "st",
+      "expiresAt": "1990-06-29T14:21:52.176Z"
+    }
+auth:
+  type: apikey
+  credentials:
+    key: va_session
+    value: "{{apiKey}}"
+    in: header
+settings: {}
+examples: ./.resources/Register KYC document metadata before authenticated content uplo.resources/examples
+order: 1000

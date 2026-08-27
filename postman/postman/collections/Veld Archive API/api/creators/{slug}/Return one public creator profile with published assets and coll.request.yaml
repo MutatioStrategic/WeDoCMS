@@ -1,0 +1,9 @@
+$kind: http-request
+name: Return one public creator profile with published assets and collections
+url: "{{baseUrl}}/api/creators/:slug"
+method: GET
+pathVariables:
+  slug: u-o
+settings: {}
+examples: ./.resources/Return one public creator profile with published assets and coll.resources/examples
+order: 1000

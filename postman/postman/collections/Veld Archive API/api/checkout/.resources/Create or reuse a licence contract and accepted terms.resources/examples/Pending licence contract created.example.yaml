@@ -1,0 +1,44 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/checkout"
+  method: POST
+  headers:
+    - key: Content-Type
+      value: application/json
+    - key: Accept
+      value: application/json
+    - key: va_session
+      value: <API Key>
+      description: "Added as a part of security scheme: apikey"
+  body:
+    type: json
+    content: |-
+      {
+        "assetId": "string",
+        "licenceType": "editorial",
+        "territory": "strin",
+        "durationDays": 519,
+        "buyerAgreementVersion": "buyer-marketplace-v1",
+        "paymentAgreementVersion": "payment-split-v1",
+        "acceptBuyerTerms": true
+      }
+response:
+  statusCode: 201
+  statusText: Created
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "licenceId": "string",
+        "priceCents": 7528,
+        "currency": "ZAR",
+        "paymentRequired": true,
+        "purchaseStatus": "not_charged_until_verified_checkout",
+        "licenceType": "broadcast",
+        "existing": true,
+        "agreementsPersisted": true,
+        "approvalStatus": "auto_approved"
+      }
+order: 2000

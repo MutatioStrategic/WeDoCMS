@@ -1,0 +1,41 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/saved-searches/:id"
+  method: PATCH
+  headers:
+    - key: Content-Type
+      value: application/json
+    - key: Accept
+      value: application/json
+    - key: va_session
+      value: <API Key>
+      description: "Added as a part of security scheme: apikey"
+  pathVariables:
+    id: string
+  body:
+    type: json
+    content: |-
+      {
+        "name": "string",
+        "query": "string",
+        "mediaKind": "all",
+        "alertFrequency": "none"
+      }
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "id": "string",
+        "name": "string",
+        "query": "string",
+        "mediaKind": "all",
+        "alertFrequency": "none",
+        "createdAt": "2022-04-04T12:07:29.325Z",
+        "updatedAt": "1978-08-21T23:34:44.204Z"
+      }
+order: 1000

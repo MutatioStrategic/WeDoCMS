@@ -1,0 +1,38 @@
+name: Production Postman smoke
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-postman-smoke
+  cancel-in-progress: true
+
+jobs:
+  route-sweep:
+    name: Read-only production route sweep
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      POSTMAN_BASE_URL: https://veld-archive-api-production.blewisorlando.workers.dev
+      POSTMAN_DESKTOP_URL: https://veld-archive.pages.dev
+      POSTMAN_RUN_DEMO_AUTH: "false"
+      POSTMAN_RUN_WRITES: "false"
+      POSTMAN_RUN_EXTERNAL_WRITES: "false"
+      POSTMAN_SKIP_SUPABASE: "true"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - name: Run production route sweep
+        run: npm run test:postman

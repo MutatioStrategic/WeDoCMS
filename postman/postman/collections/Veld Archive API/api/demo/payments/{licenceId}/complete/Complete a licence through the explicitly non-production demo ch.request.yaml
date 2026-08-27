@@ -1,0 +1,18 @@
+$kind: http-request
+name: Complete a licence through the explicitly non-production demo checkout
+description: Demo-only server-side payment simulation. Production payment state is established by a verified provider webhook.
+url: "{{baseUrl}}/api/demo/payments/:licenceId/complete"
+method: GET
+headers:
+  Accept: application/json
+pathVariables:
+  licenceId: string
+auth:
+  type: apikey
+  credentials:
+    key: va_session
+    value: "{{apiKey}}"
+    in: header
+settings: {}
+examples: ./.resources/Complete a licence through the explicitly non-production demo ch.resources/examples
+order: 1000

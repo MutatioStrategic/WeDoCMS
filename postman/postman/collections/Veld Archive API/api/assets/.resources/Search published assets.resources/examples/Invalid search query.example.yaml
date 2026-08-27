@@ -1,0 +1,50 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/assets?q=&kind=all&location=string&status=published&sort=relevance&orientation=all&usage=all&people=all&ai=all&exclude=string&cursor=\\dddd"
+  method: GET
+  headers:
+    Accept: application/json
+  queryParams:
+    q: ""
+    kind: all
+    location: string
+    status: published
+    sort: relevance
+    orientation: all
+    usage: all
+    people: all
+    ai: all
+    exclude: string
+    cursor: \dddd
+response:
+  statusCode: 400
+  statusText: Bad Request
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "error": "string",
+        "code": "string",
+        "retryAfter": 4141,
+        "quotaBytes": 2089,
+        "uploadId": "string",
+        "issues": [
+          {
+            "path": [
+              "",
+              ""
+            ],
+            "code": "string"
+          },
+          {
+            "path": [
+              "",
+              ""
+            ],
+            "code": "string"
+          }
+        ]
+      }
+order: 2000

@@ -1,0 +1,41 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/webhooks/stream"
+  method: POST
+  headers:
+    Webhook-Signature: string
+    Content-Type: application/json
+    Accept: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "uid": "string",
+        "state": "string",
+        "readyToStream": true,
+        "pctComplete": "string",
+        "status": "string",
+        "errorReasonCode": "string",
+        "errorReasonText": "string",
+        "key_0": false,
+        "key_1": true,
+        "key_2": 1981.026702678993,
+        "key_3": "string"
+      }
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "accepted": false,
+        "streamUid": "string",
+        "state": "string",
+        "progress": 0,
+        "status": "uploading",
+        "duplicate": true
+      }
+order: 1000

@@ -1,0 +1,15 @@
+$kind: http-request
+name: Find visually related published photography from an uploaded image
+url: "{{baseUrl}}/api/search/visual"
+method: POST
+headers:
+  Content-Type: multipart/form-data
+body:
+  type: formdata
+  content:
+    - type: file
+      key: image
+      src: []
+settings: {}
+examples: ./.resources/Find visually related published photography from an uploaded ima.resources/examples
+order: 1000

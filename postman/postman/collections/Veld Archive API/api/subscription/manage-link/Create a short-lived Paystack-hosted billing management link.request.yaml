@@ -1,0 +1,12 @@
+$kind: http-request
+url: "{{baseUrl}}/api/subscription/manage-link"
+method: POST
+auth:
+  type: apikey
+  credentials:
+    key: va_session
+    value: "{{apiKey}}"
+    in: header
+settings: {}
+examples: ./.resources/Create a short-lived Paystack-hosted billing management link.resources/examples
+order: 1000

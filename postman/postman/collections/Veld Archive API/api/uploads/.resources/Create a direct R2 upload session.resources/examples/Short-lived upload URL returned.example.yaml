@@ -1,0 +1,38 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/uploads"
+  method: POST
+  headers:
+    - key: Content-Type
+      value: application/json
+    - key: Accept
+      value: application/json
+    - key: va_session
+      value: <API Key>
+      description: "Added as a part of security scheme: apikey"
+  body:
+    type: json
+    content: |-
+      {
+        "filename": "string",
+        "contentType": "image/",
+        "sizeBytes": 9913658104,
+        "assetId": "string"
+      }
+response:
+  statusCode: 201
+  statusText: Created
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "uploadId": "string",
+        "objectKey": "string",
+        "strategy": "r2-presigned-put",
+        "uploadUrl": "https://t.lyffGgWAjqFjclcel",
+        "expiresInSeconds": 9723,
+        "message": "string"
+      }
+order: 1000

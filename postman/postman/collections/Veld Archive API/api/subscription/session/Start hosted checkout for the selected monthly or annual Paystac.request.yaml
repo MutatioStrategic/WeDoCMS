@@ -1,0 +1,23 @@
+$kind: http-request
+name: Start hosted checkout for the selected monthly or annual Paystack recurring plan
+url: "{{baseUrl}}/api/subscription/session"
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "successUrl": "http://GHbdVrLl.zhiafSncENR33Dj4JFTgWmFlHwBD2ItMGsSL7,FNck7SmnF5J5zaeo2OGXb1IN",
+      "cancelUrl": "http://wh.oadxUZkc9.5-wQVWlygVEwdGJAWi0W8mss9IJ",
+      "plan": "monthly"
+    }
+auth:
+  type: apikey
+  credentials:
+    key: va_session
+    value: "{{apiKey}}"
+    in: header
+settings: {}
+examples: ./.resources/Start hosted checkout for the selected monthly or annual Paystac.resources/examples
+order: 1000

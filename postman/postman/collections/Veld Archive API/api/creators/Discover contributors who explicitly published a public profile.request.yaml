@@ -1,0 +1,10 @@
+$kind: http-request
+url: "{{baseUrl}}/api/creators?q=string"
+method: GET
+headers:
+  Accept: application/json
+queryParams:
+  q: string
+settings: {}
+examples: ./.resources/Discover contributors who explicitly published a public profile.resources/examples
+order: 2000

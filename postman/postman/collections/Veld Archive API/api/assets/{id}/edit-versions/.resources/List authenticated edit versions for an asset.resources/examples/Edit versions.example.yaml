@@ -1,0 +1,49 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/assets/:id/edit-versions"
+  method: GET
+  headers:
+    - key: Accept
+      value: application/json
+    - key: va_session
+      value: <API Key>
+      description: "Added as a part of security scheme: apikey"
+  pathVariables:
+    id: string
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "assetId": "string",
+        "results": [
+          {
+            "id": "string",
+            "assetId": "string",
+            "versionNumber": 3692,
+            "recipe": {
+              "key_0": false,
+              "key_1": 8739
+            },
+            "note": "string",
+            "createdAt": "2006-04-06T04:59:44.732Z",
+            "auditEventId": "string"
+          },
+          {
+            "id": "string",
+            "assetId": "string",
+            "versionNumber": 8785,
+            "recipe": {
+              "key_0": "string"
+            },
+            "note": "string",
+            "createdAt": "1981-07-26T20:50:38.538Z",
+            "auditEventId": "string"
+          }
+        ]
+      }
+order: 1000

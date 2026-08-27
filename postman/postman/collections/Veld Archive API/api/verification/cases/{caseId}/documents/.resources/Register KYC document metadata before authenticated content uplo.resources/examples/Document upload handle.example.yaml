@@ -1,0 +1,37 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/verification/cases/:caseId/documents"
+  method: POST
+  headers:
+    - key: Content-Type
+      value: application/json
+    - key: Accept
+      value: application/json
+    - key: va_session
+      value: <API Key>
+      description: "Added as a part of security scheme: apikey"
+  pathVariables:
+    caseId: string
+  body:
+    type: json
+    content: |-
+      {
+        "documentType": "business_registration",
+        "contentSha256": "9ad3cc35e220dee1661df8737831f0c94d449d9d408b1f15786f05b6ef6e4076",
+        "issuedCountry": "st",
+        "expiresAt": "1990-06-29T14:21:52.176Z"
+      }
+response:
+  statusCode: 201
+  statusText: Created
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "documentId": "string",
+        "upload": "string",
+        "retentionUntil": "1974-12-02T14:26:28.241Z"
+      }
+order: 1000

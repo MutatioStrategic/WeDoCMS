@@ -1,0 +1,27 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/assets/:id/stream-playback"
+  method: GET
+  headers:
+    - key: Accept
+      value: application/json
+    - key: va_session
+      value: <API Key>
+      description: "Added as a part of security scheme: apikey"
+  pathVariables:
+    id: string
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "assetId": "string",
+        "streamUid": "string",
+        "iframeUrl": "http://CUuJKbzIhdfXpuftzopUNb.ret6D6StwWNb1TXVTXL+TNK3GRUd33r83o3symwmja+UsXQNQ1yA",
+        "expiresInSeconds": 4999
+      }
+order: 1000

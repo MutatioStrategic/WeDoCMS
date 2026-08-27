@@ -1,0 +1,13 @@
+$kind: http-request
+name: Verify the saved company registration through the configured CIPC adapter
+url: "{{baseUrl}}/api/onboarding/cipc/lookup"
+method: POST
+auth:
+  type: apikey
+  credentials:
+    key: va_session
+    value: "{{apiKey}}"
+    in: header
+settings: {}
+examples: ./.resources/Verify the saved company registration through the configured CIP.resources/examples
+order: 1000

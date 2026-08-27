@@ -1,0 +1,25 @@
+$kind: http-request
+name: Create a hosted payment-provider checkout session for a pending licence
+url: "{{baseUrl}}/api/payments/:licenceId/session"
+method: POST
+headers:
+  Content-Type: application/json
+  Accept: application/json
+pathVariables:
+  licenceId: string
+body:
+  type: json
+  content: |-
+    {
+      "successUrl": "https://bZaeAEBr.yrkhrzoX2KQ+KGRQmXbcRvmUVzjoRnnFpKJkoRKbkNyddEr791RHSNI8CWaE,K+kh5szzRf11+mTdM",
+      "cancelUrl": "http://hEeDJJlcnnFDdhlnbMtYpPgq.owVln1UnO-vyz8wU2q"
+    }
+auth:
+  type: apikey
+  credentials:
+    key: va_session
+    value: "{{apiKey}}"
+    in: header
+settings: {}
+examples: ./.resources/Create a hosted payment-provider checkout session for a pending.resources/examples
+order: 1000

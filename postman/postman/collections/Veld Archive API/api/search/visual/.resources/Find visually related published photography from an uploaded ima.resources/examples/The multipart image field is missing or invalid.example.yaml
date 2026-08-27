@@ -1,0 +1,19 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/search/visual"
+  method: POST
+  headers:
+    Content-Type: multipart/form-data
+  body:
+    type: formdata
+    content:
+      - type: file
+        key: image
+        src: []
+response:
+  statusCode: 400
+  statusText: Bad Request
+  body:
+    type: text
+    content: ""
+order: 2000

@@ -1,0 +1,8 @@
+$kind: http-request
+url: "{{baseUrl}}/api/legal/agreements"
+method: GET
+headers:
+  Accept: application/json
+settings: {}
+examples: ./.resources/Read the current versioned marketplace agreements.resources/examples
+order: 1000

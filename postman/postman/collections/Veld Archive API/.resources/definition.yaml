@@ -1,0 +1,4 @@
+$kind: collection
+description: Core API for trusted South African visual discovery, ingestion, rights, and governance.
+variables:
+  baseUrl: https://archive.example.com

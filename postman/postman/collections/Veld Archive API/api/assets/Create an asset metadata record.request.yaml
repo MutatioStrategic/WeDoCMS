@@ -1,0 +1,42 @@
+$kind: http-request
+url: "{{baseUrl}}/api/assets"
+method: POST
+headers:
+  Content-Type: application/json
+  Accept: application/json
+body:
+  type: json
+  content: |-
+    {
+      "kind": "image",
+      "title": "string",
+      "description": "",
+      "caption": "",
+      "province": "string",
+      "city": "string",
+      "locality": "string",
+      "landmark": "string",
+      "subjectTags": [
+        "string",
+        "string"
+      ],
+      "culturalTags": [
+        "string",
+        "string"
+      ],
+      "rightsStatus": "editorial_only",
+      "modelReleaseStatus": "not_required",
+      "propertyReleaseStatus": "not_required",
+      "monetizationModel": "custom_quote",
+      "licensePriceCents": 75450440,
+      "freeDownloadEnabled": false
+    }
+auth:
+  type: apikey
+  credentials:
+    key: va_session
+    value: "{{apiKey}}"
+    in: header
+settings: {}
+examples: ./.resources/Create an asset metadata record.resources/examples
+order: 3000

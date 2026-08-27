@@ -1,0 +1,27 @@
+$kind: http-request
+name: Provision a signed Cloudflare Stream direct upload for an owned video
+url: "{{baseUrl}}/api/assets/:id/stream-upload"
+method: POST
+headers:
+  Idempotency-Key: string
+  Content-Type: application/json
+  Accept: application/json
+pathVariables:
+  id: string
+body:
+  type: json
+  content: |-
+    {
+      "filename": "string",
+      "contentType": "video/",
+      "maxDurationSeconds": 3600
+    }
+auth:
+  type: apikey
+  credentials:
+    key: va_session
+    value: "{{apiKey}}"
+    in: header
+settings: {}
+examples: ./.resources/Provision a signed Cloudflare Stream direct upload for an owned.resources/examples
+order: 1000

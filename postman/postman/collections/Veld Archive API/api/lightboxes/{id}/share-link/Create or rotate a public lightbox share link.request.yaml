@@ -1,0 +1,14 @@
+$kind: http-request
+url: "{{baseUrl}}/api/lightboxes/:id/share-link"
+method: POST
+pathVariables:
+  id: string
+auth:
+  type: apikey
+  credentials:
+    key: va_session
+    value: "{{apiKey}}"
+    in: header
+settings: {}
+examples: ./.resources/Create or rotate a public lightbox share link.resources/examples
+order: 1000

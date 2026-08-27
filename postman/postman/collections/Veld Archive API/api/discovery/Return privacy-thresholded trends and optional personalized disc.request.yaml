@@ -1,0 +1,9 @@
+$kind: http-request
+name: Return privacy-thresholded trends and optional personalized discovery
+url: "{{baseUrl}}/api/discovery"
+method: GET
+headers:
+  Accept: application/json
+settings: {}
+examples: ./.resources/Return privacy-thresholded trends and optional personalized disc.resources/examples
+order: 1000

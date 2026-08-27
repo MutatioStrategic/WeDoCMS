@@ -1,0 +1,10 @@
+$kind: http-request
+url: "{{baseUrl}}/api/webhooks/didit"
+method: POST
+headers:
+  x-signature-v2: string
+  x-signature: string
+  x-timestamp: string
+settings: {}
+examples: ./.resources/Receive a signed, timestamped, deduplicated Didit decision event.resources/examples
+order: 1000

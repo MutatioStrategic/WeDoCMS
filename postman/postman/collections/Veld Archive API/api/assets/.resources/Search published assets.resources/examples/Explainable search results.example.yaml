@@ -1,0 +1,133 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/assets?q=&kind=all&location=string&status=published&sort=relevance&orientation=all&usage=all&people=all&ai=all&exclude=string&cursor=\\dddd"
+  method: GET
+  headers:
+    Accept: application/json
+  queryParams:
+    q: ""
+    kind: all
+    location: string
+    status: published
+    sort: relevance
+    orientation: all
+    usage: all
+    people: all
+    ai: all
+    exclude: string
+    cursor: \dddd
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "query": "string",
+        "mode": "keyword",
+        "results": [
+          {
+            "id": "string",
+            "kind": "image",
+            "status": "needs_review",
+            "title": "string",
+            "description": "string",
+            "caption": "string",
+            "country": "string",
+            "province": "string",
+            "city": "string",
+            "locality": "string",
+            "landmark": "string",
+            "subjectTags": [
+              "string",
+              "string"
+            ],
+            "culturalTags": [
+              "string",
+              "string"
+            ],
+            "rightsStatus": "verified",
+            "modelReleaseStatus": "unknown",
+            "propertyReleaseStatus": "verified",
+            "authenticityConfidence": 0.29049668283042596,
+            "humanVerified": false,
+            "contributor": "string",
+            "workflowStage": "ai_tagging",
+            "aiTags": [
+              "string",
+              "string"
+            ],
+            "curatorNotes": "string",
+            "aiConfidence": 0.26648484737496836,
+            "metadataReviewStatus": "blocked",
+            "metadataReviewNote": "string",
+            "metadataProvenance": "contributor",
+            "sourceFileName": "string",
+            "sourceUrl": "string",
+            "sourceLicense": "string",
+            "sourceAttribution": "string",
+            "monetizationModel": "individual_license",
+            "licensePriceCents": 7063,
+            "freeDownloadEnabled": true
+          },
+          {
+            "id": "string",
+            "kind": "image",
+            "status": "rejected",
+            "title": "string",
+            "description": "string",
+            "caption": "string",
+            "country": "string",
+            "province": "string",
+            "city": "string",
+            "locality": "string",
+            "landmark": "string",
+            "subjectTags": [
+              "string",
+              "string"
+            ],
+            "culturalTags": [
+              "string",
+              "string"
+            ],
+            "rightsStatus": "pending",
+            "modelReleaseStatus": "verified",
+            "propertyReleaseStatus": "not_required",
+            "authenticityConfidence": 0.5675186892264081,
+            "humanVerified": false,
+            "contributor": "string",
+            "workflowStage": "ingestion",
+            "aiTags": [
+              "string",
+              "string"
+            ],
+            "curatorNotes": "string",
+            "aiConfidence": 0.8209161133065142,
+            "metadataReviewStatus": "reviewed",
+            "metadataReviewNote": "string",
+            "metadataProvenance": "contributor",
+            "sourceFileName": "string",
+            "sourceUrl": "string",
+            "sourceLicense": "string",
+            "sourceAttribution": "string",
+            "monetizationModel": "membership",
+            "licensePriceCents": 1599,
+            "freeDownloadEnabled": false
+          }
+        ],
+        "facets": [
+          {
+            "label": "string",
+            "value": "string",
+            "count": 8809
+          },
+          {
+            "label": "string",
+            "value": "string",
+            "count": 1003
+          }
+        ]
+      }
+order: 1000

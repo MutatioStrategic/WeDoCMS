@@ -1,0 +1,52 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/assets/:id/derivatives"
+  method: POST
+  headers:
+    - key: Content-Type
+      value: application/json
+    - key: Accept
+      value: application/json
+    - key: va_session
+      value: <API Key>
+      description: "Added as a part of security scheme: apikey"
+  pathVariables:
+    id: string
+  body:
+    type: json
+    content: |-
+      {
+        "editVersionId": "string",
+        "campaignId": "string",
+        "licenceId": "string",
+        "variant": "landscape",
+        "contentType": "string",
+        "sizeBytes": 1275739,
+        "width": 5786,
+        "height": 9870
+      }
+response:
+  statusCode: 201
+  statusText: Created
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "id": "string",
+        "assetId": "string",
+        "editVersionId": "string",
+        "licenceId": "string",
+        "variant": "linkedin",
+        "status": "failed",
+        "contentType": "string",
+        "sizeBytes": 9597,
+        "contentUrl": "/",
+        "createdAt": "1991-12-19T06:58:51.724Z",
+        "campaignId": "string",
+        "width": 4388,
+        "height": 4387,
+        "auditEventId": "string"
+      }
+order: 1000

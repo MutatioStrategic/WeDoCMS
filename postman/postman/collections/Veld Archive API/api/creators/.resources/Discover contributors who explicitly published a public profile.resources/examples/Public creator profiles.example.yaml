@@ -1,0 +1,57 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/creators?q=string"
+  method: GET
+  headers:
+    Accept: application/json
+  queryParams:
+    q: string
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "results": [
+          {
+            "id": "string",
+            "slug": "string",
+            "name": "string",
+            "headline": "string",
+            "bio": "string",
+            "location": "string",
+            "specialties": [
+              "string",
+              "string"
+            ],
+            "assetCount": 7019,
+            "publishedImageCount": 7794,
+            "reviewCount": 8773,
+            "collectionCount": 1406,
+            "websiteUrl": "http://RdtvhwLOVUkiDB.crnlOfdXmsz3QZ2jLtbQaRGSovibsBX0c,05DXuCkenF5gwOPHTuuocTAL7C,piyfx",
+            "featuredAssetId": "string"
+          },
+          {
+            "id": "string",
+            "slug": "string",
+            "name": "string",
+            "headline": "string",
+            "bio": "string",
+            "location": "string",
+            "specialties": [
+              "string",
+              "string"
+            ],
+            "assetCount": 3699,
+            "publishedImageCount": 344,
+            "reviewCount": 5590,
+            "collectionCount": 2783,
+            "websiteUrl": "https://TyDMFLDW.xcM4knMowWm4VPkBDW9r3IObUwsW.t,zuu3oNSUifC76vMdoARwRG",
+            "featuredAssetId": "string"
+          }
+        ]
+      }
+order: 1000

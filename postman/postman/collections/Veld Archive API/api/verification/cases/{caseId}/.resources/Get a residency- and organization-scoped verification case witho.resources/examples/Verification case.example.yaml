@@ -1,0 +1,48 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/verification/cases/:caseId"
+  method: GET
+  headers:
+    - key: Accept
+      value: application/json
+    - key: va_session
+      value: <API Key>
+      description: "Added as a part of security scheme: apikey"
+  pathVariables:
+    caseId: string
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "case": {
+          "key_0": 9427
+        },
+        "documents": [
+          {
+            "id": "string",
+            "document_type": "string",
+            "content_sha256": "string",
+            "created_at": "string",
+            "issued_country": "string",
+            "expires_at": "string",
+            "uploaded_at": "string",
+            "size_bytes": 3970
+          },
+          {
+            "id": "string",
+            "document_type": "string",
+            "content_sha256": "string",
+            "created_at": "string",
+            "issued_country": "string",
+            "expires_at": "string",
+            "uploaded_at": "string",
+            "size_bytes": 3134
+          }
+        ]
+      }
+order: 1000

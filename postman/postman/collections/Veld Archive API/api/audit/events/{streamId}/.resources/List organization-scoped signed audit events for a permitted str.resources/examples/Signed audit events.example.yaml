@@ -1,0 +1,41 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/audit/events/:streamId?residencyRegion=eu&limit=358"
+  method: GET
+  headers:
+    - key: Accept
+      value: application/json
+    - key: va_session
+      value: <API Key>
+      description: "Added as a part of security scheme: apikey"
+  queryParams:
+    residencyRegion: eu
+    limit: "358"
+  pathVariables:
+    streamId: string
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "streamId": "string",
+        "residencyRegion": "eu",
+        "events": [
+          {
+            "key_0": 5051,
+            "key_1": false,
+            "key_2": 1347.9713508902535,
+            "key_3": 5350.817537556078,
+            "key_4": "string"
+          },
+          {
+            "key_0": "string",
+            "key_1": "string"
+          }
+        ]
+      }
+order: 1000

@@ -1,0 +1,20 @@
+$kind: http-request
+url: "{{baseUrl}}/api/uploads/:uploadId/complete"
+method: POST
+headers:
+  Content-Type: application/json
+  Accept: application/json
+pathVariables:
+  uploadId: string
+body:
+  type: json
+  content: "{}"
+auth:
+  type: apikey
+  credentials:
+    key: va_session
+    value: "{{apiKey}}"
+    in: header
+settings: {}
+examples: ./.resources/Verify the R2 object and complete ingestion.resources/examples
+order: 1000

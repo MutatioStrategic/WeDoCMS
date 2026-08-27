@@ -1,0 +1,25 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/buyer/credits/checkout"
+  method: POST
+  headers:
+    - key: Content-Type
+      value: application/json
+    - key: va_session
+      value: <API Key>
+      description: "Added as a part of security scheme: apikey"
+  body:
+    type: json
+    content: |-
+      {
+        "credits": 17,
+        "successUrl": "http://tKZbnyVCWwoiMcGUfxYzTrC.hsmnFWGXIL",
+        "cancelUrl": "https://CSyGn.apsHKbfP5vLJKWzjbOh+JI+,62Yb8DjfOJSEzjaTok-CySWiP1vPqnnC2"
+      }
+response:
+  statusCode: 201
+  statusText: Created
+  body:
+    type: text
+    content: ""
+order: 1000

@@ -1,0 +1,21 @@
+$kind: http-request
+url: "{{baseUrl}}/api/auth/exchange"
+method: POST
+headers:
+  Content-Type: application/json
+  Accept: application/json
+body:
+  type: json
+  content: |-
+    {
+      "organizationId": "string",
+      "sessionTransport": "cookie",
+      "accountIntent": "seller"
+    }
+auth:
+  type: bearer
+  credentials:
+    token: "{{bearerToken}}"
+settings: {}
+examples: ./.resources/Exchange a verified bearer identity token for a session cookie.resources/examples
+order: 1000

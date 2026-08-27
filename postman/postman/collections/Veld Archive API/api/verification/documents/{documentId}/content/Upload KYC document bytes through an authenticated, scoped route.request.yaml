@@ -1,0 +1,20 @@
+$kind: http-request
+url: "{{baseUrl}}/api/verification/documents/:documentId/content"
+method: PUT
+headers:
+  Content-Type: application/octet-stream
+  Accept: application/json
+pathVariables:
+  documentId: string
+body:
+  type: file
+  content: {}
+auth:
+  type: apikey
+  credentials:
+    key: va_session
+    value: "{{apiKey}}"
+    in: header
+settings: {}
+examples: ./.resources/Upload KYC document bytes through an authenticated, scoped route.resources/examples
+order: 1000

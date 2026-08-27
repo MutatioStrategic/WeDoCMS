@@ -1,0 +1,71 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/assets"
+  method: POST
+  headers:
+    - key: Content-Type
+      value: application/json
+    - key: Accept
+      value: application/json
+    - key: va_session
+      value: <API Key>
+      description: "Added as a part of security scheme: apikey"
+  body:
+    type: json
+    content: |-
+      {
+        "kind": "image",
+        "title": "string",
+        "description": "",
+        "caption": "",
+        "province": "string",
+        "city": "string",
+        "locality": "string",
+        "landmark": "string",
+        "subjectTags": [
+          "string",
+          "string"
+        ],
+        "culturalTags": [
+          "string",
+          "string"
+        ],
+        "rightsStatus": "editorial_only",
+        "modelReleaseStatus": "not_required",
+        "propertyReleaseStatus": "not_required",
+        "monetizationModel": "custom_quote",
+        "licensePriceCents": 75450440,
+        "freeDownloadEnabled": false
+      }
+response:
+  statusCode: 422
+  statusText: Unprocessable Entity (WebDAV) (RFC 4918)
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "error": "string",
+        "code": "string",
+        "retryAfter": 4141,
+        "quotaBytes": 2089,
+        "uploadId": "string",
+        "issues": [
+          {
+            "path": [
+              "",
+              ""
+            ],
+            "code": "string"
+          },
+          {
+            "path": [
+              "",
+              ""
+            ],
+            "code": "string"
+          }
+        ]
+      }
+order: 4000

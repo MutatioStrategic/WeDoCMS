@@ -1,0 +1,8 @@
+$kind: http-request
+url: "{{baseUrl}}/api/lightboxes/shared/:token"
+method: GET
+pathVariables:
+  token: string
+settings: {}
+examples: ./.resources/View a published shared lightbox without authentication.resources/examples
+order: 1000

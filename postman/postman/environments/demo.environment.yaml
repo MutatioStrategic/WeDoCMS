@@ -1,0 +1,23 @@
+name: demo (repo-safe)
+values:
+  - key: baseUrl
+    value: https://veld-archive-api-demo.blewisorlando.workers.dev
+    enabled: true
+  - key: desktopUrl
+    value: https://veld-archive.pages.dev
+    enabled: true
+  - key: demoRole
+    value: contributor
+    enabled: true
+  - key: runDemoAuth
+    value: "true"
+    enabled: true
+  - key: runWrites
+    value: "false"
+    enabled: true
+  - key: runExternalWrites
+    value: "false"
+    enabled: true
+  - key: maxResponseTimeMs
+    value: "20000"
+    enabled: true

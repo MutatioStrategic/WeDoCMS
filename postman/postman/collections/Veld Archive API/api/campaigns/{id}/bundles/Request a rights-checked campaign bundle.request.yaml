@@ -1,0 +1,23 @@
+$kind: http-request
+url: "{{baseUrl}}/api/campaigns/:id/bundles"
+method: POST
+headers:
+  Content-Type: application/json
+  Accept: application/json
+pathVariables:
+  id: string
+body:
+  type: json
+  content: |-
+    {
+      "bundleType": "print_handoff"
+    }
+auth:
+  type: apikey
+  credentials:
+    key: va_session
+    value: "{{apiKey}}"
+    in: header
+settings: {}
+examples: ./.resources/Request a rights-checked campaign bundle.resources/examples
+order: 2000

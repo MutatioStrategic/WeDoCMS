@@ -1,0 +1,18 @@
+$kind: http-request
+url: "{{baseUrl}}/api/assets/:id/derivatives/:derivativeId/content"
+method: GET
+headers:
+  Range: string
+  Accept: application/json
+pathVariables:
+  id: string
+  derivativeId: string
+auth:
+  type: apikey
+  credentials:
+    key: va_session
+    value: "{{apiKey}}"
+    in: header
+settings: {}
+examples: ./.resources/Stream ready derivative content through an authenticated route.resources/examples
+order: 1000

@@ -1,0 +1,31 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/verification/documents/:documentId/content"
+  method: PUT
+  headers:
+    - key: Content-Type
+      value: application/octet-stream
+    - key: Accept
+      value: application/json
+    - key: va_session
+      value: <API Key>
+      description: "Added as a part of security scheme: apikey"
+  pathVariables:
+    documentId: string
+  body:
+    type: file
+    content: {}
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "documentId": "string",
+        "uploaded": true,
+        "sizeBytes": 2924
+      }
+order: 1000

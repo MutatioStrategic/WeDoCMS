@@ -1,0 +1,20 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/assets/:id/derivatives/:derivativeId/content"
+  method: GET
+  headers:
+    - key: Range
+      value: string
+    - key: va_session
+      value: <API Key>
+      description: "Added as a part of security scheme: apikey"
+  pathVariables:
+    id: string
+    derivativeId: string
+response:
+  statusCode: 206
+  statusText: Partial Content
+  body:
+    type: text
+    content: ""
+order: 2000

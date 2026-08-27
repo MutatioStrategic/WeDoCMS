@@ -1,0 +1,21 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/campaign-bundles/:id/download"
+  method: GET
+  headers:
+    - key: Accept
+      value: application/zip
+    - key: va_session
+      value: <API Key>
+      description: "Added as a part of security scheme: apikey"
+  pathVariables:
+    id: string
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/zip
+  body:
+    type: text
+    content: string
+order: 1000

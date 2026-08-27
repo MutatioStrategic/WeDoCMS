@@ -1,0 +1,16 @@
+$kind: http-request
+url: "{{baseUrl}}/api/lightboxes/:id"
+method: DELETE
+headers:
+  Accept: application/json
+pathVariables:
+  id: string
+auth:
+  type: apikey
+  credentials:
+    key: va_session
+    value: "{{apiKey}}"
+    in: header
+settings: {}
+examples: ./.resources/Delete an owned lightbox.resources/examples
+order: 4000

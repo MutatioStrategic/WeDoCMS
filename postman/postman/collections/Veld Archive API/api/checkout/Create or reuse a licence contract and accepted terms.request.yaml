@@ -1,0 +1,27 @@
+$kind: http-request
+url: "{{baseUrl}}/api/checkout"
+method: POST
+headers:
+  Content-Type: application/json
+  Accept: application/json
+body:
+  type: json
+  content: |-
+    {
+      "assetId": "string",
+      "licenceType": "editorial",
+      "territory": "strin",
+      "durationDays": 519,
+      "buyerAgreementVersion": "buyer-marketplace-v1",
+      "paymentAgreementVersion": "payment-split-v1",
+      "acceptBuyerTerms": true
+    }
+auth:
+  type: apikey
+  credentials:
+    key: va_session
+    value: "{{apiKey}}"
+    in: header
+settings: {}
+examples: ./.resources/Create or reuse a licence contract and accepted terms.resources/examples
+order: 2000

@@ -1,0 +1,15 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/webhooks/didit"
+  method: POST
+  headers:
+    x-signature-v2: string
+    x-signature: string
+    x-timestamp: string
+response:
+  statusCode: 200
+  statusText: OK
+  body:
+    type: text
+    content: ""
+order: 1000

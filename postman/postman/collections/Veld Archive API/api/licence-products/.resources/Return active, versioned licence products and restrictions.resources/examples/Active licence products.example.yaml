@@ -1,0 +1,43 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/licence-products"
+  method: GET
+  headers:
+    Accept: application/json
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "results": [
+          {
+            "code": "editorial",
+            "name": "string",
+            "description": "string",
+            "termsVersion": "string",
+            "restrictions": {
+              "key_0": false,
+              "key_1": "string",
+              "key_2": true,
+              "key_3": 6565.502101177112
+            }
+          },
+          {
+            "code": "enhanced",
+            "name": "string",
+            "description": "string",
+            "termsVersion": "string",
+            "restrictions": {
+              "key_0": 7836.265917508751,
+              "key_1": "string",
+              "key_2": false,
+              "key_3": 5983
+            }
+          }
+        ]
+      }
+order: 1000

@@ -1,0 +1,14 @@
+$kind: http-request
+url: "{{baseUrl}}/api/saved-searches/:id"
+method: DELETE
+pathVariables:
+  id: string
+auth:
+  type: apikey
+  credentials:
+    key: va_session
+    value: "{{apiKey}}"
+    in: header
+settings: {}
+examples: ./.resources/Delete an owned saved search.resources/examples
+order: 2000

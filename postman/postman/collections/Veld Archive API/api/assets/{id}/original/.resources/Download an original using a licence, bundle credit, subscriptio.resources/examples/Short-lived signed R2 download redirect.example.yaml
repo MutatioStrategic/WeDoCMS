@@ -1,0 +1,17 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/assets/:id/original"
+  method: GET
+  headers:
+    - key: va_session
+      value: <API Key>
+      description: "Added as a part of security scheme: apikey"
+  pathVariables:
+    id: string
+response:
+  statusCode: 302
+  statusText: Found
+  body:
+    type: text
+    content: ""
+order: 1000

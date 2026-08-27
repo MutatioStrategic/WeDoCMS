@@ -1,0 +1,17 @@
+$kind: http-request
+name: Get a tenant-scoped campaign with licences, edit versions, derivatives, blockers, and bundle history
+url: "{{baseUrl}}/api/campaigns/:id"
+method: GET
+headers:
+  Accept: application/json
+pathVariables:
+  id: string
+auth:
+  type: apikey
+  credentials:
+    key: va_session
+    value: "{{apiKey}}"
+    in: header
+settings: {}
+examples: ./.resources/Get a tenant-scoped campaign with licences, edit versions, deriv.resources/examples
+order: 2000

@@ -1,0 +1,24 @@
+$kind: http-request
+url: "{{baseUrl}}/api/audit/exports"
+method: POST
+headers:
+  Content-Type: application/json
+  Accept: application/json
+body:
+  type: json
+  content: |-
+    {
+      "streamId": "string",
+      "residencyRegion": "eu",
+      "from": "1952-04-21T18:10:50.873Z",
+      "to": "1946-10-11T16:30:04.111Z"
+    }
+auth:
+  type: apikey
+  credentials:
+    key: va_session
+    value: "{{apiKey}}"
+    in: header
+settings: {}
+examples: ./.resources/Create a residency- and organization-scoped audit export.resources/examples
+order: 2000

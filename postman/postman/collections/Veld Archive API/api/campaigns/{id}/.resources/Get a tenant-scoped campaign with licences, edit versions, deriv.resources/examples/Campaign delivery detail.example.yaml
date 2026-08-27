@@ -1,0 +1,272 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/campaigns/:id"
+  method: GET
+  headers:
+    - key: Accept
+      value: application/json
+    - key: va_session
+      value: <API Key>
+      description: "Added as a part of security scheme: apikey"
+  pathVariables:
+    id: string
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "campaign": {
+          "key_0": "string",
+          "key_1": 275.9930578361136
+        },
+        "recommendations": [
+          {
+            "key_0": 1701
+          },
+          {
+            "key_0": "string",
+            "key_1": true
+          }
+        ],
+        "assets": [
+          {
+            "id": "string",
+            "kind": "video",
+            "status": "processing",
+            "title": "string",
+            "description": "string",
+            "caption": "string",
+            "country": "string",
+            "province": "string",
+            "city": "string",
+            "locality": "string",
+            "landmark": "string",
+            "subjectTags": [
+              "string",
+              "string"
+            ],
+            "culturalTags": [
+              "string",
+              "string"
+            ],
+            "rightsStatus": "pending",
+            "modelReleaseStatus": "verified",
+            "propertyReleaseStatus": "not_required",
+            "authenticityConfidence": 0.3801082066308117,
+            "humanVerified": false,
+            "contributor": "string",
+            "workflowStage": "ai_tagging",
+            "aiTags": [
+              "string",
+              "string"
+            ],
+            "curatorNotes": "string",
+            "campaignStage": "rejected",
+            "campaignNote": "string",
+            "activeLicenceId": "string",
+            "aiConfidence": 0.17994074916039493,
+            "metadataReviewStatus": "blocked",
+            "metadataReviewNote": "string",
+            "metadataProvenance": "editor",
+            "sourceFileName": "string",
+            "sourceUrl": "string",
+            "sourceLicense": "string",
+            "sourceAttribution": "string",
+            "monetizationModel": "membership",
+            "licensePriceCents": 6485,
+            "freeDownloadEnabled": false
+          },
+          {
+            "id": "string",
+            "kind": "video",
+            "status": "draft",
+            "title": "string",
+            "description": "string",
+            "caption": "string",
+            "country": "string",
+            "province": "string",
+            "city": "string",
+            "locality": "string",
+            "landmark": "string",
+            "subjectTags": [
+              "string",
+              "string"
+            ],
+            "culturalTags": [
+              "string",
+              "string"
+            ],
+            "rightsStatus": "pending",
+            "modelReleaseStatus": "verified",
+            "propertyReleaseStatus": "unknown",
+            "authenticityConfidence": 0.2218881397866581,
+            "humanVerified": true,
+            "contributor": "string",
+            "workflowStage": "approval",
+            "aiTags": [
+              "string",
+              "string"
+            ],
+            "curatorNotes": "string",
+            "campaignStage": "needs_review",
+            "campaignNote": "string",
+            "activeLicenceId": "string",
+            "aiConfidence": 0.6848609183316833,
+            "metadataReviewStatus": "blocked",
+            "metadataReviewNote": "string",
+            "metadataProvenance": "contributor",
+            "sourceFileName": "string",
+            "sourceUrl": "string",
+            "sourceLicense": "string",
+            "sourceAttribution": "string",
+            "monetizationModel": "custom_quote",
+            "licensePriceCents": 3255,
+            "freeDownloadEnabled": true
+          }
+        ],
+        "editVersions": [
+          {
+            "id": "string",
+            "assetId": "string",
+            "versionNumber": 4671,
+            "recipe": {
+              "key_0": 4568.821391928331,
+              "key_1": "string"
+            },
+            "note": "string",
+            "createdAt": "1995-05-29T17:44:40.574Z",
+            "auditEventId": "string"
+          },
+          {
+            "id": "string",
+            "assetId": "string",
+            "versionNumber": 2649,
+            "recipe": {
+              "key_0": "string",
+              "key_1": 401
+            },
+            "note": "string",
+            "createdAt": "2022-10-14T04:53:38.310Z",
+            "auditEventId": "string"
+          }
+        ],
+        "derivatives": [
+          {
+            "id": "string",
+            "assetId": "string",
+            "editVersionId": "string",
+            "licenceId": "string",
+            "variant": "email_header",
+            "status": "pending",
+            "contentType": "string",
+            "sizeBytes": 2296,
+            "contentUrl": "/",
+            "createdAt": "2002-09-12T09:13:28.862Z",
+            "campaignId": "string",
+            "width": 7238,
+            "height": 842,
+            "auditEventId": "string"
+          },
+          {
+            "id": "string",
+            "assetId": "string",
+            "editVersionId": "string",
+            "licenceId": "string",
+            "variant": "story_9_16",
+            "status": "revoked",
+            "contentType": "string",
+            "sizeBytes": 2071,
+            "contentUrl": "/",
+            "createdAt": "1994-06-16T02:52:30.694Z",
+            "campaignId": "string",
+            "width": 3238,
+            "height": 6469,
+            "auditEventId": "string"
+          }
+        ],
+        "bundles": [
+          {
+            "id": "string",
+            "campaignId": "string",
+            "bundleType": "string",
+            "status": "building",
+            "createdAt": "1953-09-06T01:23:12.043Z",
+            "buildStatus": "string",
+            "error": "string",
+            "expiresAt": "2012-04-09T23:36:11.769Z",
+            "download": "/",
+            "manifest": {
+              "key_0": "string",
+              "key_1": false,
+              "key_2": true
+            },
+            "auditEventId": "string"
+          },
+          {
+            "id": "string",
+            "campaignId": "string",
+            "bundleType": "string",
+            "status": "approved",
+            "createdAt": "2014-07-29T22:44:00.542Z",
+            "buildStatus": "string",
+            "error": "string",
+            "expiresAt": "1992-08-18T22:28:25.990Z",
+            "download": "/",
+            "manifest": {
+              "key_0": 7448,
+              "key_1": 7023
+            },
+            "auditEventId": "string"
+          }
+        ],
+        "licenceMetadata": [
+          {
+            "assetId": "string",
+            "licenceId": "string",
+            "licenceType": "string",
+            "territory": "string",
+            "expiresAt": "1969-05-29T00:30:30.163Z"
+          },
+          {
+            "assetId": "string",
+            "licenceId": "string",
+            "licenceType": "string",
+            "territory": "string",
+            "expiresAt": "1971-05-08T03:22:45.551Z"
+          }
+        ],
+        "blockers": [
+          {
+            "assetId": "string",
+            "blockers": [
+              {
+                "code": "string",
+                "message": "string"
+              },
+              {
+                "code": "string",
+                "message": "string"
+              }
+            ]
+          },
+          {
+            "assetId": "string",
+            "blockers": [
+              {
+                "code": "string",
+                "message": "string"
+              },
+              {
+                "code": "string",
+                "message": "string"
+              }
+            ]
+          }
+        ],
+        "buyerTermsAccepted": true
+      }
+order: 1000

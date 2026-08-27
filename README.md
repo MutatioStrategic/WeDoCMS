@@ -41,7 +41,7 @@ npm install
 npm run dev
 ```
 
-Cloudflare binding types are generated in `worker-configuration.d.ts` and committed with the project so clean CI checkouts can typecheck without a network-dependent generation step. After changing `wrangler.jsonc`, refresh them with `npx wrangler types` and commit the updated file.
+Cloudflare binding types are generated in `worker-configuration.d.ts` and committed with the project so clean CI checkouts can typecheck without a network-dependent generation step. After changing `wrangler.jsonc`, refresh the production bindings with `npx wrangler types --env=production` and commit the updated file.
 
 The frontend runs on Vite. To run the Worker API locally after installing Wrangler and configuring a D1 database, use:
 
@@ -49,7 +49,7 @@ The frontend runs on Vite. To run the Worker API locally after installing Wrangl
 npm run worker:dev
 ```
 
-`npm run worker:deploy` is production-only and refuses to deploy the root development bindings. It runs the production bundle gate, `npm run auth:check`, preserves dashboard-managed values with `--keep-vars`, and requires a dedicated `env.production` block with `APP_ENV=production` and no demo, localhost, or placeholder values. Use `npm run worker:deploy:development` only for an intentional non-production Worker.
+`npm run worker:deploy` is production-only and refuses to deploy the root development bindings. It runs the production bundle gate, verifies the remote production secret names, checks the canonical Worker/Pages/mobile targets, performs a Wrangler dry-run, and preserves dashboard-managed values with `--keep-vars`. It requires a dedicated `env.production` block with `APP_ENV=production` and no demo, localhost, or placeholder values. Use `npm run worker:deploy:development` only for an intentional non-production Worker.
 
 Agents changing bindings or deploying to Cloudflare must follow
 [`docs/agent-deployment-safeguards.md`](docs/agent-deployment-safeguards.md).
@@ -62,6 +62,24 @@ production frontend, runs the release and Supabase auth wiring gates, and
 publishes the `veld-archive` Pages project. Publish the Worker separately with
 `npm run worker:deploy`; both commands fail before upload if the runtime auth
 contract or production Supabase secret invariant is missing.
+
+Set the production Pages project's `WORKER_API_ORIGIN` variable to
+`https://veld-archive-api-production.blewisorlando.workers.dev`. The committed
+Pages Function uses that value, with the same canonical origin as its fallback,
+so the desktop client and native Expo client stay on the same production API.
+
+Pushes to `main` and `better-2` run the full CI gate and then publish the
+explicit `env.production` Worker. A push to `main` also publishes the desktop
+Pages shell. The native Expo client uses the same Pages/API origin, so Worker
+changes are available to both clients; native UI changes are typechecked in CI
+and still require the normal signed Expo/App Store/Play release to reach an
+installed app.
+
+Configure the GitHub `production` environment with `CLOUDFLARE_ACCOUNT_ID` and
+`CLOUDFLARE_API_TOKEN`. Keep required reviewers enabled for that environment;
+pull requests never receive these credentials. The post-deploy gate requires at
+least five non-demo image previews; change `PRODUCTION_EXPECT_MIN_MEDIA` only
+when the verified production catalogue is intentionally smaller.
 
 ### Buyer access demo environment
 
@@ -86,6 +104,8 @@ Auth0 and Supabase can run together. Configure an Auth0 SPA application with Aut
 For Supabase, configure the Worker as the source of truth: set `SUPABASE_URL`, `SUPABASE_AUDIENCE`, `AUTH_PROVIDER=both`, and the required browser-safe `SUPABASE_ANON_KEY` secret (`wrangler secret put SUPABASE_ANON_KEY --env production`). Use either an explicit `SUPABASE_JWKS_URL` for asymmetric signing or the `SUPABASE_JWT_SECRET` Wrangler secret for this project's current legacy HS256 signing. The SPA loads `/api/auth/config` at runtime, so production and direct Worker deployments do not depend on Vite remembering to embed auth settings; `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` remain optional local fallbacks only. Supabase email/password signup, email confirmation, login, phone OTP signup/login, password recovery, and session refresh are handled by the Supabase client; the Worker verifies the Supabase JWT and exchanges it for the same application session. Phone sign-in is restricted to South African mobile numbers. Users enter a local number such as `073 712 3456`; the clients normalize it to `+27737123456` before calling Supabase, and the Worker rejects a Supabase phone claim outside the South African mobile range. Phone-only identities receive a stable internal contact address until a real contact email is collected by a later account workflow. The anon/publishable key is safe for browser use; never put a Supabase service-role key in the client or expose it from the Worker. For hosted Supabase, enable Auth > Providers > Phone and configure a supported SMS provider; the repository config enables SMS signup for local Supabase development but cannot provision hosted provider credentials. The web and native sign-in surfaces use Supabase's password recovery flow: reset requests return a privacy-preserving response, reset links return to the app, and the new password is submitted through the verified recovery session before the user signs in again. Configure the Supabase redirect allow list for the web origin and `veldarchive://auth/recovery` for native builds. Demo deployments use explicit demo authentication and never receive the production Supabase secret.
 
 The Worker verifies external tokens against the configured issuer/JWKS, retrieves the Auth0 `openid profile email` UserInfo profile when configured, and creates the existing HttpOnly session. Supabase identities are namespaced in `auth_subject` to prevent cross-provider collisions. For a single-organisation deployment, pre-provision `DEFAULT_ORGANIZATION_ID`; a browser-supplied organization ID is accepted only when it matches a signed claim or that configured default. Keep `AUTH_ALLOW_ORG_PROVISIONING=false` in production. The identity provider owns sign-in; D1 remains the source of truth for application roles, organization memberships, credits, licence ownership, ledger entries, and payment state. D1 `auth_security_events` records provider, outcome, subject hash context, and bounded request metadata; high-risk events are also emitted to Worker Logs and Analytics Engine.
+
+Hosted Supabase authentication email delivery is implemented as a signed Send Email Hook in `supabase/functions/send-email`, with the function sending through Cloudflare Email Service REST API. Supabase remains responsible for generating and verifying confirmation and recovery tokens; no Supabase JWT or service-role key is sent to the function or browser. Set the function secrets and enable the hook only after the Cloudflare sender domain is onboarded. See [`docs/email-service.md`](docs/email-service.md#supabase-authentication-email-hook) for the deployment and secret checklist. The web and native clients provide a resend-confirmation action and surface rate-limit, unconfirmed-email, JWT, and organisation-provisioning failures separately.
 
 Apply the initial database migration with Wrangler after replacing the D1 ID in `wrangler.jsonc`:
 
@@ -118,21 +138,32 @@ npm run test:a11y
 
 ### Desktop Postman/Newman sweep
 
-The `npm run test:postman` sweep exercises the configured API,
-Supabase signup and identity-exchange boundaries, and the main desktop web
-shell. It discovers every `/api` route from the Worker source and loads desktop
+The `npm run test:postman` sweep exercises the configured API and the main
+desktop web shell. It is read-only by default: data-changing requests,
+external providers, demo authentication, and the Supabase signup boundary are
+opted out unless explicitly enabled. It
+discovers every `/api` route from the Worker source and loads desktop
 Vite values from the root `.env.local` (`VITE_SUPABASE_URL` and
 `VITE_SUPABASE_PUBLISHABLE_KEY`), with the mobile environment as a fallback.
 Publishable keys are used only in memory and are never printed.
 
 ```powershell
 $env:POSTMAN_DESKTOP_URL = "https://veld-archive.pages.dev"
-$env:POSTMAN_BASE_URL = "https://veld-archive-api.blewisorlando.workers.dev"
+$env:POSTMAN_BASE_URL = "https://veld-archive-api-production.blewisorlando.workers.dev"
 npm run test:postman
 ```
 
-Use `POSTMAN_SKIP_SUPABASE=true` when the Supabase signup rate limit is active;
-the desktop shell and all API routes remain covered.
+The sweep rejects placeholder hosts such as `archive.example.com` before it
+sends a request. Use `POSTMAN_RUN_WRITES=true` only against an isolated test
+database. The identity-exchange and other external boundaries require
+`POSTMAN_RUN_EXTERNAL_WRITES=true` plus the appropriate controlled test
+token/configuration; the Supabase signup boundary is also disabled unless that
+flag is enabled. The scheduled
+`.github/workflows/production-postman-smoke.yml` workflow runs this safe
+production check hourly and can also be started manually.
+The scheduled `.github/workflows/demo-postman-roles.yml` workflow runs the same
+safe route sweep for buyer, contributor (seller-facing), editor, and admin
+sessions every six hours and can also be started manually.
 
 #### Importable Postman collection
 
@@ -144,16 +175,20 @@ The exported file intentionally omits the external Supabase signup request and
 contains blank credential-like variables.
 
 The repository is also connected to Postman Local Mode through
-`postman/.postman/resources.yaml`. Select the checked-in `demo` environment in
-Postman for the demo URLs and safe defaults. The `00 - Start here` folder logs
+`postman/.postman/resources.yaml`. Select the checked-in `demo (repo-safe)` environment in
+Postman for the demo URLs and safe defaults. Select `production (read-only)` for
+public production checks. The `00 - Start here` folder logs
 in and verifies the selected role before the grouped endpoint folders run.
 Read-only and session checks run immediately; data-changing requests are
 skipped until `runWrites=true`, and external payment, webhook, integration, and
 security-boundary requests remain skipped until `runExternalWrites=true`.
 
 Set the collection variable `demoRole` to `buyer`, `contributor`, `editor`, or
-`admin`, then rerun the collection to exercise that role's session. The
-contributor persona is the seller-facing demo workflow in this build.
+`admin`, then rerun the collection to exercise that role's session in the
+isolated demo environment. The contributor persona is the seller-facing demo
+workflow in this build. Production uses `runDemoAuth=false` and
+`runWrites=false`; authenticated production checks require real controlled
+identities and must be enabled explicitly.
 
 Regenerate it after adding or changing Worker routes:
 
