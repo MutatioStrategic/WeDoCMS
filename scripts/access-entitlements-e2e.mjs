@@ -58,34 +58,55 @@ const buyer = await login("buyer");
 const allowanceResponse = await call("/api/my/free-downloads");
 const allowance = await json(allowanceResponse);
 assert(allowanceResponse.ok, `buyer allowance failed: ${allowanceResponse.status}`);
-assert(allowance.limit >= 3 && allowance.remaining === allowance.limit, "new buyer did not receive the configured introductory allowance");
+assert(allowance.limit >= 3 && allowance.remaining >= 0 && allowance.remaining <= allowance.limit, "buyer did not receive a valid configured introductory allowance");
+const usedAtStart = Number(allowance.used ?? 0);
+const claimedAssetIds = new Set((allowance.downloads ?? []).map((download) => String(download.asset_id ?? download.assetId ?? "")));
 
 const assetsResponse = await call("/api/assets?kind=image&status=published");
 const assetsBody = await json(assetsResponse);
 const freeAssets = (assetsBody.results ?? []).filter((asset) => asset.freeDownloadEnabled === true && asset.rightsStatus === "verified");
 assert(assetsResponse.ok && freeAssets.length >= 2, "published rights-verified free-photo candidates were not returned");
 
-const firstAsset = freeAssets[0];
+const unclaimedFreeAssets = freeAssets.filter((asset) => !claimedAssetIds.has(String(asset.id)));
+const firstAsset = unclaimedFreeAssets[0] ?? freeAssets[0];
+const firstAssetClaimed = claimedAssetIds.has(String(firstAsset.id));
 const accessBefore = await call(`/api/assets/${encodeURIComponent(firstAsset.id)}/preview-access`);
 const accessBeforeBody = await json(accessBefore);
-assert(accessBefore.ok && accessBeforeBody.freeDownload === true && accessBeforeBody.paid === false, "free-photo preview access did not expose the introductory entitlement");
+assert(accessBefore.ok && accessBeforeBody.freeDownload === true && accessBeforeBody.freeDownloadsRemaining === allowance.remaining, "free-photo preview access did not expose the configured introductory offer");
+if (firstAssetClaimed) assert(accessBeforeBody.paid === true, "preview access did not retain the stable buyer's existing entitlement");
 
-const firstDownload = await call(`/api/assets/${encodeURIComponent(firstAsset.id)}/original`);
-assert(firstDownload.status === 302, `first free download did not return a signed redirect: ${firstDownload.status}`);
-const afterFirst = await json(await call("/api/my/free-downloads"));
-assert(afterFirst.used === 1 && afterFirst.remaining === allowance.limit - 1, "first free download did not consume exactly one allowance");
+let afterSecond = allowance;
+if (allowance.remaining > 0 && unclaimedFreeAssets.length > 0) {
+  const firstDownload = await call(`/api/assets/${encodeURIComponent(firstAsset.id)}/original`);
+  assert(firstDownload.status === 302, `first free download did not return a signed redirect: ${firstDownload.status}`);
+  const afterFirst = await json(await call("/api/my/free-downloads"));
+  assert(afterFirst.used === usedAtStart + 1 && afterFirst.remaining === allowance.remaining - 1, "first free download did not consume exactly one allowance");
 
-// A retry of the same buyer+asset is idempotent and must not spend another free slot.
-const retryDownload = await call(`/api/assets/${encodeURIComponent(firstAsset.id)}/original`);
-assert(retryDownload.status === 302, `free-download retry failed: ${retryDownload.status}`);
-const afterRetry = await json(await call("/api/my/free-downloads"));
-assert(afterRetry.used === 1, "retrying the same free asset consumed another allowance");
+  // A retry of the same buyer+asset is idempotent and must not spend another free slot.
+  const retryDownload = await call(`/api/assets/${encodeURIComponent(firstAsset.id)}/original`);
+  assert(retryDownload.status === 302, `free-download retry failed: ${retryDownload.status}`);
+  const afterRetry = await json(await call("/api/my/free-downloads"));
+  assert(afterRetry.used === usedAtStart + 1, "retrying the same free asset consumed another allowance");
+  afterSecond = afterRetry;
 
-const secondAsset = freeAssets.find((asset) => asset.id !== firstAsset.id);
-const secondDownload = await call(`/api/assets/${encodeURIComponent(secondAsset.id)}/original`);
-assert(secondDownload.status === 302, `second free download did not return a signed redirect: ${secondDownload.status}`);
-const afterSecond = await json(await call("/api/my/free-downloads"));
-assert(afterSecond.used === 2 && afterSecond.remaining === allowance.limit - 2, "second free download did not update the allowance");
+  const secondAsset = unclaimedFreeAssets.find((asset) => asset.id !== firstAsset.id);
+  if (allowance.remaining > 1 && secondAsset) {
+    const secondDownload = await call(`/api/assets/${encodeURIComponent(secondAsset.id)}/original`);
+    assert(secondDownload.status === 302, `second free download did not return a signed redirect: ${secondDownload.status}`);
+    afterSecond = await json(await call("/api/my/free-downloads"));
+    assert(afterSecond.used === usedAtStart + 2 && afterSecond.remaining === allowance.remaining - 2, "second free download did not update the allowance");
+  }
+} else {
+  // Demo identities are intentionally stable between runs. When every eligible
+  // asset is already claimed (or the allowance is exhausted), verify the
+  // already-claimed asset remains idempotently retrievable.
+  const claimedAsset = freeAssets.find((asset) => claimedAssetIds.has(String(asset.id)));
+  assert(claimedAsset, "no free-photo candidate is available for the stable demo buyer");
+  const retryDownload = await call(`/api/assets/${encodeURIComponent(claimedAsset.id)}/original`);
+  assert(retryDownload.status === 302, `exhausted free-download retry failed: ${retryDownload.status}`);
+  afterSecond = await json(await call("/api/my/free-downloads"));
+  assert(afterSecond.used === usedAtStart, "retrying an already-claimed free asset changed the allowance");
+}
 
 const subscriptionResponse = await call("/api/subscription");
 const subscription = await json(subscriptionResponse);
@@ -113,7 +134,7 @@ await call("/api/auth/logout", { method: "POST", headers: { "X-CSRF-Token": csrf
 cookie = "";
 await login("contributor");
 const uploadBody = {
-  kind: "image", title: `Free offer UAT ${Date.now()}`, description: "UAT seller opt-in", caption: "UAT seller opt-in", rightsStatus: "verified",
+  kind: "image", title: `Free offer UAT ${Date.now()}`, description: "UAT seller opt-in", caption: "UAT seller opt-in", rightsStatus: "pending",
   modelReleaseStatus: "not_required", propertyReleaseStatus: "not_required", monetizationModel: "membership", subjectTags: ["landscape"], culturalTags: [], freeDownloadEnabled: true,
 };
 const upload = await call("/api/assets", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken }, body: JSON.stringify(uploadBody) });
@@ -123,4 +144,4 @@ assert(upload.status === 201 && uploadResult.status === "needs_review", `seller 
 const videoOptIn = await call("/api/assets", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken }, body: JSON.stringify({ ...uploadBody, kind: "video", title: `Invalid video UAT ${Date.now()}` }) });
 assert(videoOptIn.status === 422, `video free-download opt-in was accepted: ${videoOptIn.status}`);
 
-console.log(JSON.stringify({ ok: true, base, buyer: buyer.id, freeCandidates: freeAssets.length, allowance: { limit: allowance.limit, usedAfterTwo: afterSecond.used, remainingAfterTwo: afterSecond.remaining }, plans: subscription.plans.map((plan) => plan.id), annualCheckoutStatus: subscriptionCheckoutStatus, bundleCheckoutStatus, sellerOptInStatus: upload.status, videoOptInStatus: videoOptIn.status }, null, 2));
+console.log(JSON.stringify({ ok: true, base, buyer: buyer.id, freeCandidates: freeAssets.length, allowance: { limit: allowance.limit, usedAtStart, usedAfterTwo: afterSecond.used, remainingAfterTwo: afterSecond.remaining }, plans: subscription.plans.map((plan) => plan.id), annualCheckoutStatus: subscriptionCheckoutStatus, bundleCheckoutStatus, sellerOptInStatus: upload.status, videoOptInStatus: videoOptIn.status }, null, 2));

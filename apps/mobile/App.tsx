@@ -106,7 +106,7 @@ type AppNotification = { id: string; title: string; body: string; read_at?: stri
 type UserLightbox = { id: string; name: string; visibility: string; assetIds: string[]; assetCount: number };
 type BuyerLicenceRecord = { id: string; assetId: string; assetTitle: string; licenceType: string; territory: string; durationDays: number; priceCents: number; status: string; approvalStatus: string; createdAt: string; originalUrl: string | null };
 type CheckoutValidation = { allowed: boolean; blockingReasons: string[]; checks: Array<{ label: string; passed: boolean; detail: string }>; priceCents: number | null; currency: string; monetizationModel: string };
-type MarketplaceAgreementDocument = { type: "seller" | "buyer" | "payment"; version: string; title: string; sections: Array<{ heading: string; body: string }> };
+type MarketplaceAgreementDocument = { type: "seller" | "buyer" | "payment"; version: string; effectiveDate?: string; title: string; sections: Array<{ heading: string; body: string }> };
 
 type HealthResponse = { ok?: boolean; status?: string; service?: string; version?: string; environment?: string };
 type MobileAuth = ReturnType<typeof useMobileAuth>;
@@ -397,6 +397,24 @@ function TurnstileChallenge({ onToken }: { onToken: (token: string) => void }) {
   return <View style={styles.turnstileFrame}><WebView originWhitelist={["https://*"]} source={{ html, baseUrl: `${API_BASE_URL}/` }} javaScriptEnabled onMessage={(event) => { try { const value = JSON.parse(event.nativeEvent.data) as { token?: string }; onToken(value.token ?? ""); } catch { onToken(""); } }} /></View>;
 }
 
+function SellerTermsReview({ session, accepted, onAccept }: { session: MobileApiSession; accepted: boolean; onAccept: (version: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [agreement, setAgreement] = useState<MarketplaceAgreementDocument | null>(null);
+  const [checked, setChecked] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const load = async () => {
+    setLoading(true); setError("");
+    const response = await apiRequest<{ documents?: MarketplaceAgreementDocument[] }>("/api/legal/agreements", session);
+    const current = response.body?.documents?.find((document) => document.type === "seller") ?? null;
+    if (response.status !== 200 || !current) setError(messageFrom(response.body as { error?: unknown } | null, "The current seller agreement is unavailable."));
+    else setAgreement(current);
+    setLoading(false);
+  };
+  const openReview = () => { setOpen(true); setChecked(false); void load(); };
+  return <><View style={[styles.termsCard, accepted && styles.validationClear]}><View style={{ flex: 1 }}><Text style={styles.cardKind}>SELLER AGREEMENT</Text><Text style={styles.cardTitle}>{accepted ? "Accepted for this seller submission" : "Read and accept before submitting"}</Text><Text style={styles.cardMeta}>{accepted ? "The accepted version is recorded with the seller onboarding." : "Open the current versioned agreement to continue."}</Text></View><Pressable style={styles.smallAction} onPress={openReview}><Text style={styles.smallActionText}>{accepted ? "Review" : "Read & accept"}</Text></Pressable></View><Modal animationType="slide" transparent visible={open} onRequestClose={() => setOpen(false)}><View style={styles.modalBackdrop}><View style={styles.modalSheet}><View style={styles.modalHeader}><Text style={styles.modalTitle}>Seller agreement</Text><Pressable accessibilityLabel="Close seller agreement" onPress={() => setOpen(false)} style={styles.closeButton}><X color={COLORS.ink} size={20} /></Pressable></View>{loading ? <LoadingState label="Loading current seller terms" /> : error ? <><View style={styles.notice}><WifiOff color={COLORS.amber} size={18} /><Text style={styles.noticeText}>{error}</Text></View><Pressable style={styles.secondaryButton} onPress={() => void load()}><RefreshCw color={COLORS.ink} size={16} /><Text style={styles.secondaryButtonText}>Try again</Text></Pressable></> : agreement ? <ScrollView showsVerticalScrollIndicator={false}><Text style={styles.cardKind}>{agreement.version}{agreement.effectiveDate ? ` · Effective ${agreement.effectiveDate}` : ""}</Text><Text style={styles.sectionTitle}>{agreement.title}</Text><View style={styles.termsDocument}>{agreement.sections.map((section) => <View key={section.heading}><Text style={styles.cardTitle}>{section.heading}</Text><Text style={styles.cardMeta}>{section.body}</Text></View>)}</View><CheckField checked={checked} onPress={() => setChecked((value) => !value)} label="I have read and agree to the current Seller and Artist Marketplace Agreement." /><Pressable style={[styles.primaryButton, !checked && styles.disabledButton]} disabled={!checked} onPress={() => { onAccept(agreement.version); setOpen(false); }}><Text style={styles.primaryButtonText}>Accept seller terms</Text></Pressable></ScrollView> : null}</View></View></Modal></>;
+}
+
 function SellerAccess({ auth, initialMode = "signup" }: { auth: MobileAuth; initialMode?: "signin" | "signup" }) {
   const [mode, setMode] = useState<"signin" | "signup" | "forgot" | "reset">(() => auth.passwordRecovery ? "reset" : initialMode);
   const [method, setMethod] = useState<"email" | "phone">("email");
@@ -408,6 +426,7 @@ function SellerAccess({ auth, initialMode = "signup" }: { auth: MobileAuth; init
   const [phoneCode, setPhoneCode] = useState("");
   const [phoneCodeSent, setPhoneCodeSent] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [confirmationPending, setConfirmationPending] = useState(false);
 
   useEffect(() => {
     if (auth.passwordRecovery) {
@@ -450,15 +469,19 @@ function SellerAccess({ auth, initialMode = "signup" }: { auth: MobileAuth; init
         const result = await auth.signUp(email, password, displayName, "seller");
         setPassword("");
         if (result.confirmationRequired) {
+          setConfirmationPending(true);
           setMode("signin");
-          setMessage("Account created. Open the confirmation email on this device, then return here to continue seller setup.");
+          setMessage("Account created. Check your inbox and spam folder. If the email does not arrive, resend it below.");
         }
       } else {
         await auth.signIn(email, password, "seller");
         setPassword("");
+        setConfirmationPending(false);
       }
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : mode === "signup" ? "Account creation failed." : "Sign-in failed.");
+      const text = error instanceof Error ? error.message : mode === "signup" ? "Account creation failed." : "Sign-in failed.";
+      if (mode === "signin" && method === "email" && /not confirmed|confirm your email/i.test(text)) setConfirmationPending(true);
+      setMessage(text);
     }
   };
 
@@ -492,6 +515,7 @@ function SellerAccess({ auth, initialMode = "signup" }: { auth: MobileAuth; init
       <Pressable style={[styles.primaryButton, disabled && styles.disabledButton]} disabled={disabled} onPress={() => void submit()}>
         {auth.loading ? <ActivityIndicator color={COLORS.surface} /> : <><LogIn color={COLORS.surface} size={17} /><Text style={styles.primaryButtonText}>{mode === "forgot" ? "Send reset link" : mode === "reset" ? "Update password" : method === "phone" ? phoneCodeSent ? "Verify SMS code" : "Send SMS code" : mode === "signup" ? "Create seller account" : "Sign in"}</Text></>}
       </Pressable>
+      {mode === "signin" && method === "email" && confirmationPending ? <Pressable style={styles.secondaryButton} disabled={auth.loading} onPress={async () => { try { await auth.resendSignupConfirmation(email); setMessage("Confirmation email resent. Check your inbox and spam folder."); } catch (error) { setMessage(error instanceof Error ? error.message : "The confirmation email could not be resent."); } }}><Text style={styles.secondaryButtonText}>{auth.loading ? "Resending confirmation email…" : "Resend confirmation email"}</Text></Pressable> : null}
       {mode === "signin" && method === "email" ? <Pressable style={styles.secondaryButton} onPress={() => { setMode("forgot"); setMessage(null); setPassword(""); }}><Text style={styles.secondaryButtonText}>Forgot password?</Text></Pressable> : null}
       {mode === "forgot" || mode === "reset" ? <Pressable style={styles.secondaryButton} onPress={() => { setMode("signin"); setMessage(null); setPassword(""); setPasswordConfirmation(""); }}><Text style={styles.secondaryButtonText}>Back to sign in</Text></Pressable> : null}
       {mode === "signin" || mode === "signup" ? <Pressable style={styles.secondaryButton} onPress={() => { setMode((current) => current === "signup" ? "signin" : "signup"); setMessage(null); setPassword(""); setPasswordConfirmation(""); setPhoneCodeSent(false); }}><Text style={styles.secondaryButtonText}>{mode === "signup" ? "I already have an account" : "Create a seller account"}</Text></Pressable> : null}
@@ -513,6 +537,7 @@ function SellerOnboarding({ session }: { session: MobileApiSession }) {
   const [specialties, setSpecialties] = useState("");
   const [portfolioUrl, setPortfolioUrl] = useState("");
   const [profileTerms, setProfileTerms] = useState(false);
+  const [profileTermsVersion, setProfileTermsVersion] = useState("");
   const [sellerType, setSellerType] = useState<"individual" | "company">("individual");
   const [legalName, setLegalName] = useState("");
   const [phone, setPhone] = useState("");
@@ -527,6 +552,7 @@ function SellerOnboarding({ session }: { session: MobileApiSession }) {
   const [copyrightDeclaration, setCopyrightDeclaration] = useState(false);
   const [taxResponsibilityDeclaration, setTaxResponsibilityDeclaration] = useState(false);
   const [contributorAgreement, setContributorAgreement] = useState(false);
+  const [sellerTermsVersion, setSellerTermsVersion] = useState("");
   const [signerName, setSignerName] = useState("");
   const [signatureReference, setSignatureReference] = useState("");
   const [providerAccountId, setProviderAccountId] = useState("");
@@ -551,7 +577,7 @@ function SellerOnboarding({ session }: { session: MobileApiSession }) {
     const response = await apiRequest<{ status?: string; error?: string }>("/api/onboarding", session, { method: "PUT", body: {
       bio: bio.trim(), organisationName: organisationName.trim() || undefined, contributorType, location: location.trim() || undefined,
       languages: languages.split(",").map((value) => value.trim()).filter(Boolean), specialties: specialties.split(",").map((value) => value.trim()).filter(Boolean),
-      equipment: "", portfolioUrl: portfolioUrl.trim(), acceptTerms: true,
+      equipment: "", portfolioUrl: portfolioUrl.trim(), acceptTerms: true, termsVersion: profileTermsVersion,
     } });
     setSaving(false);
     if (response.status !== 200) { setMessage(messageFrom(response.body, "Your contributor profile could not be saved.")); return; }
@@ -561,12 +587,12 @@ function SellerOnboarding({ session }: { session: MobileApiSession }) {
   const saveIdentity = async () => {
     let normalizedPhone: string;
     try { normalizedPhone = normalizeSouthAfricanPhone(phone); } catch (error) { setMessage(error instanceof Error ? error.message : "Enter a valid South African mobile number, for example 073 712 3456."); return; }
-    if (!ageConfirmed || !copyrightDeclaration || !taxResponsibilityDeclaration || !contributorAgreement) { setMessage("Complete the age, rights, tax, and contributor declarations."); return; }
+    if (!ageConfirmed || !copyrightDeclaration || !taxResponsibilityDeclaration || !contributorAgreement || !sellerTermsVersion) { setMessage("Complete the age, rights, tax, and contributor declarations, including the seller agreement."); return; }
     if (sellerType === "company" && (!registeredName.trim() || !cipcRegistrationNumber.trim() || !representativeName.trim() || !representativeAuthority)) { setMessage("Complete the registered company and representative details."); return; }
     setSaving(true); setMessage(null);
     const seller = await apiRequest<{ error?: string }>("/api/onboarding/seller", session, { method: "PUT", body: {
       sellerType, legalName: legalName.trim(), phone: normalizedPhone, ageConfirmed: true, identityDocumentType, bankAccountName: bankAccountName.trim(),
-      copyrightDeclaration: true, taxResponsibilityDeclaration: true, contributorAgreement: true,
+      copyrightDeclaration: true, taxResponsibilityDeclaration: true, contributorAgreement: true, termsVersion: sellerTermsVersion,
       ...(sellerType === "company" ? { registeredName: registeredName.trim(), cipcRegistrationNumber: cipcRegistrationNumber.trim(), representativeName: representativeName.trim(), representativeAuthority, beneficialOwnerRequired } : {}),
     } });
     if (seller.status !== 200) { setSaving(false); setMessage(messageFrom(seller.body, "Seller details could not be saved.")); return; }
@@ -614,7 +640,7 @@ function SellerOnboarding({ session }: { session: MobileApiSession }) {
       <Field label="Languages" value={languages} onChangeText={setLanguages} placeholder="Comma separated" />
       <Field label="Specialties" value={specialties} onChangeText={setSpecialties} placeholder="Editorial, portrait, landscape" />
       <Field label="Portfolio URL (optional)" value={portfolioUrl} onChangeText={setPortfolioUrl} placeholder="https://" autoCapitalize="none" keyboardType="url" />
-      <CheckField checked={profileTerms} onPress={() => setProfileTerms((value) => !value)} label="I accept the contributor terms and consent to editorial review." />
+      <SellerTermsReview session={session} accepted={profileTerms} onAccept={(version) => { setProfileTerms(true); setProfileTermsVersion(version); }} />
       <Pressable style={[styles.primaryButton, saving && styles.disabledButton]} disabled={saving} onPress={() => void saveProfile()}>{saving ? <ActivityIndicator color={COLORS.surface} /> : <Text style={styles.primaryButtonText}>Save profile and continue</Text>}</Pressable>
     </View> : null}
     {step === "identity" ? <View style={styles.formCard}><Text style={styles.sectionTitle}>Seller identity</Text><Text style={styles.screenIntro}>Didit handles ID/passport and liveness checks. Veld stores the decision and provider reference, not raw documents.</Text>
@@ -627,7 +653,7 @@ function SellerOnboarding({ session }: { session: MobileApiSession }) {
       <CheckField checked={ageConfirmed} onPress={() => setAgeConfirmed((value) => !value)} label="I confirm I am at least 18." />
       <CheckField checked={copyrightDeclaration} onPress={() => setCopyrightDeclaration((value) => !value)} label="I own or control the copyright and required releases." />
       <CheckField checked={taxResponsibilityDeclaration} onPress={() => setTaxResponsibilityDeclaration((value) => !value)} label="I accept responsibility for my tax affairs." />
-      <CheckField checked={contributorAgreement} onPress={() => setContributorAgreement((value) => !value)} label="I accept the contributor agreement and licensing terms." />
+      <SellerTermsReview session={session} accepted={contributorAgreement} onAccept={(version) => { setContributorAgreement(true); setSellerTermsVersion(version); }} />
       <Pressable style={[styles.primaryButton, saving && styles.disabledButton]} disabled={saving} onPress={() => void saveIdentity()}>{saving ? <ActivityIndicator color={COLORS.surface} /> : <><ShieldCheck color={COLORS.surface} size={17} /><Text style={styles.primaryButtonText}>Save and start verification</Text></>}</Pressable>
     </View> : null}
     {step === "payout" ? <View style={styles.formCard}><Text style={styles.sectionTitle}>Contract and payout</Text><Text style={styles.screenIntro}>The Paystack subaccount, Firma reference, verification case, and signed contract form one reviewable seller tender. Raw banking credentials are never collected here.</Text>
@@ -991,23 +1017,30 @@ function BuyerAccessCard({ auth }: { auth: MobileAuth }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [message, setMessage] = useState("");
+  const [confirmationPending, setConfirmationPending] = useState(false);
   const submit = async () => {
     setMessage("");
     try {
       if (mode === "signup") {
         const result = await auth.signUp(email, password, displayName, "buyer");
         setPassword("");
-        setMessage(result.confirmationRequired ? "Buyer account created. Confirm the email on this device, then return to this asset." : "Buyer account ready. Continue with licence validation below.");
+        if (result.confirmationRequired) {
+          setConfirmationPending(true);
+          setMessage("Buyer account created. Check your inbox and spam folder, then resend it below if needed.");
+        }
+        if (!result.confirmationRequired) setMessage("Buyer account ready. Continue with licence validation below.");
       } else {
         await auth.signIn(email, password, "buyer");
         setPassword("");
       }
     } catch (caught) {
-      setMessage(caught instanceof Error ? caught.message : "Buyer access could not be completed.");
+      const text = caught instanceof Error ? caught.message : "Buyer access could not be completed.";
+      if (mode === "signin" && /not confirmed|confirm your email/i.test(text)) setConfirmationPending(true);
+      setMessage(text);
     }
   };
   const disabled = auth.loading || !email.trim() || password.length < 8 || mode === "signup" && !displayName.trim();
-  return <View style={styles.buyerAccessCard}><Text style={styles.cardKind}>BUYER ACCESS · RETURN TO THIS ASSET</Text><Text style={styles.sectionTitle}>{mode === "signup" ? "Create your buyer account" : "Sign in to continue"}</Text><Text style={styles.cardMeta}>Your selected media stays open. Rights, price, and terms are checked after identity verification.</Text>{mode === "signup" ? <Field label="Display name" value={displayName} onChangeText={setDisplayName} placeholder="How your name should appear" autoCapitalize="words" /> : null}<Field label="Email" value={email} onChangeText={setEmail} placeholder="you@example.com" autoCapitalize="none" keyboardType="email-address" /><Field label="Password" value={password} onChangeText={setPassword} placeholder="At least 8 characters" secureTextEntry autoCapitalize="none" />{(message || auth.error) ? <View style={styles.notice}><ShieldCheck color={COLORS.amber} size={18} /><Text style={styles.noticeText}>{message || auth.error}</Text></View> : null}<Pressable style={[styles.primaryButton, disabled && styles.disabledButton]} disabled={disabled} onPress={() => void submit()}>{auth.loading ? <ActivityIndicator color={COLORS.surface} /> : <><LogIn color={COLORS.surface} size={17} /><Text style={styles.primaryButtonText}>{mode === "signup" ? "Create buyer account" : "Sign in and continue"}</Text></>}</Pressable><Pressable style={styles.secondaryButton} onPress={() => { setMode((current) => current === "signup" ? "signin" : "signup"); setMessage(""); setPassword(""); }}><Text style={styles.secondaryButtonText}>{mode === "signup" ? "I already have an account" : "Create a buyer account"}</Text></Pressable></View>;
+  return <View style={styles.buyerAccessCard}><Text style={styles.cardKind}>BUYER ACCESS · RETURN TO THIS ASSET</Text><Text style={styles.sectionTitle}>{mode === "signup" ? "Create your buyer account" : "Sign in to continue"}</Text><Text style={styles.cardMeta}>Your selected media stays open. Rights, price, and terms are checked after identity verification.</Text>{mode === "signup" ? <Field label="Display name" value={displayName} onChangeText={setDisplayName} placeholder="How your name should appear" autoCapitalize="words" /> : null}<Field label="Email" value={email} onChangeText={setEmail} placeholder="you@example.com" autoCapitalize="none" keyboardType="email-address" /><Field label="Password" value={password} onChangeText={setPassword} placeholder="At least 8 characters" secureTextEntry autoCapitalize="none" />{(message || auth.error) ? <View style={styles.notice}><ShieldCheck color={COLORS.amber} size={18} /><Text style={styles.noticeText}>{message || auth.error}</Text></View> : null}<Pressable style={[styles.primaryButton, disabled && styles.disabledButton]} disabled={disabled} onPress={() => void submit()}>{auth.loading ? <ActivityIndicator color={COLORS.surface} /> : <><LogIn color={COLORS.surface} size={17} /><Text style={styles.primaryButtonText}>{mode === "signup" ? "Create buyer account" : "Sign in and continue"}</Text></>}</Pressable>{mode === "signin" && confirmationPending ? <Pressable style={styles.secondaryButton} disabled={auth.loading} onPress={async () => { try { await auth.resendSignupConfirmation(email); setMessage("Confirmation email resent. Check your inbox and spam folder."); } catch (error) { setMessage(error instanceof Error ? error.message : "The confirmation email could not be resent."); } }}><Text style={styles.secondaryButtonText}>{auth.loading ? "Resending confirmation email…" : "Resend confirmation email"}</Text></Pressable> : null}<Pressable style={styles.secondaryButton} onPress={() => { setMode((current) => current === "signup" ? "signin" : "signup"); setMessage(""); setPassword(""); }}>{mode === "signup" ? "I already have an account" : "Create a buyer account"}</Pressable></View>;
 }
 
 function AssetDetail({ asset, onClose, auth }: { asset: Asset | null; onClose: () => void; auth: MobileAuth }) {

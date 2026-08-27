@@ -1,4 +1,4 @@
-const baseUrl = (process.env.E2E_BASE_URL ?? "https://veld-archive-api.blewisorlando.workers.dev").replace(/\/$/, "");
+const baseUrl = (process.env.E2E_BASE_URL ?? "https://veld-archive-api-production.blewisorlando.workers.dev").replace(/\/$/, "");
 const uploadId = process.argv[2];
 if (!uploadId) throw new Error("Usage: node scripts/retry-upload-completion.mjs <uploadId>");
 let cookie = "";

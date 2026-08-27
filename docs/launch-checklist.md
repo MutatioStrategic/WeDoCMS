@@ -34,7 +34,7 @@
 - [ ] Configure Turnstile site keys and server secret for all high-risk actions.
 - [x] Implement payment webhook deduplication, idempotency, refund, chargeback, and reconciliation paths.
 - [ ] Obtain written Paystack confirmation of marketplace/split settlement, fee bearer, split basis, refunds, chargebacks, reserves, KYC and any PASA/FIC obligations; verify a seller Paystack subaccount and test the configured percentage split (for example 60% artist / 40% WeDoCMS).
-- [ ] Publish counsel-approved `seller-marketplace-v1`, `buyer-marketplace-v1`, and `payment-split-v1` terms; confirm onboarding and checkout acceptance hashes are retained.
+- [ ] Publish approved `seller-marketplace-v1`, `buyer-marketplace-v1`, and `payment-split-v1` terms; confirm onboarding and checkout acceptance hashes are retained.
 - [ ] Upload and review model/property releases using the configured KYC/document provider.
 
 ## Security and operations

@@ -136,11 +136,11 @@ published-asset state sends the buyer back to approved archive search.
 1. A signed-in buyer opens the Buyer ROI workspace and sees the complete
    purchase history, including licences, photographer subscriptions, monthly
    membership payments, and credit purchases.
-2. The buyer chooses a membership start date and billing day from 1 to 28,
-   then opens hosted payment checkout for the configured R1,200 monthly Paystack plan.
+2. The buyer chooses a configured monthly or annual Paystack plan, then opens
+   hosted payment checkout. The browser success redirect is not proof of payment.
 3. The membership remains pending until the signed payment webhook confirms
    payment. A confirmed payment activates the membership and records the next
-   monthly charge date; a failed payment shows a past-due state.
+   charge date; a failed payment shows an attention state.
 4. The buyer enters a whole number of credits and opens hosted checkout. Each
    credit costs R100, and credits are added to the buyer ledger only after the
    signed payment webhook confirms payment.
@@ -159,7 +159,9 @@ provider webhook before they become paid.
 
 1. A visitor opens **Create an account** from an artist-approved free photo or
    the Subscribe CTA. Email confirmation (or South African phone OTP) is
-   required before any allowance can be claimed.
+   required before any allowance can be claimed. If the confirmation email is
+   missing, the sign-in state keeps the address and offers **Resend confirmation
+   email**; provider rate limits and delivery failures show a recovery action.
 2. After sign-in, the account surface shows a server-authoritative allowance
    of three free photo downloads. The Worker atomically claims one published
    artist-approved photo per buyer and asset; retries do not spend another
@@ -202,6 +204,17 @@ sequenceDiagram
 ```
 
 On mobile, the seller tender is split into three recoverable steps: contributor profile, individual/company identity verification, then signed contract and payout setup. Company verification uses CIPC before the hosted Didit session. Contract submission uses a transient Turnstile token and Firma reference; payout stores only the provider account reference and optional last-four values. When any provider is unavailable, the completed data remains stored, the failed step explains what happened, and the user can retry without creating a duplicate identity or contract implicitly.
+
+On the web seller flow, the profile and seller setup each use the same current-agreement review widget. The seller opens the full versioned agreement, checks an explicit acknowledgement inside the widget, and only then can the acceptance be submitted. Escape, the visible close control, and the backdrop close the widget; focus returns to the review button. The Worker rejects stale or missing agreement versions and records accepted profile terms with their hash.
+
+When a seller submits media, the upload form asks plain-language questions about
+permission to list/licence the work, recognizable people, and private property or
+locations. “Model release” means written permission from a recognizable person
+for uses such as commercial or advertising use; it is not a seller-verification
+button. “Pending” means the evidence still needs Veld review. Sellers can report
+editorial-only or unresolved permissions, but only an editor/admin can mark
+rights or release evidence as verified. The same explanations remain available
+when a seller edits an existing record.
 
 ## Top-admin approval ledger
 

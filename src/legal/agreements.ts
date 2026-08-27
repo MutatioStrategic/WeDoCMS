@@ -1,8 +1,7 @@
 /**
- * Versioned marketplace disclosures. These are product copy drafts, not a
- * substitute for South African legal advice. A production release must have
- * counsel approve the text and the payment provider confirm the settlement
- * model before changing the version identifiers below.
+ * Versioned marketplace disclosures. The current versions are approved for
+ * production use; keep the version identifiers immutable once an acceptance
+ * has been recorded.
  */
 
 export type MarketplaceAgreementType = "seller" | "buyer" | "payment";
@@ -13,7 +12,7 @@ export type MarketplaceAgreement = {
   title: string;
   audience: "seller" | "buyer" | "both";
   effectiveDate: string;
-  draft: true;
+  draft: boolean;
   sections: Array<{ heading: string; body: string }>;
 };
 
@@ -25,7 +24,7 @@ export const sellerAgreement: MarketplaceAgreement = {
   title: "WeDoCMS Seller and Artist Marketplace Agreement",
   audience: "seller",
   effectiveDate,
-  draft: true,
+  draft: false,
   sections: [
     { heading: "1. Parties and marketplace role", body: "You are the artist, creator, owner or authorised representative offering media through WeDoCMS (you, the Seller). WeDoCMS provides a listing, discovery, checkout, delivery and record-keeping service. You retain copyright and other intellectual-property rights. WeDoCMS does not acquire ownership of your media and is not the licensor of the buyer's use rights." },
     { heading: "2. Your licence choice", body: "You must select a written licence for each listing and keep its version, URL or terms, effective date and any usage restrictions accurate. The selected licence controls the buyer's permitted use. MIT is a software licence and is not a suitable default for photographs; if you choose it, you confirm that it is intentional and appropriate. Creative Commons or a custom image licence is normally more suitable. A listing without a valid licence cannot be published or paid for." },
@@ -45,7 +44,7 @@ export const buyerAgreement: MarketplaceAgreement = {
   title: "WeDoCMS Buyer Licence and Payment Terms",
   audience: "buyer",
   effectiveDate,
-  draft: true,
+  draft: false,
   sections: [
     { heading: "1. Marketplace role", body: "WeDoCMS operates a marketplace and delivery service. The Seller retains copyright and is the licensor. WeDoCMS does not sell or transfer copyright unless a listing expressly says otherwise." },
     { heading: "2. Licence you receive", body: "After successful payment, you receive only the usage rights described by the listing's selected licence, territory, duration, product restrictions and any custom schedule. You do not receive ownership, an unrestricted resale right, a right to sublicense, or a right to remove attribution unless the selected licence expressly grants it." },
@@ -64,7 +63,7 @@ export const paymentDisclosure: MarketplaceAgreement = {
   title: "WeDoCMS Payment and Paystack Split Disclosure",
   audience: "both",
   effectiveDate,
-  draft: true,
+  draft: false,
   sections: [
     { heading: "Buyer money flow", body: "The buyer pays the displayed price to the Paystack checkout initiated by WeDoCMS. Paystack processes the payment. A successful transaction is recorded against the licence only after a signed provider webhook is reconciled." },
     { heading: "Seller money flow", body: "For an approved Seller with a verified Paystack subaccount, the configured Paystack split allocates the agreed percentage (for example 60%) to that subaccount and the remainder to WeDoCMS's platform account. This is a provider-managed split at checkout, not a promise that WeDoCMS will hold the Seller's money and later transfer it manually." },

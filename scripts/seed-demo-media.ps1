@@ -16,7 +16,7 @@ pass -BucketName explicitly when deliberately targeting another bucket.
 
 $root = Split-Path -Parent $PSScriptRoot
 $fixtureRoot = Join-Path $root "fixtures\demo-media"
-$bucket = if ($BucketName) { $BucketName } elseif ($Remote) { "veld-archive-demo-media" } else { "veld-archive-media" }
+$bucket = if ($BucketName) { $BucketName } elseif ($Remote) { "veld-archive-demo-media" } else { "veld-archive-demo-media" }
 $storageFlag = if ($Remote) { "--remote" } else { "--local" }
 $targetLabel = if ($Remote) { "remote Cloudflare" } else { "local Wrangler" }
 

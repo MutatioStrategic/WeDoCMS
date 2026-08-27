@@ -1,8 +1,8 @@
 import http from "node:http";
-import { createHmac } from "node:crypto";
+import { createHmac, generateKeyPairSync } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 
 const failures = [];
@@ -18,6 +18,7 @@ const state = {
   failFirstCrm: true,
   failFirstAnalytics: true,
 };
+const smokeAssetId = "asset-demo-table-mountain";
 
 function jsonResponse(response, status, body) {
   const payload = JSON.stringify(body);
@@ -111,16 +112,23 @@ const providerUrl = `http://127.0.0.1:${providerPort}`;
 const workerPort = 18787 + Math.floor(Math.random() * 400);
 const workerUrl = `http://127.0.0.1:${workerPort}`;
 const persistPath = mkdtempSync(join(tmpdir(), "veld-zoho-smoke-"));
-const quoteArg = (value) => /\s/.test(value) ? `"${value.replaceAll('"', '\\"')}"` : value;
+const auditKeys = generateKeyPairSync("ed25519");
+const auditPrivateJwk = JSON.stringify(auditKeys.privateKey.export({ format: "jwk" }));
+const auditPublicJwk = JSON.stringify(auditKeys.publicKey.export({ format: "jwk" }));
 const npx = "npx";
+const npxCliPath = process.platform === "win32"
+  ? join(dirname(process.execPath), "node_modules", "npm", "bin", "npx-cli.js")
+  : null;
 const runNpx = (args, options = {}) => process.platform === "win32"
-  ? execFileSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `npx ${args.map(quoteArg).join(" ")}`], options)
+  ? execFileSync(process.execPath, [npxCliPath, ...args], options)
   : execFileSync(npx, args, options);
 runNpx(["wrangler", "d1", "migrations", "apply", "veld-archive", "--local", "--persist-to", persistPath], { cwd: process.cwd(), stdio: "pipe" });
 const workerArgs = [
   "wrangler", "dev", "--local", "--ip", "127.0.0.1", "--port", String(workerPort), "--persist-to", persistPath,
   "--var", `APP_PUBLIC_URL:${workerUrl}`,
   "--var", `SESSION_SECRET:zoho-smoke-session-secret-long-enough`,
+  "--var", `AUDIT_SIGNING_PRIVATE_JWK:${auditPrivateJwk}`,
+  "--var", `AUDIT_SIGNING_PUBLIC_JWK:${auditPublicJwk}`,
   "--var", `ZOHO_ACCOUNTS_URL:${providerUrl}`,
   "--var", `ZOHO_API_DOMAIN:${providerUrl}`,
   "--var", "ZOHO_CLIENT_ID:zoho-smoke-client",
@@ -138,7 +146,7 @@ const workerArgs = [
   "--var", `ZOHO_ANALYTICS_FLOW_WEBHOOK_URL:${providerUrl}/flow/analytics`,
 ];
 const worker = process.platform === "win32"
-  ? spawn(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `npx ${workerArgs.map(quoteArg).join(" ")}`], { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] })
+  ? spawn(process.execPath, [npxCliPath, ...workerArgs], { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] })
   : spawn(npx, workerArgs, { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] });
 let workerOutput = "";
 worker.stdout.on("data", (chunk) => { workerOutput += chunk.toString(); });
@@ -201,9 +209,9 @@ try {
   const campaignCreate = await call("/api/campaigns", { method: "POST", headers: mutationHeaders, body: JSON.stringify({ name: `Zoho smoke ${Date.now()}`, brief: "A Cape Town campaign for commercial social use", platforms: ["instagram", "linkedin"] }) });
   assert(campaignCreate.response.status === 201, `campaign creation failed: ${campaignCreate.response.status}`);
   const campaignId = campaignCreate.body.id;
-  const staged = await call(`/api/campaigns/${campaignId}/assets`, { method: "POST", headers: mutationHeaders, body: JSON.stringify({ assetId: "asset-table-mountain", stage: "approved", note: "Approved for provider contract smoke" }) });
+  const staged = await call(`/api/campaigns/${campaignId}/assets`, { method: "POST", headers: mutationHeaders, body: JSON.stringify({ assetId: smokeAssetId, stage: "approved", note: "Approved for provider contract smoke" }) });
   assert(staged.response.ok, `campaign asset staging failed: ${staged.response.status}`);
-  const rights = await call("/api/rights/takedown", { method: "POST", headers: mutationHeaders, body: JSON.stringify({ assetId: "asset-table-mountain", reason: "metadata", summary: "The metadata requires editorial review before external publication." }) });
+  const rights = await call("/api/rights/takedown", { method: "POST", headers: mutationHeaders, body: JSON.stringify({ assetId: smokeAssetId, reason: "metadata", summary: "The metadata requires editorial review before external publication." }) });
   assert(rights.response.status === 201, `rights case creation failed: ${rights.response.status}`);
 
   const start = await call("/api/integrations/zoho/connect/start", { method: "POST", headers: mutationHeaders, body: JSON.stringify({}) });
@@ -222,14 +230,16 @@ try {
   const statusAfter = await call("/api/integrations/zoho/status");
   assert(statusAfter.response.ok && statusAfter.body.connection?.status === "active", "tenant Zoho connection was not stored as active");
   assert(!JSON.stringify(statusAfter.body).includes("tenant-refresh-token"), "refresh token leaked through status response");
+  assert(statusAfter.body.apps?.find((app) => app.id === "analytics")?.configured === true, "Zoho analytics handoff is not configured");
 
   const validation = await call("/api/integrations/zoho/crm/validate", { method: "POST", headers: mutationHeaders, body: JSON.stringify({}) });
   assert(validation.response.ok && validation.body.status === "valid", `CRM metadata validation failed: ${validation.response.status}`);
 
   const agreements = await call("/api/legal/agreements?type=buyer");
-  const buyerAgreementVersion = agreements.body?.documents?.[0]?.version;
-  assert(agreements.response.ok && buyerAgreementVersion, "buyer agreement version was not available for checkout");
-  const checkout = await call("/api/checkout", { method: "POST", headers: mutationHeaders, body: JSON.stringify({ assetId: "asset-table-mountain", licenceType: "advertising", territory: "South Africa", durationDays: 90, buyerAgreementVersion, acceptBuyerTerms: true }) });
+  const buyerAgreementVersion = agreements.body?.documents?.find((document) => document?.type === "buyer")?.version;
+  const paymentAgreementVersion = agreements.body?.documents?.find((document) => document?.type === "payment")?.version;
+  assert(agreements.response.ok && buyerAgreementVersion && paymentAgreementVersion, "buyer and payment agreement versions were not available for checkout");
+  const checkout = await call("/api/checkout", { method: "POST", headers: mutationHeaders, body: JSON.stringify({ assetId: smokeAssetId, licenceType: "advertising", territory: "South Africa", durationDays: 90, buyerAgreementVersion, paymentAgreementVersion, acceptBuyerTerms: true }) });
   assert(checkout.response.status === 201 && checkout.body.licenceId, `licence checkout failed: ${checkout.response.status}`);
   const payment = await paymentWebhook({ provider: "mock", eventId: "zoho-smoke-payment-1", type: "payment_succeeded", licenceId: checkout.body.licenceId, paymentReference: "zoho-smoke-reference-1", amountCents: checkout.body.priceCents, currency: "ZAR" });
   assert(payment.response.ok && payment.body.accepted, `signed payment webhook failed: ${payment.response.status}`);
@@ -251,13 +261,20 @@ try {
   await pollJob(deskQueue.body.jobId, "succeeded");
   assert(state.flowCalls.desk >= 1, "Desk provider was not called");
 
-  const analytics = await call("/api/analytics/events", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ consent: true, type: "asset_view", assetId: "asset-table-mountain", country: "ZA", province: "Western Cape", city: "Cape Town" }) });
+  const analytics = await call("/api/analytics/events", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ consent: true, type: "asset_view", assetId: smokeAssetId, country: "ZA", province: "Western Cape", city: "Cape Town" }) });
   assert(analytics.response.status === 202, `analytics event failed: ${analytics.response.status}`);
   await runScheduledDispatch();
-  const analyticsJob = await waitFor(async () => {
-    const outbox = await call("/api/integrations/zoho/outbox");
-    return outbox.body?.results?.find((item) => item.app === "analytics" && item.entityId === "asset-table-mountain") ?? false;
-  }, "analytics outbox job");
+  let analyticsOutboxSnapshot = [];
+  let analyticsJob;
+  try {
+    analyticsJob = await waitFor(async () => {
+      const outbox = await call("/api/integrations/zoho/outbox");
+      analyticsOutboxSnapshot = outbox.body?.results ?? [];
+      return analyticsOutboxSnapshot.find((item) => item.app === "analytics" && item.entityId === smokeAssetId) ?? false;
+    }, "analytics outbox job");
+  } catch (error) {
+    throw new Error(`${error instanceof Error ? error.message : String(error)}; outbox=${JSON.stringify(analyticsOutboxSnapshot)}`);
+  }
   await pollJob(analyticsJob.id, "unknown");
   const analyticsRetry = await call(`/api/integrations/zoho/outbox/${analyticsJob.id}/retry`, { method: "POST", headers: mutationHeaders });
   assert(analyticsRetry.response.status === 202, `analytics unknown retry failed: ${analyticsRetry.response.status}`);

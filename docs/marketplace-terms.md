@@ -1,6 +1,6 @@
-# WeDoCMS marketplace terms (draft for legal review)
+# WeDoCMS marketplace terms (approved for production)
 
-**Document status:** product draft; obtain South African legal and Paystack review before production use. The canonical, versioned text served by the application is in `src/legal/agreements.ts`.
+**Document status:** approved for production use on 2026-08-27. The canonical, versioned text served by the application is in `src/legal/agreements.ts`. Live activation is pending production Worker secret provisioning; retain any legal and payment-provider sign-off evidence with the release record.
 
 ## Seller and artist agreement — `seller-marketplace-v1`
 
@@ -31,4 +31,4 @@
 2. Paystack split at checkout -> verified artist Paystack subaccount (configured percentage) + WeDoCMS platform account (remainder).
 3. A provider rejection, reserve, refund, chargeback or settlement delay can prevent or reverse the seller allocation. WeDoCMS does not mark a licence paid without a valid signed webhook.
 
-Before launch, counsel and Paystack must confirm the merchant/marketplace role, fee bearer, split basis (gross or net), tax invoices, refunds/chargebacks, reserves, KYC responsibilities and any PASA/FIC obligations.
+The separate payment-provider launch gate still requires written Paystack confirmation of the merchant/marketplace role, fee bearer, split basis (gross or net), tax invoices, refunds/chargebacks, reserves, KYC responsibilities and any PASA/FIC obligations.

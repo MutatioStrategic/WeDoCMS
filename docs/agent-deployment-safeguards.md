@@ -41,6 +41,11 @@ environment block or media binding must guard against this exact failure.
    Production sessions remain host-only unless the cookie domain exactly
    matches the serving host. Demo uses explicit demo authentication and must
    not receive the production Supabase key.
+7. `main` and `better-2` publish the same canonical production Worker,
+   `veld-archive-api-production`. The desktop Pages proxy and the native Expo
+   client must continue to resolve through the documented production origin;
+   do not introduce a branch-specific production Worker without updating the
+   client targets and live smoke contract together.
 
 ## Before editing
 
@@ -70,9 +75,13 @@ npm test
 npm run build
 npm run release:check
 npm run auth:check
+npm run auth:check:remote
 node scripts/release-gate.mjs --production
 npx wrangler deploy --env production --dry-run
 npm run worker:deploy
+$env:PRODUCTION_WORKER_URL = "https://veld-archive-api-production.blewisorlando.workers.dev"
+$env:PRODUCTION_EXPECT_MIN_MEDIA = "5"
+npm run test:production-media -- $env:PRODUCTION_WORKER_URL
 ```
 
 For the public demo:

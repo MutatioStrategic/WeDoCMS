@@ -33,7 +33,7 @@ ledger and admin search continue to work and the dashboard reports the missing
 connector explicitly.
 
 ```powershell
-wrangler tail veld-archive-api --format json
+wrangler tail veld-archive-api-production --format json
 wrangler r2 bucket info veld-archive-media
 wrangler queues list
 ```

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { archiveDomain, buildMatchExplanation, evaluateLicenceRequest, type Asset } from "./shared";
+import { archiveDomain, buildMatchExplanation, evaluateLicenceRequest, normalizeHttpUrl, type Asset } from "./shared";
 import { friendlySupabasePhoneError, normalizeSouthAfricanPhone } from "./phone";
 
 describe("South African phone rules", () => {
@@ -17,6 +17,17 @@ describe("South African phone rules", () => {
 
   it("turns an unavailable SMS provider into a useful recovery message", () => {
     expect(friendlySupabasePhoneError(new Error("SMS provider is not configured"), "send")).toContain("configure an SMS provider");
+  });
+});
+
+describe("proof URL rules", () => {
+  it("adds HTTPS when a seller enters a normal website address", () => {
+    expect(normalizeHttpUrl("www.mutationsstrategic.io/proof")).toBe("https://www.mutationsstrategic.io/proof");
+    expect(archiveDomain.normalizeHttpUrl(" https://example.com/licence ")).toBe("https://example.com/licence");
+  });
+
+  it("rejects malformed proof addresses", () => {
+    expect(() => normalizeHttpUrl("not a website")).toThrow("valid website address");
   });
 });
 

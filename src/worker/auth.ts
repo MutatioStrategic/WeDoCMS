@@ -5,6 +5,7 @@ import { isSouthAfricanPhone } from "../phone";
 export type AuthBindings = {
   DB: D1Database;
   APP_ENV?: string;
+  APP_PUBLIC_URL?: string;
   SESSION_SECRET?: string;
   DEMO_AUTH_ENABLED?: string;
   AUTH_JWT_SECRET?: string;
@@ -57,8 +58,17 @@ type SessionRow = {
 
 const jwtClaimsSchema = z.object({
   sub: z.string().min(1).max(200),
-  email: z.string().email().max(320).optional(),
-  phone: z.string().regex(/^\+[1-9]\d{7,14}$/).optional(),
+  email: z.preprocess(
+    (value) => typeof value === "string" && value.trim() === "" ? undefined : value,
+    z.string().email().max(320).optional(),
+  ),
+  // Supabase's user endpoint and legacy JWTs use an empty string for an
+  // email-only account. Treat that representation as an absent phone claim;
+  // only a non-empty value must satisfy the South African boundary below.
+  phone: z.preprocess(
+    (value) => typeof value === "string" && value.trim() === "" ? undefined : value,
+    z.string().regex(/^\+[1-9]\d{7,14}$/).optional(),
+  ),
   name: z.string().trim().min(1).max(180).optional(),
   user_metadata: z.object({
     display_name: z.string().trim().min(1).max(180).optional(),
@@ -152,7 +162,8 @@ export function sessionTokenFromRequest(request: Request): string | null {
 
 function sessionCookie(value: string, env: AuthBindings, maxAge: number): string {
   const attributes = ["HttpOnly", "Path=/", `Max-Age=${maxAge}`, "SameSite=Lax"];
-  if (["production", "demo"].includes(String(env.APP_ENV))) attributes.push("Secure");
+  const secureDemoCookie = String(env.APP_ENV) === "demo" && /^https:\/\//i.test(String(env.APP_PUBLIC_URL ?? ""));
+  if (String(env.APP_ENV) === "production" || secureDemoCookie) attributes.push("Secure");
   if (env.AUTH_COOKIE_DOMAIN) attributes.push(`Domain=${env.AUTH_COOKIE_DOMAIN}`);
   return `va_session=${encodeURIComponent(value)}; ${attributes.join("; ")}`;
 }

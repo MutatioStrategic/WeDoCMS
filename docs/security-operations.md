@@ -2,7 +2,7 @@
 
 The Worker now fails closed for identity and storage operations. Before a production deployment, configure the external controls below in the Cloudflare zone and the selected identity/payment providers.
 
-## Required Worker secrets
+## Required baseline Worker secrets
 
 ```text
 SESSION_SECRET                 # >= 32 random characters; rotate by overlapping deployments
@@ -11,12 +11,17 @@ AUTH_JWKS_URL                  # Auth0/.well-known/jwks.json URL for RS256 verif
 AUTH_ISSUER                    # expected issuer, including trailing slash
 AUTH_AUDIENCE                  # expected API audience
 AUTH_ROLES_CLAIM               # optional namespaced claim containing application roles
-PAYMENT_WEBHOOK_SECRET         # provider webhook signing secret
 TURNSTILE_SECRET               # add when high-risk public actions are enabled
 MEDIA_SCANNER_SECRET           # only when MEDIA_SCANNER_URL is configured
 AUDIT_SIGNING_PRIVATE_JWK    # add before enabling audit exports/events
 AUDIT_SIGNING_PUBLIC_JWK     # add before enabling audit exports/events
 ```
+
+The production deployment gate currently requires only `SESSION_SECRET`,
+`SUPABASE_ANON_KEY`, `DIDIT_API_KEY`, and `DIDIT_SIGNING_SECRET`. R2
+presigning, remote vision, payments, Cloudflare Email Service, Turnstile,
+media scanning, and audit signing remain optional capabilities until their
+corresponding production controls are enabled.
 
 `x-user-id`, `x-user-role`, and `x-demo-user-id` are not accepted as identity. Browser sessions use an HttpOnly, signed, revocable cookie plus a CSRF token. External IdP tokens are accepted only through the verified JWT exchange endpoint.
 
@@ -26,6 +31,25 @@ The production SPA obtains Supabase settings from the Worker-owned
 then run `npm run auth:check` before every deployment. The route returns the
 publishable key only after validating its anon/publishable shape and never
 returns JWT audience, signing, or service-role secrets.
+
+### Supabase identity to Veld tenancy
+
+Supabase authenticates the person; it does not create a Veld organisation or
+membership. The Worker verifies the Supabase subject, exchanges it for an
+HttpOnly Veld session, and resolves `DEFAULT_ORGANIZATION_ID` (or a signed
+organisation claim) against D1. The resulting session organisation ID is the
+tenant boundary used by R2, AI, Vectorize, queues, and application queries.
+Keep the production organisation pre-provisioned with
+`AUTH_ALLOW_ORG_PROVISIONING=false`; a first successful exchange creates the
+active D1 user and membership in that organisation.
+
+Some hosted Supabase projects still sign access tokens with legacy HS256 and
+return an empty string for optional profile fields such as `phone`. When a
+`SUPABASE_JWT_SECRET` is unavailable, the Worker verifies the bearer token via
+Supabase's authenticated `/auth/v1/user` endpoint and normalizes empty optional
+claims before applying the schema. The regression is covered in
+`src/worker/auth.test.ts`; an exchange error about organisation provisioning
+must not be used to mask a failed token verification.
 
 ## CORS and browser policy
 

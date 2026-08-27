@@ -404,17 +404,10 @@
 			],
 			"secrets": {
 				"required": [
-					"R2_ACCESS_KEY_ID",
-					"R2_SECRET_ACCESS_KEY",
-					"REMOTE_VISION_TOKEN",
 					"SESSION_SECRET",
 					"SUPABASE_ANON_KEY",
 					"DIDIT_API_KEY",
-					"DIDIT_SIGNING_SECRET",
-					"PAYMENT_TOKEN",
-					"PAYMENT_WEBHOOK_SECRET",
-					"EMAIL_FROM",
-					"EMAIL_FROM_NAME"
+					"DIDIT_SIGNING_SECRET"
 				]
 			},
 			"send_email": [
@@ -567,7 +560,7 @@
 				"CHAOS_TESTING_ENABLED": "false",
 				"AUTH_JWKS_URL": "https://dev-irn8jgmlsiudjo2l.us.auth0.com/.well-known/jwks.json",
 				"AUTH_ISSUER": "https://dev-irn8jgmlsiudjo2l.us.auth0.com/",
-				"AUTH_AUDIENCE": "https://veld-archive-api.blewisorlando.workers.dev",
+				"AUTH_AUDIENCE": "https://veld-archive-api-production.blewisorlando.workers.dev",
 				"UPLOAD_MAX_SIZE_BYTES": "30000000000",
 				"AUDIT_SIGNING_KEY_ID": "audit-ed25519-v1",
 				"AUDIT_RETENTION_DAYS": "2555",
@@ -584,7 +577,7 @@
 				"PHOTO_VISION_PROVIDER": "ollama-tunnel",
 				"REMOTE_VISION_URL": "https://veld-vision.mutatiostrategic.io/api/generate",
 				"LOCAL_VISION_MODEL": "qwen3-vl:8b",
-				"PHOTO_AI_SOURCE_ORIGIN": "https://veld-archive-api.blewisorlando.workers.dev",
+				"PHOTO_AI_SOURCE_ORIGIN": "https://veld-archive-api-production.blewisorlando.workers.dev",
 				"R2_ACCOUNT_ID": "37e92dc58245d6eab6517a916bd4d9d6",
 				"PHOTO_EMBEDDING_MODEL": "@cf/baai/bge-base-en-v1.5",
 				"PHOTO_INDEX_NAMESPACE": "published-photos-v1",
@@ -598,7 +591,7 @@
 				"BUYER_ANNUAL_SUBSCRIPTION_AMOUNT_CENTS": "1200000",
 				"BUYER_SUBSCRIPTION_INTERVAL": "monthly",
 				"INTRODUCTORY_FREE_DOWNLOAD_LIMIT": "3",
-				"MARKETPLACE_TERMS_APPROVED": "false",
+				"MARKETPLACE_TERMS_APPROVED": "true",
 				"EDGE_CONTROLS_ATTESTED_AT": "",
 				"KEY_ROTATION_ATTESTED_AT": "",
 				"BACKUP_RESTORE_ATTESTED_AT": "",

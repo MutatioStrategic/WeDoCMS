@@ -179,7 +179,7 @@ export async function appendAuditEvent(env: AuditBindings, rawInput: AuditEventI
     resource_type, resource_id, data_json, residency_region, previous_hash,
       event_hash, signature, key_id, public_key_jwk, canonical_json, r2_key, organization_id
     )
-    SELECT ?, ?, sequence + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    SELECT ?, ?, sequence + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
     FROM audit_chain_heads
     WHERE stream_id = ? AND sequence = ? AND head_hash = ?
   `).bind(

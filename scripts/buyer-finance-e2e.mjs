@@ -25,7 +25,7 @@ try {
   const [purchases, credits, membership] = await Promise.all([
     page.evaluate(async () => { const response = await fetch("/api/my/purchases"); return { status: response.status, body: await response.json() }; }),
     page.evaluate(async () => { const response = await fetch("/api/my/credits"); return { status: response.status, body: await response.json() }; }),
-    page.evaluate(async () => { const response = await fetch("/api/my/platform-subscription"); return { status: response.status, body: await response.json() }; }),
+    page.evaluate(async () => { const response = await fetch("/api/subscription"); return { status: response.status, body: await response.json() }; }),
   ]);
   expect(purchases.status, "purchase history API").toBe(200);
   expect(purchases.body.results).toEqual(expect.any(Array));
@@ -37,9 +37,8 @@ try {
 
   await page.reload({ waitUntil: "networkidle" });
   await page.getByRole("button", { name: "Buyer ROI" }).click();
+  await expect(page.getByRole("heading", { name: /Your purchase history and buying power/ })).toBeVisible();
   await expect(page.getByRole("heading", { name: /Keep access ready for the next brief/ })).toBeVisible();
-  await expect(page.getByLabel("Start date")).toBeVisible();
-  await expect(page.getByLabel("Monthly billing day")).toBeVisible();
   await expect(page.getByLabel("Credits to buy")).toBeVisible();
   await expect(page.getByText("1 credit = R100").first()).toBeVisible();
   const accessibility = await new AxeBuilder({ page }).include("#buyer-finance").withTags(["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"]).analyze();

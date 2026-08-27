@@ -1,5 +1,18 @@
 import { normalizeSouthAfricanPhone } from "./phone";
 
+export function normalizeHttpUrl(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  const candidate = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  try {
+    const url = new URL(candidate);
+    if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("unsupported protocol");
+    return url.toString();
+  } catch {
+    throw new Error("Enter a valid website address, for example www.example.com/proof.");
+  }
+}
+
 export type AssetKind = "image" | "video";
 export type AssetStatus = "draft" | "processing" | "needs_review" | "published" | "rejected" | "withdrawn";
 export type WorkflowStage = "ingestion" | "ai_tagging" | "curator_correction" | "approval";
@@ -727,6 +740,10 @@ export class ArchiveDomain {
 
   normalizeSouthAfricanPhone(phone: string): string {
     return normalizeSouthAfricanPhone(phone);
+  }
+
+  normalizeHttpUrl(value: string): string {
+    return normalizeHttpUrl(value);
   }
 
   introductoryDownloadsRemaining(used: number, limit = INTRODUCTORY_FREE_DOWNLOAD_LIMIT): number {

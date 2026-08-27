@@ -2,6 +2,7 @@ import { chromium } from "@playwright/test";
 import { existsSync } from "node:fs";
 
 const baseUrl = process.env.DEMO_BASE_URL ?? "http://127.0.0.1:8787";
+const purchaseAssetTitle = process.env.DEMO_PURCHASE_ASSET_TITLE ?? "Aerial view of Simon's Town";
 const liveDeployment = /^https:\/\//i.test(baseUrl);
 const expectedMediaMinimum = Number(process.env.DEMO_EXPECT_MIN_MEDIA ?? (liveDeployment ? "100" : "1"));
 const roles = ["buyer", "contributor", "editor", "admin"];
@@ -21,6 +22,12 @@ const screens = [
   ["System overview", "System overview"],
   ["WordPress", "WordPress"],
 ];
+const screensByRole = {
+  buyer: screens.filter(([label]) => !["Contributor insights", "Editorial review", "Governance", "WordPress"].includes(label)),
+  contributor: screens.filter(([label]) => ["Explore archive", "Search workbench", "Creator marketplace", "Contributor insights", "Community", "Account", "Rights guide", "System overview"].includes(label)),
+  editor: screens.filter(([label]) => ["Explore archive", "Search workbench", "Creator marketplace", "Contributor insights", "Editorial review", "Governance", "Community", "Account", "Rights guide", "System overview", "WordPress"].includes(label)),
+  admin: screens,
+};
 
 function installedBrowserPath() {
   if (process.env.PLAYWRIGHT_EXECUTABLE_PATH) return process.env.PLAYWRIGHT_EXECUTABLE_PATH;
@@ -59,8 +66,23 @@ try {
           if (!response.ok()) failures.push(`preview ${asset.id} returned HTTP ${response.status()}`);
         }
       }
+      const assetCard = page.locator('article.asset-card[role="button"]').filter({ hasText: purchaseAssetTitle }).first();
+      if (await assetCard.count()) {
+        await assetCard.click();
+        await page.getByRole("button", { name: "Purchase licence" }).click();
+        await page.locator("details.purchase-terms summary").click();
+        await page.locator(".purchase-terms-check input").check();
+        await page.waitForFunction(() => {
+          const button = [...document.querySelectorAll("button")].find((candidate) => candidate.textContent?.includes("Simulate purchase"));
+          return button instanceof HTMLButtonElement && !button.disabled;
+        });
+        await page.getByRole("button", { name: /Simulate purchase/ }).click();
+        await page.waitForURL(/\/account\?licence=.*payment=complete&demo=1/, { waitUntil: "domcontentloaded" });
+      } else {
+        failures.push("buyer checkout asset was not present");
+      }
     }
-    for (const [label, contextLabel] of screens) {
+    for (const [label, contextLabel] of screensByRole[role]) {
       await page.locator(".better-nav-item").filter({ hasText: label }).click();
       await page.locator(".better-context strong").filter({ hasText: contextLabel }).waitFor();
       const body = await page.locator("body").innerText();
@@ -68,11 +90,11 @@ try {
       if (body.includes("The live demo session is unavailable")) failures.push(`${role}/${label}: demo session unavailable`);
     }
     if (failures.length) throw new Error(`${role} screen smoke failed:\n- ${failures.join("\n- ")}`);
-    console.log(`✓ ${role}: ${screens.length} screens loaded`);
+    console.log(`✓ ${role}: ${screensByRole[role].length} screens loaded`);
     await context.close();
   }
 } finally {
   await browser.close();
 }
 
-console.log(JSON.stringify({ ok: true, baseUrl, roles, expectedMediaMinimum, screens: screens.map(([label]) => label) }, null, 2));
+console.log(JSON.stringify({ ok: true, baseUrl, roles, expectedMediaMinimum, screensByRole: Object.fromEntries(Object.entries(screensByRole).map(([role, roleScreens]) => [role, roleScreens.map(([label]) => label)])) }, null, 2));

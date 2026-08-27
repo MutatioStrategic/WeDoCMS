@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, better-2]
   pull_request:
 
 permissions:
@@ -11,7 +11,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -20,9 +20,15 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/mobile/package-lock.json
       - run: npm ci
-      - run: npx wrangler types
+      - name: Install native app dependencies
+        run: npm ci --prefix apps/mobile
+      - run: npx wrangler types --env=production
       - run: npm run typecheck
+      - run: npm run mobile:typecheck
       - run: npm test -- --run
       - run: npm run build
       - run: npm run release:check
@@ -52,5 +58,120 @@ jobs:
           npm run test:auth
           npm run test:penetration
           npm run test:payments
-      - run: npx playwright install chromium
+      - name: Install Playwright browser engines
+        run: npx playwright install --with-deps chromium firefox webkit
       - run: npm run test:a11y
+      - name: Run browser handoffs and Newman/OpenAPI contracts
+        shell: bash
+        env:
+          QA_BASE_URL: http://127.0.0.1:8788
+          QA_RUN_WRITES: "true"
+          QA_BROWSERS: Chromium,Firefox,WebKit
+          QA_ARTIFACT_DIR: ${{ github.workspace }}/artifacts/qa
+        run: |
+          npm run build:demo
+          npx wrangler dev --local --port 8788 \
+            --var APP_ENV:demo \
+            --var DEMO_AUTH_ENABLED:true \
+            --var PAYMENT_PROVIDER:demo \
+            --var ALLOWED_ORIGINS:http://127.0.0.1:8788,http://localhost:8788 \
+            --var TURNSTILE_HOSTNAMES:127.0.0.1,localhost \
+            --var APP_PUBLIC_URL:http://127.0.0.1:8788 \
+            --var SESSION_SECRET:ci-demo-session-secret-that-is-long-enough \
+            --var PAYMENT_WEBHOOK_SECRET:ci-demo-payment-secret-that-is-long-enough \
+            --var STREAM_WEBHOOK_SECRET:ci-demo-stream-secret-that-is-long-enough > qa-worker.log 2>&1 &
+          worker_pid=$!
+          trap 'kill "$worker_pid"' EXIT
+          for attempt in $(seq 1 45); do
+            if curl --silent --fail http://127.0.0.1:8788/api/health >/dev/null; then break; fi
+            sleep 1
+          done
+          if ! curl --silent --fail http://127.0.0.1:8788/api/health >/dev/null; then
+            cat qa-worker.log
+            exit 1
+          fi
+          npm run test:qa
+      - name: Upload browser and contract evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qa-browser-contract-evidence-${{ github.ref_name }}
+          path: |
+            artifacts/qa
+            qa-worker.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  deploy-production-worker:
+    name: Deploy production Worker
+    if: github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'better-2')
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: veld-archive-production-worker
+      cancel-in-progress: false
+    environment:
+      name: production
+      url: https://veld-archive-api-production.blewisorlando.workers.dev
+    permissions:
+      contents: read
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      PRODUCTION_WORKER_URL: https://veld-archive-api-production.blewisorlando.workers.dev
+      PRODUCTION_EXPECT_MIN_MEDIA: "5"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - name: Generate and verify Worker bindings
+        run: npx wrangler types --check
+      - name: Deploy the explicit production environment
+        run: npm run worker:deploy
+      - name: Verify production Worker health
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run test:production-media -- "$PRODUCTION_WORKER_URL"
+
+  deploy-desktop-pages:
+    name: Publish desktop Pages from main
+    if: github.event_name == 'push' && github.ref_name == 'main'
+    needs: deploy-production-worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: https://veld-archive.pages.dev
+    permissions:
+      contents: read
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - name: Publish desktop shell from main
+        run: npm run pages:deploy
+      - name: Verify desktop shell and API proxy
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --silent --show-error --fail --retry 10 --retry-delay 3 https://veld-archive.pages.dev/ >/dev/null
+          response="$(curl --silent --show-error --fail --retry 10 --retry-delay 3 https://veld-archive.pages.dev/api/health)"
+          echo "$response"
+          echo "$response" | grep -Eq '"environment"[[:space:]]*:[[:space:]]*"production"'

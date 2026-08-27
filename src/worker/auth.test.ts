@@ -30,6 +30,13 @@ describe("verified identity exchange", () => {
     expect(cookie).not.toContain("Domain=");
   });
 
+  it("keeps local demo sessions usable on plain HTTP across browser engines", () => {
+    const response = responseWithSession(new Response("ok"), "session.token", { APP_ENV: "demo", APP_PUBLIC_URL: "http://127.0.0.1:8788" } as never);
+    const cookie = response.headers.get("Set-Cookie") ?? "";
+    expect(cookie).not.toContain("Secure");
+    expect(cookie).toContain("SameSite=Lax");
+  });
+
   it("allows a new buyer identity to enroll as a seller without escalating privileged roles", () => {
     expect(roleForNewAccount("buyer", "seller")).toBe("contributor");
     expect(roleForNewAccount("buyer")).toBe("buyer");
@@ -73,6 +80,24 @@ describe("verified identity exchange", () => {
     await expect(verifyExternalJwtWithProvider(env, "header.payload.signature")).resolves.toMatchObject({ provider: "supabase", claims: { sub: "supabase-user-1", phone: "+27821234567", name: "Example Person", email_verified: true } });
     await expect(verifyExternalJwtWithProvider(env, "header.payload.signature")).resolves.toBeNull();
     expect(fetchMock).toHaveBeenNthCalledWith(1, "https://tenant.supabase.co/auth/v1/user", expect.objectContaining({ headers: expect.objectContaining({ apikey: "public-anon-key", Authorization: "Bearer header.payload.signature" }) }));
+    vi.unstubAllGlobals();
+  });
+
+  it("accepts an email-only Supabase identity when the provider returns a blank phone claim", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "supabase-email-user",
+      email: "email-only@example.com",
+      phone: "",
+      email_confirmed_at: "2026-08-20T10:00:00.000Z",
+      user_metadata: {},
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const identity = await verifyExternalJwtWithProvider(
+      { AUTH_PROVIDER: "supabase", SUPABASE_URL: "https://tenant.supabase.co", SUPABASE_ANON_KEY: "public-anon-key" } as never,
+      "header.payload.signature",
+    );
+    expect(identity).toMatchObject({ provider: "supabase", claims: { sub: "supabase-email-user", email: "email-only@example.com", email_verified: true } });
+    expect(identity?.claims.phone).toBeUndefined();
     vi.unstubAllGlobals();
   });
 

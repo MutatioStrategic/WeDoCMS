@@ -2,12 +2,9 @@ $kind: http-request
 name: Persist the authenticated seller profile and versioned seller agreement acceptance
 url: "{{baseUrl}}/api/onboarding/seller"
 method: PUT
-auth:
-  type: apikey
-  credentials:
-    key: va_session
-    value: "{{apiKey}}"
-    in: header
+headers:
+  Authorization: "VeldSession {{sessionToken}}"
+  X-CSRF-Token: "{{csrfToken}}"
 settings: {}
 examples: ./.resources/Persist the authenticated seller profile and versioned seller ag.resources/examples
 order: 1000

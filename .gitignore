@@ -1,6 +1,7 @@
 node_modules/
 dist/
 contracts/reports/
+artifacts/qa/
 worker-smoke*.log
 *.log
 scripts/_tmp-*.mjs

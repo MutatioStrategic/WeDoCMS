@@ -2,7 +2,7 @@ type PagesEnv = {
   WORKER_API_ORIGIN?: string;
 };
 
-const defaultWorkerOrigin = "https://veld-archive-api.blewisorlando.workers.dev";
+const defaultWorkerOrigin = "https://veld-archive-api-production.blewisorlando.workers.dev";
 
 export const onRequest: PagesFunction<PagesEnv> = async ({ env, request }) => {
   const incomingUrl = new URL(request.url);

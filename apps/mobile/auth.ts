@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState, Linking, Platform } from "react-native";
 import "react-native-url-polyfill/auto";
 import { friendlySupabasePhoneError, normalizeSouthAfricanPhone } from "../../src/phone";
+import { friendlySupabaseAuthError } from "../../src/supabase-auth";
 
 declare const process: {
   env: {
@@ -35,6 +36,7 @@ type ExchangeResponse = Partial<MobileApiSession> & { authenticated?: boolean; e
 
 const SESSION_STORAGE_KEY = "veld.mobile.api-session.v1";
 const ACCOUNT_INTENT_STORAGE_KEY = "veld.mobile.account-intent.v1";
+const SUPABASE_EMAIL_REDIRECT_URL = "veldarchive://auth/confirmed";
 const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL?.trim() ?? "";
 const supabasePublishableKey = (process.env.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY)?.trim() ?? "";
 
@@ -268,7 +270,7 @@ export function useMobileAuth(apiBaseUrl: string) {
       if (!result.data.session) throw new Error("Confirm your email before signing in.");
       return await adoptIdentitySession(result.data.session, accountIntent);
     } catch (signInError) {
-      const message = signInError instanceof Error ? signInError.message : "Sign-in failed.";
+      const message = friendlySupabaseAuthError(signInError, "signin");
       setError(message);
       throw new Error(message);
     } finally {
@@ -286,7 +288,7 @@ export function useMobileAuth(apiBaseUrl: string) {
         email: email.trim(),
         password,
         options: {
-          emailRedirectTo: "veldarchive://auth/confirmed",
+          emailRedirectTo: SUPABASE_EMAIL_REDIRECT_URL,
           data: { display_name: displayName.trim() || email.trim().split("@")[0], account_intent: accountIntent },
         },
       });
@@ -298,13 +300,29 @@ export function useMobileAuth(apiBaseUrl: string) {
       return { confirmationRequired: true };
     } catch (signUpError) {
       await persistAccountIntent(null);
-      const message = signUpError instanceof Error ? signUpError.message : "Account creation failed.";
+      const message = friendlySupabaseAuthError(signUpError, "signup");
       setError(message);
       throw new Error(message);
     } finally {
       setLoading(false);
     }
   }, [adoptIdentitySession]);
+
+  const resendSignupConfirmation = useCallback(async (email: string) => {
+    if (!supabase) throw new Error("Supabase authentication is not configured for this build.");
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await supabase.auth.resend({ type: "signup", email: email.trim(), options: { emailRedirectTo: SUPABASE_EMAIL_REDIRECT_URL } });
+      if (result.error) throw result.error;
+    } catch (resendError) {
+      const message = friendlySupabaseAuthError(resendError, "resend");
+      setError(message);
+      throw new Error(message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   const requestPasswordReset = useCallback(async (email: string) => {
     if (!supabase) throw new Error("Supabase authentication is not configured for this build.");
@@ -314,7 +332,7 @@ export function useMobileAuth(apiBaseUrl: string) {
       const result = await supabase.auth.resetPasswordForEmail(email.trim(), { redirectTo: "veldarchive://auth/recovery" });
       if (result.error) throw result.error;
     } catch (resetError) {
-      const message = resetError instanceof Error ? resetError.message : "The password reset email could not be sent.";
+      const message = friendlySupabaseAuthError(resetError, "reset");
       setError(message);
       throw new Error(message);
     } finally {
@@ -408,5 +426,5 @@ export function useMobileAuth(apiBaseUrl: string) {
     }
   }, [apiBaseUrl, session]);
 
-  return { configured: mobileAuthConfigured, error, loading, passwordRecovery, requestPasswordReset, updatePassword, session, sendPhoneCode, signIn, signOut, signUp, verifyPhoneCode };
+  return { configured: mobileAuthConfigured, error, loading, passwordRecovery, requestPasswordReset, resendSignupConfirmation, updatePassword, session, sendPhoneCode, signIn, signOut, signUp, verifyPhoneCode };
 }

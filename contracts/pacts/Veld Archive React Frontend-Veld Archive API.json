@@ -4,6 +4,65 @@
   },
   "interactions": [
     {
+      "description": "a browser authentication configuration request",
+      "request": {
+        "method": "GET",
+        "path": "/api/auth/config"
+      },
+      "response": {
+        "body": {
+          "provider": "supabase",
+          "publishableKey": "sb_publishable_contract_test",
+          "redirectUrl": "https://archive.example.com",
+          "supabaseUrl": "https://tenant.supabase.co"
+        },
+        "headers": {
+          "Content-Type": "application/json",
+          "content-type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.publishableKey": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.redirectUrl": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.supabaseUrl": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          },
+          "header": {
+            "content-type": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^application\\/json(?:;\\s*charset=utf-8)?$"
+                }
+              ]
+            }
+          }
+        },
+        "status": 200
+      }
+    },
+    {
       "description": "a frontend health check",
       "request": {
         "method": "GET",

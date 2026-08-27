@@ -2,7 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 
-const baseUrl = (process.env.E2E_BASE_URL ?? "https://veld-archive-api.blewisorlando.workers.dev").replace(/\/$/, "");
+const baseUrl = (process.env.E2E_BASE_URL ?? "https://veld-archive-api-production.blewisorlando.workers.dev").replace(/\/$/, "");
 const libraryDir = resolve(process.env.PHOTO_LIBRARY_DIR ?? "fixtures/test-photo-library");
 const manifestPath = join(libraryDir, "manifest.json");
 const statePath = join(libraryDir, "upload-state.json");

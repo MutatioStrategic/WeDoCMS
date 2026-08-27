@@ -77,10 +77,11 @@ import { AUTO_APPROVAL_SCOPE, AUTO_APPROVAL_TERMS_VERSION, autoApprovalIsActive,
 import { discoveryTokens, normalizeSavedQuery, scoreRecommendation } from "./discovery";
 import { parseCampaignBrief, rankCampaignAssets, type BrandKit, type CampaignBrief, type CampaignStage } from "../campaign-intelligence";
 import { decideRightsTransition, isRightsReviewer } from "./rights-transition";
+import { sellerEvidenceUpdateAllowed } from "./asset-rights";
 import { createStoredZip, type ZipEntry } from "./zip";
 import { settlementAmounts } from "./payment-settlement";
-import { enqueueZohoOutbox, dispatchDueZohoOutbox, dispatchZohoOutboxJob, type ZohoOutboxJobMessage } from "./zoho-outbox";
-import type { ZohoSocialDraft } from "../integrations/zoho";
+import { decryptZohoSecret, encryptZohoSecret, enqueueZohoOutbox, dispatchDueZohoOutbox, dispatchZohoOutboxJob, type ZohoOutboxJobMessage } from "./zoho-outbox";
+import type { ZohoCampaignSync, ZohoDeskCase, ZohoSocialDraft } from "../integrations/zoho";
 import { bearerToken, normalizeWordPressSiteUrl, WORDPRESS_SCOPES, wordPressApiBaseUrl } from "../integrations/wordpress";
 import {
   assetCreateRequestSchema as contractAssetCreateRequestSchema,
@@ -181,6 +182,7 @@ type SecretBindings = {
   AUTH_ISSUER?: string;
   AUTH_AUDIENCE?: string;
   AUTH_COOKIE_DOMAIN?: string;
+  AUTH_ACCOUNT_PORTAL_URL?: string;
   AUTH_ALLOW_ORG_PROVISIONING?: string;
   DEMO_AUTH_ENABLED?: string;
   DEFAULT_ORGANIZATION_ID?: string;
@@ -217,6 +219,27 @@ type SecretBindings = {
   EMAIL_TOKEN?: string;
   EMAIL_FROM?: string;
   EMAIL_FROM_NAME?: string;
+  ZOHO_ACCOUNTS_URL?: string;
+  ZOHO_CLIENT_ID?: string;
+  ZOHO_CLIENT_SECRET?: string;
+  ZOHO_OAUTH_SCOPES?: string;
+  ZOHO_REFRESH_TOKEN?: string;
+  ZOHO_ACCESS_TOKEN?: string;
+  ZOHO_API_DOMAIN?: string;
+  ZOHO_CRM_MODULE?: string;
+  ZOHO_CRM_EXTERNAL_FIELD?: string;
+  ZOHO_CRM_NAME_FIELD?: string;
+  ZOHO_CRM_DESCRIPTION_FIELD?: string;
+  ZOHO_CRM_STATUS_FIELD?: string;
+  ZOHO_CRM_APPROVED_ASSETS_FIELD?: string;
+  ZOHO_CRM_PLATFORMS_FIELD?: string;
+  ZOHO_CRM_USAGE_RIGHTS_FIELD?: string;
+  ZOHO_CRM_URL_FIELD?: string;
+  ZOHO_SOCIAL_FLOW_WEBHOOK_URL?: string;
+  ZOHO_DESK_FLOW_WEBHOOK_URL?: string;
+  ZOHO_CAMPAIGNS_FLOW_WEBHOOK_URL?: string;
+  ZOHO_ANALYTICS_FLOW_WEBHOOK_URL?: string;
+  ZOHO_TOKEN_ENCRYPTION_KEY?: string;
   EMAIL?: SendEmail;
 };
 type WorkersAiBinding = {
@@ -1070,17 +1093,26 @@ app.post("/api/governance/assets/:id/action", async (c) => {
   const safetyIssue = payload.culturalTags ? metadataSafetyIssue(payload.culturalTags) : null;
   if (safetyIssue) return c.json({ error: safetyIssue, code: "metadata_context_required" }, 422);
   const assetId = c.req.param("id");
-  let exists: { id: string; owner_id: string; organization_id: string; kind: "image" | "video"; status: string; asset_revision: number; reviewed_revision: number | null; metadata_review_status: string } | null;
+  let exists: { id: string; owner_id: string; organization_id: string; kind: "image" | "video"; status: string; asset_revision: number; reviewed_revision: number | null; metadata_review_status: string; rights_status: Asset["rightsStatus"]; model_release_status: Asset["modelReleaseStatus"]; property_release_status: Asset["propertyReleaseStatus"] } | null;
   try {
     exists = await c.env.DB.prepare(`SELECT id, owner_id, organization_id, kind, status, asset_revision,
-      reviewed_revision, metadata_review_status FROM assets WHERE id = ? AND organization_id = ?`)
-      .bind(assetId, actor.organizationId).first<{ id: string; owner_id: string; organization_id: string; kind: "image" | "video"; status: string; asset_revision: number; reviewed_revision: number | null; metadata_review_status: string }>();
+      reviewed_revision, metadata_review_status, rights_status, model_release_status, property_release_status FROM assets WHERE id = ? AND organization_id = ?`)
+      .bind(assetId, actor.organizationId).first<{ id: string; owner_id: string; organization_id: string; kind: "image" | "video"; status: string; asset_revision: number; reviewed_revision: number | null; metadata_review_status: string; rights_status: Asset["rightsStatus"]; model_release_status: Asset["modelReleaseStatus"]; property_release_status: Asset["propertyReleaseStatus"] }>();
   } catch (error) {
     logEvent("error", "metadata.workflow_schema_unavailable", c.get("trace"), { assetId, error: error instanceof Error ? error.message : "unknown-error" });
     return c.json({ error: "Metadata workflow is unavailable until its database migration is applied", code: "metadata_schema_unavailable" }, 503);
   }
   if (!exists) return c.json({ error: "Asset not found" }, 404);
   if (exists.owner_id !== actor.id && !allowedRole(actor, ["editor", "admin"])) return c.json({ error: "Forbidden" }, 403);
+  if (payload.action === "save_correction" && !sellerEvidenceUpdateAllowed(actor.role, {
+    rightsStatus: exists.rights_status,
+    modelReleaseStatus: exists.model_release_status,
+    propertyReleaseStatus: exists.property_release_status,
+  }, {
+    rightsStatus: payload.rightsStatus,
+    modelReleaseStatus: payload.modelReleaseStatus,
+    propertyReleaseStatus: payload.propertyReleaseStatus,
+  })) return c.json({ error: "Rights and release verification is completed by Veld review; submit supporting evidence for review instead.", code: "seller_verification_reviewer_only" }, 422);
   if (payload.freeDownloadEnabled && exists.kind === "video") return c.json({ error: "Introductory free downloads are currently available for photos only" }, 422);
   if (payload.action === "run_ai_tagging") {
     return c.json({
@@ -1183,6 +1215,9 @@ const onboardingSchema = z.object({
   equipment: z.string().trim().max(1000).default(""),
   portfolioUrl: z.string().url().max(500).optional().or(z.literal("")),
   acceptTerms: z.boolean().default(false),
+  termsVersion: z.string().trim().min(1).max(40).optional(),
+}).superRefine((value, context) => {
+  if (value.acceptTerms && value.termsVersion !== sellerAgreement.version) context.addIssue({ code: z.ZodIssueCode.custom, path: ["termsVersion"], message: "Read and accept the current seller agreement before submitting" });
 });
 
 app.get("/api/onboarding", async (c) => {
@@ -1197,6 +1232,7 @@ app.put("/api/onboarding", async (c) => {
   if (!user || !allowedRole(user, ["contributor", "admin"])) return c.json({ error: "Contributor access required" }, 403);
   const payload = onboardingSchema.parse(await c.req.json());
   const now = new Date().toISOString();
+  const termsHash = payload.acceptTerms ? await sha256Hex(agreementText(sellerAgreement)) : null;
   await c.env.DB.batch([
     c.env.DB.prepare("UPDATE users SET bio = ?, organisation_name = ?, languages = ?, specialties = ?, onboarding_status = ? WHERE id = ?")
       .bind(payload.bio, payload.organisationName ?? null, JSON.stringify(payload.languages), JSON.stringify(payload.specialties), payload.acceptTerms ? "submitted" : "in_progress", user.id),
@@ -1204,6 +1240,7 @@ app.put("/api/onboarding", async (c) => {
       VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(user_id) DO UPDATE SET contributor_type = excluded.contributor_type, location = excluded.location, equipment = excluded.equipment, portfolio_url = excluded.portfolio_url, terms_accepted_at = excluded.terms_accepted_at, updated_at = excluded.updated_at`)
       .bind(user.id, payload.contributorType, payload.location ?? null, payload.equipment, payload.portfolioUrl ?? null, payload.acceptTerms ? now : null, now),
+    ...(payload.acceptTerms ? [c.env.DB.prepare("INSERT OR IGNORE INTO marketplace_agreement_acceptances (id, organization_id, user_id, agreement_type, agreement_version, terms_sha256, context_type, context_id, accepted_at) VALUES (?, ?, ?, 'seller', ?, ?, 'onboarding', ?, ?)").bind(crypto.randomUUID(), user.organizationId, user.id, sellerAgreement.version, termsHash, user.id, now)] : []),
   ]);
   return c.json({ ok: true, status: payload.acceptTerms ? "submitted" : "in_progress" });
 });
@@ -1427,6 +1464,15 @@ app.post("/api/assets", async (c) => {
   const user = await requestUser(c);
   if (!user || !allowedRole(user, ["contributor", "editor", "admin"])) return c.json({ error: "Contributor access required" }, 403);
   const payload = assetCreateSchema.parse(await c.req.json());
+  if (!sellerEvidenceUpdateAllowed(user.role, {
+    rightsStatus: "pending",
+    modelReleaseStatus: "unknown",
+    propertyReleaseStatus: "unknown",
+  }, {
+    rightsStatus: payload.rightsStatus,
+    modelReleaseStatus: payload.modelReleaseStatus,
+    propertyReleaseStatus: payload.propertyReleaseStatus,
+  })) return c.json({ error: "Rights and release verification is completed by Veld review; submit supporting evidence for review instead.", code: "seller_verification_reviewer_only" }, 422);
   if (payload.freeDownloadEnabled && payload.kind !== "image") {
     return c.json({ error: "Introductory free downloads are currently available for photos only" }, 422);
   }
@@ -1464,6 +1510,15 @@ app.patch("/api/assets/:id", async (c) => {
     licensePriceCents: payload.licensePriceCents !== undefined ? payload.licensePriceCents : (current.license_price_cents == null ? null : Number(current.license_price_cents)),
     freeDownloadEnabled: payload.freeDownloadEnabled !== undefined ? payload.freeDownloadEnabled : Boolean(current.free_download_enabled),
   };
+  if (!sellerEvidenceUpdateAllowed(user.role, {
+    rightsStatus: current.rights_status as Asset["rightsStatus"],
+    modelReleaseStatus: current.model_release_status as Asset["modelReleaseStatus"],
+    propertyReleaseStatus: current.property_release_status as Asset["propertyReleaseStatus"],
+  }, {
+    rightsStatus: payload.rightsStatus,
+    modelReleaseStatus: payload.modelReleaseStatus,
+    propertyReleaseStatus: payload.propertyReleaseStatus,
+  })) return c.json({ error: "Rights and release verification is completed by Veld review; submit supporting evidence for review instead.", code: "seller_verification_reviewer_only" }, 422);
   if (next.monetizationModel === "individual_license" && (!next.licensePriceCents || next.licensePriceCents < 100)) {
     return c.json({ error: "Individual licences must have a price of at least ZAR 1.00" }, 422);
   }
@@ -2154,7 +2209,9 @@ const sellerOnboardingSchema = z.object({
   representativeName: z.string().trim().min(2).max(180).optional(),
   representativeAuthority: z.boolean().default(false),
   beneficialOwnerRequired: z.boolean().default(false),
+  termsVersion: z.string().trim().min(1).max(40),
 }).superRefine((value, context) => {
+  if (value.termsVersion !== sellerAgreement.version) context.addIssue({ code: z.ZodIssueCode.custom, path: ["termsVersion"], message: "Read and accept the current seller agreement before submitting" });
   if (value.sellerType !== "company") return;
   for (const [field, current] of [["registeredName", value.registeredName], ["cipcRegistrationNumber", value.cipcRegistrationNumber], ["representativeName", value.representativeName]] as const) {
     if (!current) context.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: `${field} is required for a company seller` });
@@ -2222,6 +2279,63 @@ app.post("/api/onboarding/didit/session", async (c) => {
     logEvent("error", "didit.session_failed", c.get("trace"), { contributorId: user.id, error: error instanceof Error ? error.message : "unknown" });
     return c.json({ error: "Didit could not create a hosted verification session" }, 503);
   }
+});
+
+const accountPreferencesSchema = z.object({
+  emailNotifications: z.boolean(),
+  productNotifications: z.boolean(),
+}).strict();
+
+app.get("/api/account/lifecycle", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const [identity, security, exportJob, deletion] = await Promise.all([
+    c.env.DB.prepare("SELECT email_verified_at FROM users WHERE id = ? AND status = 'active'").bind(user.id).first<{ email_verified_at: string | null }>(),
+    c.env.DB.prepare("SELECT email_notifications, product_notifications, mfa_enrolled_at FROM account_security_preferences WHERE user_id = ?").bind(user.id).first<{ email_notifications: number; product_notifications: number; mfa_enrolled_at: string | null }>(),
+    c.env.DB.prepare("SELECT status FROM account_export_jobs WHERE user_id = ? AND organization_id = ? ORDER BY created_at DESC LIMIT 1").bind(user.id, user.organizationId).first<{ status: "queued" | "ready" | "expired" | "failed" }>(),
+    c.env.DB.prepare("SELECT status FROM account_deletion_requests WHERE user_id = ? AND organization_id = ? ORDER BY requested_at DESC LIMIT 1").bind(user.id, user.organizationId).first<{ status: "requested" | "cancelled" | "scheduled" | "completed" }>(),
+  ]);
+  return c.json({
+    emailVerified: Boolean(identity?.email_verified_at),
+    mfaEnrolled: Boolean(security?.mfa_enrolled_at),
+    emailNotifications: Number(security?.email_notifications ?? 1) === 1,
+    productNotifications: Number(security?.product_notifications ?? 1) === 1,
+    exportStatus: exportJob?.status ?? "not_requested",
+    deletionStatus: deletion?.status ?? "none",
+    accountPortalUrl: c.env.AUTH_ACCOUNT_PORTAL_URL?.trim() || null,
+  });
+});
+
+app.put("/api/account/preferences", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const payload = accountPreferencesSchema.parse(await c.req.json());
+  await c.env.DB.prepare(`INSERT INTO account_security_preferences (user_id, email_notifications, product_notifications, updated_at)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(user_id) DO UPDATE SET email_notifications = excluded.email_notifications, product_notifications = excluded.product_notifications, updated_at = CURRENT_TIMESTAMP`)
+    .bind(user.id, payload.emailNotifications ? 1 : 0, payload.productNotifications ? 1 : 0).run();
+  return c.json({ ok: true, ...payload });
+});
+
+app.post("/api/account/exports", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const existing = await c.env.DB.prepare("SELECT id, status, created_at FROM account_export_jobs WHERE user_id = ? AND organization_id = ? AND status = 'queued' ORDER BY created_at DESC LIMIT 1").bind(user.id, user.organizationId).first<{ id: string; status: "queued"; created_at: string }>();
+  if (existing) return c.json({ exportId: existing.id, status: existing.status, createdAt: existing.created_at }, 202);
+  const exportId = crypto.randomUUID();
+  await c.env.DB.prepare("INSERT INTO account_export_jobs (id, user_id, organization_id, status) VALUES (?, ?, ?, 'queued')").bind(exportId, user.id, user.organizationId).run();
+  return c.json({ exportId, status: "queued" }, 202);
+});
+
+app.post("/api/account/deletion", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  const existing = await c.env.DB.prepare("SELECT id, status, scheduled_for FROM account_deletion_requests WHERE user_id = ? AND organization_id = ? AND status IN ('requested', 'scheduled') ORDER BY requested_at DESC LIMIT 1").bind(user.id, user.organizationId).first<{ id: string; status: "requested" | "scheduled"; scheduled_for: string }>();
+  if (existing) return c.json({ deletionId: existing.id, status: existing.status, scheduledFor: existing.scheduled_for }, 202);
+  const deletionId = crypto.randomUUID();
+  await c.env.DB.prepare("INSERT INTO account_deletion_requests (id, user_id, organization_id, status, scheduled_for) VALUES (?, ?, ?, 'requested', datetime('now', '+30 days'))").bind(deletionId, user.id, user.organizationId).run();
+  const scheduled = await c.env.DB.prepare("SELECT scheduled_for FROM account_deletion_requests WHERE id = ?").bind(deletionId).first<{ scheduled_for: string }>();
+  return c.json({ deletionId, status: "requested", scheduledFor: scheduled?.scheduled_for ?? null }, 202);
 });
 
 app.get("/api/subscription", async (c) => {
@@ -4263,10 +4377,12 @@ app.post("/api/analytics/events", async (c) => {
   const payload = analyticsEventSchema.parse(await c.req.json());
   const metricKey = normalizedMetric(payload.type === "search" ? payload.query : payload.type === "tag_click" ? payload.tag : payload.assetId);
   if (!metricKey) return c.json({ accepted: false, reason: "A metric key is required." }, 400);
+  let organizationId = c.env.DEFAULT_ORGANIZATION_ID?.trim() || undefined;
   if (payload.type === "asset_view") {
     const asset = await c.env.DB.prepare("SELECT id, organization_id, status FROM assets WHERE id = ?")
       .bind(payload.assetId).first<{ id: string; organization_id: string; status: string }>();
     if (!asset || asset.status !== "published") return c.json({ accepted: false, reason: "Published asset not found." }, 404);
+    organizationId = asset.organization_id;
     recordMetric(c.env, "asset_view", c.get("trace"), 1, [asset.organization_id, asset.id]);
   }
   await c.env.DB.prepare(`
@@ -4275,6 +4391,40 @@ app.post("/api/analytics/events", async (c) => {
     ON CONFLICT(metric_date, metric_type, metric_key, asset_id, campaign_id, country, province, city)
     DO UPDATE SET count = count + 1, updated_at = CURRENT_TIMESTAMP
   `).bind(today(), payload.type, metricKey, payload.type === "asset_view" ? payload.assetId ?? "" : "", normalizedMetric(payload.country), normalizedMetric(payload.province), normalizedMetric(payload.city)).run();
+  const analyticsConfigured = new IntegrationContainer(c.env).zoho.status().apps.some((app) => app.id === "analytics" && app.configured);
+  if (organizationId && analyticsConfigured) {
+    const providerEventId = crypto.randomUUID();
+    try {
+      const serviceActor = await c.env.DB.prepare(`SELECT user_id FROM organization_memberships
+        WHERE organization_id = ? AND role = 'admin' AND status = 'active' ORDER BY created_at LIMIT 1`)
+        .bind(organizationId).first<{ user_id: string }>();
+      if (!serviceActor) return c.json({ accepted: true }, 202);
+      await enqueueZohoOutbox(c.env, {
+        organizationId,
+        actorId: serviceActor.user_id,
+        app: "analytics",
+        action: "ingest_cms_event",
+        entityType: "analytics_event",
+        entityId: payload.assetId ?? metricKey,
+        idempotencyKey: `analytics-${providerEventId}`,
+        payload: {
+          contractVersion: "1.0",
+          eventName: `analytics.${payload.type}`,
+          occurredAt: new Date().toISOString(),
+          organizationId,
+          ...(payload.assetId ? { assetId: payload.assetId } : {}),
+          metricType: payload.type,
+          metricKey,
+          country: normalizedMetric(payload.country) || null,
+          province: normalizedMetric(payload.province) || null,
+          providerEventId,
+          status: "accepted",
+        },
+      });
+    } catch (error) {
+      logEvent("warn", "analytics.zoho_enqueue_failed", c.get("trace"), { error: error instanceof Error ? error.message : "unknown-error" });
+    }
+  }
   return c.json({ accepted: true }, 202);
 });
 
@@ -5421,6 +5571,282 @@ app.get("/api/campaigns/:id/manifest", async (c) => {
     terms: { accepted: await campaignTermsAccepted(c, String(campaign.id), user), buyerAgreementVersion: buyerAgreement.version, paymentAgreementVersion: paymentDisclosure.version },
     assets: approvedAssets.map((asset) => ({ id: asset.id, title: asset.title, rightsStatus: asset.rightsStatus, humanVerified: asset.humanVerified, sourceAttribution: asset.sourceAttribution })),
   });
+});
+
+type ZohoConnectionRow = {
+  id: string;
+  organization_id: string;
+  created_by: string;
+  account_server: string;
+  api_domain: string | null;
+  scopes_json: string;
+  refresh_token_ciphertext: string;
+  refresh_token_iv: string;
+  status: "active" | "error" | "revoked";
+  last_validated_at: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+const zohoDefaultScopes = [
+  "ZohoCRM.modules.ALL",
+  "ZohoCRM.settings.modules.READ",
+  "ZohoCRM.settings.fields.READ",
+];
+
+const zohoConnectStartSchema = z.object({
+  accountServer: z.string().url().max(240).optional(),
+  scopes: z.array(z.string().trim().min(1).max(120)).min(1).max(30).optional(),
+  returnPath: z.string().trim().max(240).refine((value) => value.startsWith("/") && !value.startsWith("//"), "returnPath must be an internal path").optional(),
+}).strict().default({});
+const zohoValidateSchema = z.object({ module: z.string().trim().min(1).max(80).optional() }).strict().default({});
+
+function zohoScopes(value: unknown, fallback = zohoDefaultScopes): string[] {
+  const values = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.split(/[\s,]+/)
+      : fallback;
+  return [...new Set(values.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim()))];
+}
+
+function zohoOrigin(c: AppContext): string {
+  const configured = c.env.APP_PUBLIC_URL?.trim();
+  try { return new URL(configured || c.req.url).origin; } catch { return new URL(c.req.url).origin; }
+}
+
+function zohoRedirectUri(c: AppContext): string {
+  return `${zohoOrigin(c)}/api/integrations/zoho/oauth/callback`;
+}
+
+async function activeZohoConnection(c: AppContext, user: RequestUser): Promise<ZohoConnectionRow | null> {
+  return c.env.DB.prepare(`SELECT id, organization_id, created_by, account_server, api_domain, scopes_json,
+      refresh_token_ciphertext, refresh_token_iv, status, last_validated_at, last_error, created_at, updated_at
+    FROM zoho_connections WHERE organization_id = ? AND status = 'active' LIMIT 1`).bind(user.organizationId).first<ZohoConnectionRow>();
+}
+
+async function tenantZohoAdapter(c: AppContext, connection: ZohoConnectionRow) {
+  if (!c.env.ZOHO_TOKEN_ENCRYPTION_KEY) throw new Error("Zoho connection encryption is not configured");
+  const refreshToken = await decryptZohoSecret(connection.refresh_token_ciphertext, connection.refresh_token_iv, c.env.ZOHO_TOKEN_ENCRYPTION_KEY);
+  return new IntegrationContainer({
+    ...c.env,
+    ZOHO_ACCOUNTS_URL: connection.account_server,
+    ZOHO_API_DOMAIN: connection.api_domain ?? undefined,
+    ZOHO_REFRESH_TOKEN: refreshToken,
+  }).zoho;
+}
+
+function zohoConnectionResponse(connection: ZohoConnectionRow | null) {
+  if (!connection) return null;
+  return {
+    id: connection.id,
+    status: connection.status,
+    accountServer: connection.account_server,
+    apiDomain: connection.api_domain,
+    scopes: zohoScopes(parseStringArray(connection.scopes_json)),
+    lastValidatedAt: connection.last_validated_at,
+    lastError: connection.last_error,
+    createdAt: connection.created_at,
+    updatedAt: connection.updated_at,
+  };
+}
+
+function zohoJobResponse(job: { id: string; status: string; created: boolean }) {
+  const status = job.created
+    ? job.status
+    : job.status === "succeeded"
+      ? "already_synced"
+      : ["pending", "processing"].includes(job.status)
+        ? "already_queued"
+        : job.status;
+  return { jobId: job.id, status, created: job.created };
+}
+
+app.get("/api/integrations/zoho/status", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  if (!allowedRole(user, ["admin"])) return c.json({ error: "Organization administrator required" }, 403);
+  const connection = await activeZohoConnection(c, user);
+  const integration = new IntegrationContainer({ ...c.env, ...(connection ? { ZOHO_REFRESH_TOKEN: "tenant-connection-configured" } : {}) }).zoho;
+  return c.json({ provider: "zoho", connection: zohoConnectionResponse(connection), apps: integration.status().apps });
+});
+
+app.post("/api/integrations/zoho/connect/start", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  if (!allowedRole(user, ["admin"])) return c.json({ error: "Organization administrator required" }, 403);
+  const clientId = c.env.ZOHO_CLIENT_ID?.trim();
+  if (!clientId) return c.json({ error: "Zoho OAuth client is not configured" }, 503);
+  const input = zohoConnectStartSchema.parse(await c.req.json().catch(() => ({})));
+  const accountServer = input.accountServer ?? c.env.ZOHO_ACCOUNTS_URL?.trim() ?? "https://accounts.zoho.com";
+  const scopes = zohoScopes(input.scopes, zohoScopes(c.env.ZOHO_OAUTH_SCOPES));
+  const returnPath = input.returnPath ?? "/settings";
+  const state = base64UrlToken();
+  await c.env.DB.prepare(`INSERT INTO zoho_oauth_states
+      (id, organization_id, actor_id, state_hash, account_server, scopes_json, return_path, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '+10 minutes'))`)
+    .bind(crypto.randomUUID(), user.organizationId, user.id, await sha256Hex(state), accountServer, JSON.stringify(scopes), returnPath).run();
+  let authorizationUrl: URL;
+  try {
+    authorizationUrl = new URL("/oauth/v2/auth", accountServer);
+  } catch {
+    return c.json({ error: "Zoho OAuth account server is invalid" }, 503);
+  }
+  authorizationUrl.searchParams.set("client_id", clientId);
+  authorizationUrl.searchParams.set("response_type", "code");
+  authorizationUrl.searchParams.set("access_type", "offline");
+  authorizationUrl.searchParams.set("prompt", "consent");
+  authorizationUrl.searchParams.set("scope", scopes.join(","));
+  authorizationUrl.searchParams.set("redirect_uri", zohoRedirectUri(c));
+  authorizationUrl.searchParams.set("state", state);
+  return c.json({ authorizationUrl: authorizationUrl.toString(), expiresInSeconds: 600 }, 201);
+});
+
+app.get("/api/integrations/zoho/oauth/callback", async (c) => {
+  const state = String(c.req.query("state") ?? "").trim();
+  const code = String(c.req.query("code") ?? "").trim();
+  const providerError = String(c.req.query("error") ?? "").trim();
+  if (!state) return c.json({ error: "Zoho OAuth state is required" }, 400);
+  if (!code && !providerError) return c.json({ error: "Zoho OAuth code is required" }, 400);
+  const stateHash = await sha256Hex(state);
+  const claimed = await c.env.DB.prepare(`UPDATE zoho_oauth_states SET consumed_at = CURRENT_TIMESTAMP
+    WHERE state_hash = ? AND consumed_at IS NULL AND expires_at > CURRENT_TIMESTAMP`).bind(stateHash).run();
+  if (Number(claimed.meta.changes ?? 0) !== 1) return c.json({ error: "Zoho OAuth state is invalid or expired" }, 400);
+  const oauthState = await c.env.DB.prepare(`SELECT id, organization_id, actor_id, account_server, scopes_json, return_path
+    FROM zoho_oauth_states WHERE state_hash = ? LIMIT 1`).bind(stateHash).first<{ id: string; organization_id: string; actor_id: string; account_server: string; scopes_json: string; return_path: string }>();
+  if (!oauthState) return c.json({ error: "Zoho OAuth state is invalid or expired" }, 400);
+  if (providerError) return c.json({ error: "Zoho authorization was declined" }, 400);
+  try {
+    const integration = new IntegrationContainer({ ...c.env, ZOHO_ACCOUNTS_URL: oauthState.account_server }).zoho;
+    const token = await integration.exchangeAuthorizationCode(code, zohoRedirectUri(c));
+    const refreshToken = token.refresh_token?.trim();
+    if (!refreshToken) return c.json({ error: "Zoho OAuth did not return a refresh token" }, 502);
+    const encrypted = await encryptZohoSecret(refreshToken, c.env.ZOHO_TOKEN_ENCRYPTION_KEY ?? "");
+    const connectionId = crypto.randomUUID();
+    const scopes = zohoScopes(token.scope, zohoScopes(parseStringArray(oauthState.scopes_json)));
+    await c.env.DB.prepare("UPDATE zoho_connections SET status = 'revoked', updated_at = CURRENT_TIMESTAMP WHERE organization_id = ? AND status <> 'revoked'").bind(oauthState.organization_id).run();
+    await c.env.DB.prepare(`INSERT INTO zoho_connections
+        (id, organization_id, created_by, account_server, api_domain, scopes_json, refresh_token_ciphertext, refresh_token_iv, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')`)
+      .bind(connectionId, oauthState.organization_id, oauthState.actor_id, oauthState.account_server, token.api_domain ?? null, JSON.stringify(scopes), encrypted.ciphertext, encrypted.iv).run();
+    const destination = new URL(oauthState.return_path, zohoOrigin(c));
+    destination.searchParams.set("zoho", "connected");
+    return c.redirect(destination.toString(), 302);
+  } catch {
+    return c.json({ error: "Zoho OAuth exchange failed" }, 502);
+  }
+});
+
+app.post("/api/integrations/zoho/crm/validate", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  if (!allowedRole(user, ["admin"])) return c.json({ error: "Organization administrator required" }, 403);
+  const connection = await activeZohoConnection(c, user);
+  if (!connection) return c.json({ error: "Connect Zoho before validating the CRM contract" }, 409);
+  const input = zohoValidateSchema.parse(await c.req.json().catch(() => ({})));
+  const moduleName = input.module ?? c.env.ZOHO_CRM_MODULE?.trim() ?? "Campaigns";
+  try {
+    const integration = await tenantZohoAdapter(c, connection);
+    const [modulesResponse, fieldsResponse] = await Promise.all([integration.getCrmModules(), integration.getCrmFields(moduleName)]);
+    const moduleRows = Array.isArray(modulesResponse.modules) ? modulesResponse.modules.filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value)) : [];
+    const fieldRows = Array.isArray(fieldsResponse.fields) ? fieldsResponse.fields.filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value)) : [];
+    const errors: string[] = [];
+    if (!moduleRows.some((row) => String(row.api_name ?? row.module_name ?? "") === moduleName)) errors.push(`Zoho CRM module ${moduleName} was not found`);
+    const requiredFields = [c.env.ZOHO_CRM_EXTERNAL_FIELD, c.env.ZOHO_CRM_NAME_FIELD ?? "Campaign_Name", c.env.ZOHO_CRM_DESCRIPTION_FIELD ?? "Description"].map((value) => value?.trim()).filter((value): value is string => Boolean(value));
+    const availableFields = new Set(fieldRows.map((row) => String(row.api_name ?? "")));
+    for (const field of requiredFields) if (!availableFields.has(field)) errors.push(`Zoho CRM field ${field} was not found`);
+    const status = errors.length ? "invalid" : "valid";
+    const metadata = JSON.stringify({ module: moduleName, modules: modulesResponse, fields: fieldsResponse });
+    await c.env.DB.prepare(`INSERT INTO zoho_contract_metadata
+        (id, connection_id, organization_id, module_api_name, metadata_json, validation_status, validation_errors_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(connection_id, module_api_name) DO UPDATE SET metadata_json = excluded.metadata_json,
+        validation_status = excluded.validation_status, validation_errors_json = excluded.validation_errors_json, validated_at = CURRENT_TIMESTAMP`)
+      .bind(crypto.randomUUID(), connection.id, user.organizationId, moduleName, metadata, status, JSON.stringify(errors)).run();
+    await c.env.DB.prepare("UPDATE zoho_connections SET last_validated_at = CURRENT_TIMESTAMP, last_error = ? WHERE id = ? AND organization_id = ?")
+      .bind(errors.length ? errors.join("; ") : null, connection.id, user.organizationId).run();
+    return c.json({ status, module: moduleName, errors, validatedAt: new Date().toISOString() }, errors.length ? 422 : 200);
+  } catch {
+    return c.json({ error: "Zoho CRM contract validation failed" }, 502);
+  }
+});
+
+app.get("/api/integrations/zoho/outbox", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  if (!allowedRole(user, ["admin"])) return c.json({ error: "Organization administrator required" }, 403);
+  const rows = await c.env.DB.prepare(`SELECT id, app, action, entity_type, entity_id, idempotency_key,
+      contract_version, status, attempts, provider_reference, last_error, created_at, updated_at
+    FROM zoho_outbox_jobs WHERE organization_id = ? ORDER BY created_at DESC LIMIT 100`).bind(user.organizationId).all<Record<string, unknown>>();
+  return c.json({ results: rows.results.map((row) => ({
+    id: String(row.id), app: String(row.app), action: String(row.action), entityType: String(row.entity_type), entityId: String(row.entity_id),
+    idempotencyKey: String(row.idempotency_key), contractVersion: String(row.contract_version), status: String(row.status), attempts: Number(row.attempts ?? 0),
+    providerReference: row.provider_reference ? String(row.provider_reference) : null, lastError: row.last_error ? String(row.last_error) : null,
+    createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+  })) });
+});
+
+app.post("/api/integrations/zoho/outbox/:id/retry", async (c) => {
+  const user = await requestUser(c);
+  if (!user) return c.json({ error: "Authentication required" }, 401);
+  if (!allowedRole(user, ["admin"])) return c.json({ error: "Organization administrator required" }, 403);
+  const updated = await c.env.DB.prepare(`UPDATE zoho_outbox_jobs SET status = 'pending', next_attempt_at = CURRENT_TIMESTAMP,
+      last_error = NULL, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND organization_id = ? AND status IN ('failed', 'unknown')`).bind(c.req.param("id"), user.organizationId).run();
+  if (Number(updated.meta.changes ?? 0) !== 1) return c.json({ error: "Retryable Zoho outbox job not found" }, 404);
+  return c.json({ jobId: c.req.param("id"), status: "pending" }, 202);
+});
+
+async function campaignZohoSync(c: AppContext, user: RequestUser, campaignId: string): Promise<ZohoCampaignSync | null> {
+  const campaign = await c.env.DB.prepare("SELECT * FROM campaigns WHERE id = ? AND organization_id = ?").bind(campaignId, user.organizationId).first<Record<string, unknown>>();
+  if (!campaign) return null;
+  const brief = mergeCampaignBrief(parseCampaignBrief(String(campaign.brief_text ?? "")), safeJsonObject<Record<string, unknown>>(campaign.brief_json, {}));
+  const approved = await c.env.DB.prepare("SELECT COUNT(*) AS count FROM campaign_assets WHERE campaign_id = ? AND stage = 'approved'").bind(campaignId).first<{ count: number }>();
+  const publicUrl = new URL(`/campaigns/${encodeURIComponent(campaignId)}`, zohoOrigin(c)).toString();
+  return {
+    id: campaignId,
+    name: String(campaign.name ?? campaignId),
+    brief: String(campaign.brief_text ?? "").slice(0, 5000),
+    status: String(campaign.status ?? "draft"),
+    approvedAssetCount: Number(approved?.count ?? 0),
+    platforms: brief.platforms,
+    usageRights: brief.usageRights,
+    publicUrl,
+  };
+}
+
+app.post("/api/campaigns/:id/integrations/zoho/crm", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Campaign workspace access required" }, 403);
+  const payload = await campaignZohoSync(c, user, c.req.param("id"));
+  if (!payload) return c.json({ error: "Campaign not found" }, 404);
+  const job = await enqueueZohoOutbox(c.env, { organizationId: user.organizationId, actorId: user.id, app: "crm", action: "upsert_campaign", entityType: "campaign", entityId: payload.id, idempotencyKey: `campaign-crm-${payload.id}`, payload });
+  return c.json(zohoJobResponse(job), job.created ? 202 : 200);
+});
+
+app.post("/api/campaigns/:id/integrations/zoho/campaigns", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Campaign workspace access required" }, 403);
+  const payload = await campaignZohoSync(c, user, c.req.param("id"));
+  if (!payload) return c.json({ error: "Campaign not found" }, 404);
+  const job = await enqueueZohoOutbox(c.env, { organizationId: user.organizationId, actorId: user.id, app: "campaigns", action: "prepare_campaign_handoff", entityType: "campaign", entityId: payload.id, idempotencyKey: `campaign-campaigns-${payload.id}`, payload });
+  return c.json(zohoJobResponse(job), job.created ? 202 : 200);
+});
+
+app.post("/api/rights/cases/:id/integrations/zoho/desk", async (c) => {
+  const user = await requestUser(c);
+  if (!user || !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Rights reviewer access required" }, 403);
+  const row = await c.env.DB.prepare(`SELECT t.id, t.asset_id, t.reason, t.summary, t.status, t.response_due_at, a.title AS asset_title
+    FROM takedown_requests t JOIN assets a ON a.id = t.asset_id AND a.organization_id = t.organization_id
+    WHERE t.id = ? AND t.organization_id = ?`).bind(c.req.param("id"), user.organizationId).first<Record<string, unknown>>();
+  if (!row) return c.json({ error: "Rights case not found" }, 404);
+  const payload: ZohoDeskCase = {
+    id: String(row.id), assetId: String(row.asset_id), assetTitle: String(row.asset_title), reason: String(row.reason), summary: String(row.summary),
+    status: String(row.status), responseDueAt: String(row.response_due_at), publicUrl: new URL(`/rights/cases/${encodeURIComponent(String(row.id))}`, zohoOrigin(c)).toString(),
+  };
+  const job = await enqueueZohoOutbox(c.env, { organizationId: user.organizationId, actorId: user.id, app: "desk", action: "create_rights_case_ticket", entityType: "takedown_request", entityId: payload.id, idempotencyKey: `rights-desk-${payload.id}-${payload.status}`, payload });
+  return c.json(zohoJobResponse(job), job.created ? 202 : 200);
 });
 
 const zohoSocialExportSchema = z.object({

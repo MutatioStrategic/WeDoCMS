@@ -176,6 +176,24 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/assets/{id}:
+    get:
+      operationId: getAsset
+      summary: Get a published asset or an asset visible to its tenant reviewer
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 120 } }
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Asset detail
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Asset' }
+        '404':
+          description: Asset not found or not visible to the caller
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
   /api/notifications:
     get:
       operationId: listNotifications
@@ -478,6 +496,24 @@ paths:
       operationId: saveSellerOnboarding
       summary: Persist the authenticated seller profile and versioned seller agreement acceptance
       security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sellerType, legalName, phone, ageConfirmed, identityDocumentType, bankAccountName, copyrightDeclaration, taxResponsibilityDeclaration, contributorAgreement, termsVersion]
+              properties:
+                sellerType: { type: string, enum: [individual, company] }
+                legalName: { type: string }
+                phone: { type: string }
+                ageConfirmed: { type: boolean, enum: [true] }
+                identityDocumentType: { type: string, enum: [sa_id, passport] }
+                bankAccountName: { type: string }
+                copyrightDeclaration: { type: boolean, enum: [true] }
+                taxResponsibilityDeclaration: { type: boolean, enum: [true] }
+                contributorAgreement: { type: boolean, enum: [true] }
+                termsVersion: { type: string, description: Must match the current seller agreement version shown in the review widget. }
       responses:
         '200': { description: Seller profile saved }
         '403': { description: Contributor access required }
@@ -544,8 +580,131 @@ paths:
       summary: Return the authenticated buyer's one-time introductory photo allowance
       security: [{ sessionCookie: [] }]
       responses:
-        '200': { description: "Allowance limit, used count, remaining count, and claimed photo history" }
-        '401': { description: Authentication required }
+        '200':
+          description: Allowance limit, used count, remaining count, and claimed photo history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FreeDownloadsResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/my/purchases:
+    get:
+      operationId: listBuyerPurchases
+      summary: Return the buyer's licence, subscription, and credit purchase history
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Buyer purchase history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PurchaseHistoryResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/account/lifecycle:
+    get:
+      operationId: getAccountLifecycle
+      summary: Return account verification, notification, export, and deletion state
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Account lifecycle state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountLifecycle'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/account/preferences:
+    put:
+      operationId: updateAccountPreferences
+      summary: Update account notification preferences
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccountPreferencesRequest'
+      responses:
+        '200':
+          description: Preferences updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountPreferencesResponse'
+        '400':
+          description: Invalid preferences payload
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: CSRF validation failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/account/exports:
+    post:
+      operationId: requestAccountExport
+      summary: Queue an account data export
+      security: [{ sessionCookie: [] }]
+      responses:
+        '202':
+          description: Export queued or an existing queued export returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountExportResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: CSRF validation failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/account/deletion:
+    post:
+      operationId: requestAccountDeletion
+      summary: Schedule account deletion with a recovery window
+      security: [{ sessionCookie: [] }]
+      responses:
+        '202':
+          description: Deletion request scheduled or existing request returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountDeletionResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: CSRF validation failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
   /api/assets/{id}/original:
     get:
       operationId: downloadOriginalAsset
@@ -583,6 +742,145 @@ paths:
       responses:
         '200': { description: Management link created }
         '404': { description: No manageable subscription found }
+  /api/analytics/buyer:
+    get:
+      operationId: getBuyerAnalytics
+      summary: Return the authenticated buyer analytics snapshot
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Buyer analytics
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnalyticsSnapshot' }
+        '403':
+          description: Buyer analytics access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/analytics/contributor:
+    get:
+      operationId: getContributorAnalytics
+      summary: Return the authenticated contributor analytics snapshot
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Contributor analytics
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnalyticsSnapshot' }
+        '403':
+          description: Contributor analytics access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/onboarding:
+    get:
+      operationId: getContributorOnboarding
+      summary: Return the contributor profile and session user
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Contributor onboarding profile
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OnboardingResponse' }
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    put:
+      operationId: saveContributorOnboarding
+      summary: Save a contributor profile draft and optionally record current seller terms acceptance
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                bio: { type: string, maxLength: 2000 }
+                organisationName: { type: string, maxLength: 180 }
+                languages: { type: array, items: { type: string, maxLength: 40 }, maxItems: 20 }
+                specialties: { type: array, items: { type: string, maxLength: 80 }, maxItems: 30 }
+                contributorType: { type: string, enum: [individual, agency, archive, institution] }
+                location: { type: string, maxLength: 180 }
+                equipment: { type: string, maxLength: 1000 }
+                portfolioUrl: { type: string, format: uri }
+                acceptTerms: { type: boolean }
+                termsVersion: { type: string, description: Required when acceptTerms is true; must match the current seller agreement version. }
+      responses:
+        '200': { description: Contributor profile saved }
+        '403': { description: Contributor access required }
+        '422': { description: Current seller terms must be reviewed before acceptance }
+  /api/onboarding/status:
+    get:
+      operationId: getContributorOnboardingStatus
+      summary: Return the contributor verification workflow status
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Contributor workflow status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OnboardingStatusResponse' }
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/my/assets:
+    get:
+      operationId: listContributorAssets
+      summary: Return assets owned by the authenticated contributor
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Contributor asset library
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AssetListResponse' }
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/admin/review:
+    get:
+      operationId: getEditorialReviewQueue
+      summary: Return the editor review queue
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Editorial review queue
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AssetListResponse' }
+        '403':
+          description: Editor access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/governance/assets:
+    get:
+      operationId: getGovernanceQueue
+      summary: Return the governance asset queue
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: stage, in: query, required: false, schema: { type: string } }
+      responses:
+        '200':
+          description: Governance queue
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AssetListResponse' }
+        '403':
+          description: Editor access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
   /api/governance/assets/{id}/action:
     post:
       operationId: runGovernanceAction
@@ -848,6 +1146,207 @@ paths:
           content:
             application/json:
               schema: { type: object, required: [verified], properties: { verified: { type: boolean }, reason: { type: string } }, additionalProperties: false }
+  /api/analytics/events:
+    post:
+      operationId: recordAnalyticsEvent
+      summary: Record a consented public analytics event
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AnalyticsEventRequest' }
+      responses:
+        '202':
+          description: Event accepted for local aggregation and configured integrations
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnalyticsEventResponse' }
+        '400':
+          description: Metric key or payload validation failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: Published asset was not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/integrations/zoho/status:
+    get:
+      operationId: getZohoIntegrationStatus
+      summary: Return tenant-scoped Zoho connection and app status
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Zoho status without access or refresh tokens
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ZohoStatusResponse' }
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: Organization administrator required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/integrations/zoho/connect/start:
+    post:
+      operationId: startZohoConnection
+      summary: Start the tenant-admin Zoho OAuth flow
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ZohoConnectStartRequest' }
+      responses:
+        '201':
+          description: Authorization URL and short-lived OAuth state created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ZohoConnectStartResponse' }
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: Organization administrator required or CSRF validation failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503':
+          description: Zoho OAuth client is not configured
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/integrations/zoho/oauth/callback:
+    get:
+      operationId: completeZohoConnection
+      summary: Consume a single-use Zoho OAuth callback
+      parameters:
+        - { name: state, in: query, required: true, schema: { type: string, minLength: 1 } }
+        - { name: code, in: query, required: false, schema: { type: string, minLength: 1 } }
+        - { name: error, in: query, required: false, schema: { type: string, maxLength: 120 } }
+      responses:
+        '302': { description: Connected admin redirected to the requested internal return path }
+        '400':
+          description: Missing, expired, declined, or replayed OAuth state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '502':
+          description: Zoho token exchange failed or returned no refresh token
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/integrations/zoho/crm/validate:
+    post:
+      operationId: validateZohoCrmContract
+      summary: Validate the configured Zoho CRM module and fields
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ZohoValidateRequest' }
+      responses:
+        '200':
+          description: CRM metadata matches the configured contract
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ZohoValidationResponse' }
+        '401': { description: Authentication required, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '403': { description: Organization administrator required or CSRF validation failed, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '409': { description: Active Zoho connection is required, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '422': { description: CRM metadata does not match the configured contract, content: { application/json: { schema: { $ref: '#/components/schemas/ZohoValidationResponse' } } } }
+        '502': { description: Zoho CRM metadata request failed, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/integrations/zoho/outbox:
+    get:
+      operationId: listZohoOutboxJobs
+      summary: List redacted tenant-scoped Zoho delivery jobs
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Correlated delivery jobs without payloads or secrets
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ZohoOutboxResponse' }
+        '401': { description: Authentication required, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '403': { description: Organization administrator required, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/integrations/zoho/outbox/{id}/retry:
+    post:
+      operationId: retryZohoOutboxJob
+      summary: Manually retry a failed or unknown Zoho delivery job
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, minLength: 1 } }
+      responses:
+        '202':
+          description: Job returned to the pending state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ZohoRetryResponse' }
+        '401': { description: Authentication required, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '403': { description: Organization administrator required or CSRF validation failed, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '404': { description: Retryable tenant-scoped job was not found, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/campaigns/{id}/integrations/zoho/crm:
+    post:
+      operationId: queueZohoCrmCampaignSync
+      summary: Queue an idempotent campaign sync to Zoho CRM
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, minLength: 1 } }
+      responses:
+        '202': { description: Campaign sync queued, content: { application/json: { schema: { $ref: '#/components/schemas/ZohoJobResponse' } } } }
+        '200': { description: Existing campaign sync job returned, content: { application/json: { schema: { $ref: '#/components/schemas/ZohoJobResponse' } } } }
+        '403': { description: Campaign workspace access required or CSRF validation failed, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '404': { description: Campaign not found, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/campaigns/{id}/integrations/zoho/campaigns:
+    post:
+      operationId: queueZohoCampaignsHandoff
+      summary: Queue an idempotent Zoho Campaigns handoff
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, minLength: 1 } }
+      responses:
+        '202': { description: Campaigns handoff queued, content: { application/json: { schema: { $ref: '#/components/schemas/ZohoJobResponse' } } } }
+        '200': { description: Existing handoff job returned, content: { application/json: { schema: { $ref: '#/components/schemas/ZohoJobResponse' } } } }
+        '403': { description: Campaign workspace access required or CSRF validation failed, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '404': { description: Campaign not found, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/campaigns/{id}/integrations/zoho/social:
+    post:
+      operationId: queueZohoSocialDraft
+      summary: Queue a rights-checked reviewable Zoho Social draft
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, minLength: 1 } }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ZohoSocialRequest' }
+      responses:
+        '202': { description: Social draft queued, content: { application/json: { schema: { $ref: '#/components/schemas/ZohoSocialJobResponse' } } } }
+        '200': { description: Existing social draft job returned, content: { application/json: { schema: { $ref: '#/components/schemas/ZohoSocialJobResponse' } } } }
+        '403': { description: Campaign workspace access required or CSRF validation failed, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '404': { description: Campaign not found, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '422': { description: No rights-ready approved asset or valid social channel, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /api/rights/cases/{id}/integrations/zoho/desk:
+    post:
+      operationId: queueZohoDeskRightsCase
+      summary: Queue a rights-aware Zoho Desk case handoff
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, minLength: 1 } }
+      responses:
+        '202': { description: Desk case queued, content: { application/json: { schema: { $ref: '#/components/schemas/ZohoJobResponse' } } } }
+        '200': { description: Existing Desk case job returned, content: { application/json: { schema: { $ref: '#/components/schemas/ZohoJobResponse' } } } }
+        '403': { description: Rights reviewer access required or CSRF validation failed, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '404': { description: Rights case not found, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
   /api/campaigns/{id}:
     get:
       operationId: getCampaignDeliveryDetail
@@ -1415,6 +1914,231 @@ components:
         service: { type: string, enum: [veld-archive-api] }
         environment: { type: string }
       additionalProperties: false
+    DemoLoginRequest:
+      type: object
+      required: [role]
+      properties:
+        role: { type: string, enum: [buyer, contributor, editor, admin] }
+      additionalProperties: false
+    AccountLifecycle:
+      type: object
+      required: [emailVerified, mfaEnrolled, emailNotifications, productNotifications, exportStatus, deletionStatus]
+      properties:
+        emailVerified: { type: boolean }
+        mfaEnrolled: { type: boolean }
+        emailNotifications: { type: boolean }
+        productNotifications: { type: boolean }
+        exportStatus: { type: string, enum: [not_requested, queued, ready, expired, failed] }
+        deletionStatus: { type: string, enum: [none, requested, cancelled, scheduled, completed] }
+        accountPortalUrl: { type: string, format: uri, nullable: true }
+      additionalProperties: false
+    AccountPreferencesRequest:
+      type: object
+      required: [emailNotifications, productNotifications]
+      properties:
+        emailNotifications: { type: boolean }
+        productNotifications: { type: boolean }
+      additionalProperties: false
+    AccountPreferencesResponse:
+      type: object
+      required: [ok, emailNotifications, productNotifications]
+      properties:
+        ok: { type: boolean, enum: [true] }
+        emailNotifications: { type: boolean }
+        productNotifications: { type: boolean }
+      additionalProperties: false
+    AccountExportResponse:
+      type: object
+      required: [exportId, status]
+      properties:
+        exportId: { type: string }
+        status: { type: string, enum: [queued, ready, expired, failed] }
+        createdAt: { type: string }
+      additionalProperties: false
+    AccountDeletionResponse:
+      type: object
+      required: [deletionId, status, scheduledFor]
+      properties:
+        deletionId: { type: string }
+        status: { type: string, enum: [requested, cancelled, scheduled, completed] }
+        scheduledFor: { type: string, nullable: true }
+      additionalProperties: false
+    FreeDownloadsResponse:
+      type: object
+      required: [limit, used, remaining, downloads]
+      properties:
+        limit: { type: integer, minimum: 0 }
+        used: { type: integer, minimum: 0 }
+        remaining: { type: integer, minimum: 0 }
+        downloads: { type: array, items: { type: object, additionalProperties: true } }
+      additionalProperties: false
+    PurchaseHistoryResponse:
+      type: object
+      required: [results]
+      properties:
+        results: { type: array, items: { type: object, additionalProperties: true } }
+        summary: { type: object, additionalProperties: true }
+      additionalProperties: false
+    AssetListResponse:
+      type: object
+      required: [results]
+      properties:
+        results: { type: array, items: { $ref: '#/components/schemas/Asset' } }
+      additionalProperties: false
+    AnalyticsEventRequest:
+      type: object
+      required: [consent, type]
+      properties:
+        consent: { type: boolean, enum: [true] }
+        type: { type: string, enum: [search, tag_click, asset_view] }
+        query: { type: string, maxLength: 200 }
+        tag: { type: string, maxLength: 120 }
+        assetId: { type: string, maxLength: 120 }
+        country: { type: string, maxLength: 120 }
+        province: { type: string, maxLength: 120 }
+        city: { type: string, maxLength: 120 }
+      additionalProperties: false
+    AnalyticsEventResponse:
+      type: object
+      required: [accepted]
+      properties:
+        accepted: { type: boolean, enum: [true] }
+      additionalProperties: false
+    ZohoAppStatus:
+      type: object
+      required: [id, configured, mode]
+      properties:
+        id: { type: string, enum: [social, crm, desk, campaigns, analytics] }
+        configured: { type: boolean }
+        mode: { type: string, enum: [flow_webhook, oauth_api, planned] }
+      additionalProperties: false
+    ZohoConnection:
+      type: object
+      required: [id, status, accountServer, apiDomain, scopes, lastValidatedAt, lastError, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        status: { type: string, enum: [active, invalid, revoked] }
+        accountServer: { type: string, format: uri, nullable: true }
+        apiDomain: { type: string, format: uri, nullable: true }
+        scopes: { type: array, items: { type: string } }
+        lastValidatedAt: { type: string, format: date-time, nullable: true }
+        lastError: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+      additionalProperties: false
+    ZohoStatusResponse:
+      type: object
+      required: [provider, connection, apps]
+      properties:
+        provider: { type: string, enum: [zoho] }
+        connection: { allOf: [{ $ref: '#/components/schemas/ZohoConnection' }], nullable: true }
+        apps: { type: array, items: { $ref: '#/components/schemas/ZohoAppStatus' } }
+      additionalProperties: false
+    ZohoConnectStartRequest:
+      type: object
+      properties:
+        accountServer: { type: string, format: uri }
+        scopes: { type: array, minItems: 1, items: { type: string, maxLength: 120 } }
+        returnPath: { type: string, pattern: '^/' }
+      additionalProperties: false
+    ZohoConnectStartResponse:
+      type: object
+      required: [authorizationUrl, expiresInSeconds]
+      properties:
+        authorizationUrl: { type: string, format: uri }
+        expiresInSeconds: { type: integer, minimum: 1 }
+      additionalProperties: false
+    ZohoValidateRequest:
+      type: object
+      properties:
+        module: { type: string, maxLength: 120 }
+      additionalProperties: false
+    ZohoValidationResponse:
+      type: object
+      required: [status, module, errors, validatedAt]
+      properties:
+        status: { type: string, enum: [valid, invalid] }
+        module: { type: string }
+        errors: { type: array, items: { type: string } }
+        validatedAt: { type: string, format: date-time }
+      additionalProperties: false
+    ZohoJobResponse:
+      type: object
+      required: [jobId, status, created]
+      properties:
+        jobId: { type: string }
+        status: { type: string, enum: [pending, processing, succeeded, failed, unknown, already_queued, already_synced] }
+        created: { type: boolean }
+      additionalProperties: false
+    ZohoSocialRequest:
+      type: object
+      properties:
+        copy: { type: string, maxLength: 5000 }
+        channels: { type: array, minItems: 1, items: { type: string, maxLength: 80 } }
+        scheduleAt: { type: string, format: date-time, nullable: true }
+      additionalProperties: false
+    ZohoSocialJobResponse:
+      allOf:
+        - $ref: '#/components/schemas/ZohoJobResponse'
+        - type: object
+          required: [channels, approvedAssetCount]
+          properties:
+            channels: { type: array, items: { type: string } }
+            approvedAssetCount: { type: integer, minimum: 0 }
+          additionalProperties: false
+    ZohoOutboxItem:
+      type: object
+      required: [id, app, action, entityType, entityId, idempotencyKey, contractVersion, status, attempts, providerReference, lastError, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        app: { type: string, enum: [social, crm, desk, campaigns, analytics] }
+        action: { type: string }
+        entityType: { type: string }
+        entityId: { type: string }
+        idempotencyKey: { type: string }
+        contractVersion: { type: string }
+        status: { type: string, enum: [pending, processing, succeeded, failed, unknown] }
+        attempts: { type: integer, minimum: 0 }
+        providerReference: { type: string, nullable: true }
+        lastError: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+      additionalProperties: false
+    ZohoOutboxResponse:
+      type: object
+      required: [results]
+      properties:
+        results: { type: array, items: { $ref: '#/components/schemas/ZohoOutboxItem' } }
+      additionalProperties: false
+    ZohoRetryResponse:
+      type: object
+      required: [jobId, status]
+      properties:
+        jobId: { type: string }
+        status: { type: string, enum: [pending] }
+      additionalProperties: false
+    AnalyticsSnapshot:
+      type: object
+      required: [role, range, summary]
+      properties:
+        role: { type: string }
+        range: { type: string }
+        summary: { type: object, additionalProperties: true }
+      additionalProperties: true
+    OnboardingResponse:
+      type: object
+      required: [user, profile]
+      properties:
+        user: { $ref: '#/components/schemas/SessionUser' }
+        profile: { type: object, nullable: true, additionalProperties: true }
+      additionalProperties: false
+    OnboardingStatusResponse:
+      type: object
+      required: [user, workflow]
+      properties:
+        user: { $ref: '#/components/schemas/SessionUser' }
+        workflow: { type: object, nullable: true, additionalProperties: true }
+      additionalProperties: false
     SessionUser:
       type: object
       required: [id, email, displayName, role, onboardingStatus, organizationId, organizationName, residencyRegion, sessionId, csrfToken]
@@ -1446,6 +2170,8 @@ components:
         authenticated: { type: boolean, enum: [true] }
         user: { $ref: '#/components/schemas/SessionUser' }
         csrfToken: { type: string }
+        expiresAt: { type: string, format: date-time }
+        sessionToken: { type: string }
       additionalProperties: false
     AuthConfigResponse:
       oneOf:

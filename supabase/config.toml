@@ -23,6 +23,9 @@ otp_length = 8
 enable_signup = true
 enable_confirmations = false
 
+[functions.send-email]
+verify_jwt = false
+
 [storage.vector]
 enabled = false
 max_buckets = 10

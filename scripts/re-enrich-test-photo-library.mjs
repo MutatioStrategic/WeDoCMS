@@ -1,4 +1,4 @@
-const baseUrl = (process.env.E2E_BASE_URL ?? "https://veld-archive-api.blewisorlando.workers.dev").replace(/\/$/, "");
+const baseUrl = (process.env.E2E_BASE_URL ?? "https://veld-archive-api-production.blewisorlando.workers.dev").replace(/\/$/, "");
 let cookie = "";
 let csrfToken = "";
 function rememberCookie(response) {

@@ -4,6 +4,7 @@ import { Auth0Provider, useAuth0, type Auth0ContextInterface } from "@auth0/auth
 import { createClient, type Session as SupabaseSession, type SupabaseClient } from "@supabase/supabase-js";
 import { archiveDomain, type AccountLifecycle, type Asset, type BuyerAnalytics, type CommunityOverview, type ContributorAnalytics, type ContributorPerformance, type CreatorProfile, type DiscoveryResponse, type LicenceProduct, type LicenceType, type MonetizationModel, type PortfolioCollection, type SavedSearch, type SearchResponse, type TakedownReason, type UserLightbox, type WorkflowStage } from "./shared";
 import { friendlySupabasePhoneError } from "./phone";
+import { friendlyIdentityExchangeError, friendlySupabaseAuthError } from "./supabase-auth";
 import "./styles.css";
 import { CommunityWorkspace } from "./community";
 import { StudioWorkspace } from "./studio";
@@ -13,7 +14,7 @@ import { WordPressIntegrationPanel } from "./wordpress-integration";
 import type { BrandKit, CampaignBrief, CampaignPlatform, CampaignRecommendation, CampaignStage } from "./campaign-intelligence";
 import { cropPresets, defaultEditRecipe, derivativeForPreset, fitCrop, safeZonePercent, type CropPreset, type EditRecipe } from "./campaign-editor";
 import { Icon, type IconName } from "./ui";
-import { buyerAgreement, paymentDisclosure } from "./legal/agreements";
+import { buyerAgreement, paymentDisclosure, type MarketplaceAgreement } from "./legal/agreements";
 
 declare global {
   interface Window {
@@ -42,6 +43,26 @@ const sidebarSections: SidebarSection[] = [
   { label: "Reference", items: [{ view: "rights", label: "Rights guide", icon: "shield" }, { view: "stakeholders", label: "System overview", icon: "layout" }, { view: "account", label: "Account", icon: "settings" }] },
 ];
 type SessionUser = { id: string; email: string; displayName: string; role: string; organizationId: string; organizationName: string };
+type ApprovalLedgerCategory = "all" | "user_account" | "image";
+type ApprovalLedgerEntry = {
+  id: string;
+  category: Exclude<ApprovalLedgerCategory, "all">;
+  source: "signed_audit" | "workflow_event" | "r2_data_catalog";
+  occurredAt: string;
+  action: string;
+  decision: string;
+  actor: { id: string; name: string; role: string };
+  subject: { id: string; name: string; type: string };
+  resource: { type: string; id: string; title: string };
+  streamId: string | null;
+  sequence: number | null;
+  notes: string | null;
+  integrity: { status: "verified" | "failed" | "legacy" | "catalog"; hashValid: boolean | null; signatureValid: boolean | null };
+};
+type ApprovalLedgerResponse = {
+  summary: { total: number; userAccount: number; image: number; verifiedIntegrity?: number; failedIntegrity?: number };
+  results: ApprovalLedgerEntry[];
+};
 type AppNotification = { id: string; type: string; title: string; body: string; resource_type?: string | null; resource_id?: string | null; read_at?: string | null; created_at: string };
 type Auth0Bridge = Pick<Auth0ContextInterface, "isAuthenticated" | "isLoading" | "getAccessTokenSilently" | "loginWithRedirect" | "logout">;
 type SupabaseAuthMode = "signin" | "signup" | "forgot" | "reset";
@@ -144,6 +165,7 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
   const [supabasePhoneCodeSent, setSupabasePhoneCodeSent] = useState(false);
   const [supabaseDisplayName, setSupabaseDisplayName] = useState("");
   const [supabaseAuthBusy, setSupabaseAuthBusy] = useState(false);
+  const [supabaseConfirmationPendingEmail, setSupabaseConfirmationPendingEmail] = useState<string | null>(null);
   const [supabaseAuthMessage, setSupabaseAuthMessage] = useState<{ tone: "success" | "error"; text: string } | null>(null);
   const authExchangeAttempted = React.useRef(false);
   const supabaseExchangeAttempted = React.useRef(false);
@@ -201,22 +223,27 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
     try {
       const accountIntent = window.sessionStorage.getItem("veld.account-intent") === "seller" || supabaseAccountIntentRef.current === "seller" ? "seller" : undefined;
       const response = await fetch("/api/auth/exchange", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` }, body: JSON.stringify(accountIntent ? { accountIntent } : {}) });
-      if (!response.ok) throw new Error("Identity exchange failed");
-      const data = await response.json() as { user: SessionUser; csrfToken: string };
+      const data = await response.json().catch(() => null) as { user?: SessionUser; csrfToken?: string; error?: string } | null;
+      if (!response.ok || !data?.user || !data.csrfToken) throw new Error(data?.error ?? "Identity exchange failed");
       setSessionUser(data.user);
       setCsrfToken(data.csrfToken);
-      if (accountIntent === "seller" || data.user.role === "contributor") setView("contributor");
+      const sellerAccessGranted = data.user.role === "contributor";
+      if (sellerAccessGranted) setView("contributor");
       window.sessionStorage.removeItem("veld.account-intent");
       supabaseAccountIntentRef.current = "buyer";
       setSupabaseAccountIntent("buyer");
       setSupabaseAuthOpen(false);
       setSupabasePassword("");
+      setSupabaseConfirmationPendingEmail(null);
       setSupabaseAuthMessage(null);
-      setNotice(`Signed in to ${data.user.organizationName} with Supabase.`);
-    } catch {
+      setNotice(accountIntent === "seller" && !sellerAccessGranted
+        ? "Seller access was not granted to this existing account. Create a new seller account to receive contributor access."
+        : `Signed in to ${data.user.organizationName} with Supabase.`);
+    } catch (error) {
       supabaseExchangeAttempted.current = false;
-      setSupabaseAuthMessage({ tone: "error", text: "Supabase accepted the sign-in, but Veld could not connect this account to an organisation. Ask an administrator to provision it." });
-      setNotice("Supabase sign-in succeeded, but this account is not connected to a provisioned organisation.");
+      const message = friendlyIdentityExchangeError(error);
+      setSupabaseAuthMessage({ tone: "error", text: message });
+      setNotice(message);
     }
   }, []);
 
@@ -238,6 +265,29 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
     });
     return () => { active = false; listener.subscription.unsubscribe(); };
   }, [exchangeSupabaseSession, supabase]);
+
+  async function resendSupabaseConfirmation(): Promise<void> {
+    if (!supabase) return;
+    const email = (supabaseConfirmationPendingEmail ?? supabaseEmail).trim();
+    if (!email) {
+      setSupabaseAuthMessage({ tone: "error", text: "Enter the email address used to create your account." });
+      return;
+    }
+    setSupabaseAuthBusy(true);
+    setSupabaseAuthMessage(null);
+    try {
+      const result = await supabase.auth.resend({ type: "signup", email, options: { emailRedirectTo: authRedirectUrl } });
+      if (result.error) throw result.error;
+      setSupabaseConfirmationPendingEmail(email);
+      setSupabaseAuthMessage({ tone: "success", text: "Confirmation email resent. Check your inbox and spam folder before signing in." });
+    } catch (error) {
+      const message = friendlySupabaseAuthError(error, "resend");
+      setSupabaseAuthMessage({ tone: "error", text: message });
+      setNotice(message);
+    } finally {
+      setSupabaseAuthBusy(false);
+    }
+  }
 
   async function submitSupabaseAuth(event: React.FormEvent): Promise<void> {
     event.preventDefault();
@@ -295,17 +345,22 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
         ? await supabase.auth.signUp({ email: supabaseEmail.trim(), password: supabasePassword, options: { emailRedirectTo: authRedirectUrl, data: { display_name: supabaseEmail.trim().split("@")[0] } } })
         : await supabase.auth.signInWithPassword({ email: supabaseEmail.trim(), password: supabasePassword });
       if (result.error) throw result.error;
-      if (result.data.session) await exchangeSupabaseSession(result.data.session);
+      if (result.data.session) {
+        setSupabaseConfirmationPendingEmail(null);
+        await exchangeSupabaseSession(result.data.session);
+      }
       else {
+        setSupabaseConfirmationPendingEmail(supabaseEmail.trim());
         setSupabaseAuthMode("signin");
         setSupabasePassword("");
-        setSupabaseAuthMessage({ tone: "success", text: "Account created. Confirm your email, then sign in to claim 3 free artist-approved photo downloads before choosing a plan." });
+        setSupabaseAuthMessage({ tone: "success", text: "Account created. Check your inbox and spam folder for the confirmation link. If it does not arrive, use Resend confirmation email." });
         setNotice("Account created. Confirm your email, then sign in to claim your free photo downloads.");
       }
     } catch (error) {
       const message = supabaseAuthMethod === "phone"
         ? friendlySupabasePhoneError(error, supabasePhoneCodeSent ? "verify" : "send")
-        : error instanceof Error ? error.message : "Supabase authentication failed.";
+        : friendlySupabaseAuthError(error, supabaseAuthMode === "signup" ? "signup" : supabaseAuthMode === "forgot" ? "reset" : supabaseAuthMode === "reset" ? "verify" : "signin");
+      if (supabaseAuthMode === "signin" && supabaseAuthMethod === "email" && /not confirmed|confirm your email/i.test(message)) setSupabaseConfirmationPendingEmail(supabaseEmail.trim());
       setSupabaseAuthMessage({ tone: "error", text: message });
       setNotice(message);
     } finally {
@@ -632,6 +687,7 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
         {sessionUser && <><button className="ghost-button" onClick={() => navigate("account")}>Account</button><button className="ghost-button" onClick={() => { void api("/api/auth/logout", { method: "POST" }).then(() => { setSessionUser(null); setCsrfToken(""); setNotice("Signed out."); if (auth0) auth0.logout({ logoutParams: { returnTo: window.location.origin } }); if (supabase) void supabase.auth.signOut(); }); }}>Sign out</button></>}
       </div>
     </header>
+    {supabase && supabaseAuthOpen && !sessionUser && supabaseAuthMethod === "email" && supabaseConfirmationPendingEmail && <div className="auth-resend" role="status"><span>Confirmation is still pending for this account.</span><button type="button" className="text-button" disabled={supabaseAuthBusy} onClick={() => void resendSupabaseConfirmation()}>{supabaseAuthBusy ? "Sending…" : "Resend confirmation email"}</button></div>}
     {supabase && supabaseAuthOpen && !sessionUser && supabaseAuthMode === "signup" && <p className="auth-intent-note" role="status">{supabaseAccountIntent === "seller" ? "Seller account: complete verification and payout setup before uploading media." : "Buyer account: create an account to keep your selected asset and continue to licence terms."}</p>}
     {supabase && supabaseAuthOpen && !sessionUser && <section className="auth-panel" aria-label="Supabase authentication"><div><span className="section-kicker">SUPABASE AUTH</span><h2>{supabaseAuthMode === "signup" ? "Create your archive account." : supabaseAuthMode === "forgot" ? "Reset your password." : supabaseAuthMode === "reset" ? "Choose a new password." : "Welcome back."}</h2><p>{supabaseAuthMode === "forgot" ? "Enter your email and we’ll send a secure reset link. For your privacy, the response is the same whether an account exists." : supabaseAuthMode === "reset" ? "Your reset link is verified by Supabase. Set a new password, then sign in again." : supabaseAuthMethod === "phone" ? "Use a one-time SMS code. SMS delivery must be enabled for this Supabase project." : "Email/password authentication is handled by Supabase; Veld receives only the verified access token."}</p></div><form onSubmit={(event) => void submitSupabaseAuth(event)}>{supabaseAuthMessage && <p className={`auth-feedback ${supabaseAuthMessage.tone}`} role={supabaseAuthMessage.tone === "error" ? "alert" : "status"} aria-live="polite">{supabaseAuthMessage.text}</p>}{["signin", "signup"].includes(supabaseAuthMode) && <div className="auth-method-switch" role="group" aria-label="Verification method"><button type="button" className={supabaseAuthMethod === "email" ? "active" : ""} onClick={() => { setSupabaseAuthMethod("email"); setSupabasePhoneCodeSent(false); setSupabaseAuthMessage(null); }}>Email</button><button type="button" className={supabaseAuthMethod === "phone" ? "active" : ""} onClick={() => { setSupabaseAuthMethod("phone"); setSupabasePhoneCodeSent(false); setSupabaseAuthMessage(null); }}>SMS</button></div>}{supabaseAuthMode === "reset" ? <><label>New password<input type="password" autoComplete="new-password" minLength={8} required value={supabasePassword} onChange={(event) => setSupabasePassword(event.target.value)} /></label><label>Confirm new password<input type="password" autoComplete="new-password" minLength={8} required value={supabasePasswordConfirmation} onChange={(event) => setSupabasePasswordConfirmation(event.target.value)} /></label></> : supabaseAuthMethod === "phone" && ["signin", "signup"].includes(supabaseAuthMode) ? <>{supabaseAuthMode === "signup" && <label>Display name<input type="text" autoComplete="name" required value={supabaseDisplayName} onChange={(event) => setSupabaseDisplayName(event.target.value)} /></label>}<label>Phone number<input type="tel" autoComplete="tel" inputMode="tel" pattern="\+[1-9][0-9]{7,14}" required disabled={supabasePhoneCodeSent} value={supabasePhone} onChange={(event) => setSupabasePhone(event.target.value)} /></label>{supabasePhoneCodeSent && <label>SMS code<input type="text" autoComplete="one-time-code" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} required value={supabasePhoneCode} onChange={(event) => setSupabasePhoneCode(event.target.value)} /></label>}</> : <><label>Email<input type="email" autoComplete="email" required value={supabaseEmail} onChange={(event) => setSupabaseEmail(event.target.value)} /></label>{["signin", "signup"].includes(supabaseAuthMode) && <label>Password<input type="password" autoComplete={supabaseAuthMode === "signup" ? "new-password" : "current-password"} minLength={8} required value={supabasePassword} onChange={(event) => setSupabasePassword(event.target.value)} /></label>}</>}<div className="modal-actions"><button type="submit" className="dark-button" disabled={supabaseAuthBusy}>{supabaseAuthBusy ? "Working…" : supabaseAuthMode === "forgot" ? "Send reset link" : supabaseAuthMode === "reset" ? "Update password" : supabaseAuthMethod === "phone" ? supabasePhoneCodeSent ? "Verify SMS code" : "Send SMS code" : supabaseAuthMode === "signup" ? "Create account" : "Sign in"}</button>{supabaseAuthMode === "signin" && supabaseAuthMethod === "email" && <button type="button" className="text-button" onClick={() => { setSupabaseAuthMode("forgot"); setSupabasePassword(""); setSupabaseAuthMessage(null); }}>Forgot password?</button>}{["signin", "signup"].includes(supabaseAuthMode) && <button type="button" className="ghost-button" onClick={() => { setSupabaseAuthMode((mode) => mode === "signup" ? "signin" : "signup"); setSupabasePassword(""); setSupabasePasswordConfirmation(""); setSupabasePhoneCodeSent(false); setSupabaseAuthMessage(null); }}>{supabaseAuthMode === "signup" ? "Use existing account" : "Create an account"}</button>}{supabaseAuthMode === "forgot" && <button type="button" className="ghost-button" onClick={() => { setSupabaseAuthMode("signin"); setSupabaseAuthMessage(null); }}>Back to sign in</button>}{supabaseAuthMode === "reset" && <button type="button" className="ghost-button" onClick={() => { setSupabaseAuthMode("signin"); setSupabasePassword(""); setSupabasePasswordConfirmation(""); setSupabaseAuthMessage(null); }}>Back to sign in</button>}<button type="button" className="ghost-button" onClick={() => setSupabaseAuthOpen(false)}>Close</button></div></form></section>}
     {sessionUser && <details className="notification-center"><summary>Alerts {notifications.some((item) => !item.read_at) && <span>{notifications.filter((item) => !item.read_at).length}</span>}</summary><div><strong>In-app alerts</strong>{notifications.length ? notifications.slice(0, 8).map((item) => <article className={item.read_at ? "read" : ""} key={item.id}><h3>{item.title}</h3><p>{item.body}</p><small>{new Date(item.created_at).toLocaleDateString("en-ZA")}</small>{!item.read_at && <button type="button" onClick={() => void markNotificationRead(item.id)}>Mark read</button>}</article>) : <p>No alerts yet. Saved-search matches will appear here.</p>}</div></details>}
@@ -642,9 +698,9 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
     {view === "campaigns" && <CampaignWorkspace api={api} onNotice={setNotice} onOpen={openAsset} role={sessionUser?.role} />}
     {view === "contributors" && <CreatorMarketplace onOpen={openAsset} />}
     {view === "contributor" && <><ContributorFlowHeader onUpload={() => document.getElementById("contributor-upload")?.scrollIntoView({ behavior: "smooth", block: "start" })} /><AnalyticsDashboard role="contributor" /><MarketplaceLegalDocuments api={api} /><SellerVerificationPanel api={api} onNotice={setNotice} /><div id="contributor-upload"><ContributorWorkspace api={api} onNotice={setNotice} /></div><div id="contributor-library"><ContributorAssetLibrary api={api} onNotice={setNotice} /></div></>}
-    {view === "buyer" && <><BuyerFlowHeader onSearch={() => navigate("search")} onCampaigns={() => navigate("campaigns")} onAccount={() => navigate("account")} /><AnalyticsDashboard role="buyer" onOpenAccount={() => navigate("account")} /></>}
+    {view === "buyer" && <><BuyerFlowHeader onSearch={() => navigate("search")} onCampaigns={() => navigate("campaigns")} onAccount={() => navigate("account")} /><AnalyticsDashboard role="buyer" onOpenAccount={() => navigate("account")} /><BuyerFinancePanel api={api} onNotice={setNotice} /></>}
     {view === "review" && <ReviewWorkspace items={reviewItems} api={api} onNotice={setNotice} onReload={loadReviewQueue} />}
-    {view === "governance" && <><MarketplaceLegalDocuments api={api} /><GovernanceWorkspace api={api} onNotice={setNotice} /></>}
+    {view === "governance" && <><MarketplaceLegalDocuments api={api} /><GovernanceWorkspace api={api} onNotice={setNotice} isAdmin={sessionUser?.role === "admin"} /></>}
     {view === "community" && <CommunityWorkspace api={api} onNotice={setNotice} sessionUser={sessionUser} />}
     {view === "account" && <><BuyerSubscriptionPanel api={api} onNotice={setNotice} /><AccountWorkspace api={api} auth0={auth0} onNotice={setNotice} buyer={sessionUser?.role === "buyer" || sessionUser?.role === "admin"} /></>}
     {view === "studio" && <StudioWorkspace assets={assets} onNotice={setNotice} />}
@@ -849,6 +905,105 @@ function AnalyticsDashboard({ role, onOpenAccount }: { role: "contributor" | "bu
   if (data.role === "contributor") return <section className="analytics-page"><div className="workspace-intro"><span className="section-kicker">CONTRIBUTOR SIGNALS · {data.range}</span><h1>Make what the<br /><em>brief is asking for.</em></h1><p>Demand is shown in aggregate so you can spot opportunity without tracking individual buyers.</p></div><div className="metric-grid"><MetricCard label="Archive searches" value={data.summary.searches.toLocaleString()} detail="for your context and tags" /><MetricCard label="Asset views" value={data.summary.views.toLocaleString()} detail="on your published work" /><MetricCard label="Demand change" value={`+${data.summary.demandChange}%`} detail="compared with prior period" tone="green" /><MetricCard label="Saved to briefs" value={data.summary.saves.toLocaleString()} detail="lightbox saves" /></div><div className="analytics-columns"><article className="analytics-card analytics-wide"><div className="card-heading"><div><span className="section-kicker">SEARCH TRENDS</span><h2>What buyers are looking for</h2></div><span className="status-pill cool">Aggregate only</span></div><MetricBars points={data.searchTrends} /></article><article className="analytics-card"><span className="section-kicker">POPULAR TAGS</span><h2>Context with pull</h2><div className="rank-list">{data.popularTags.map((tag, index) => <div className="rank-row" key={tag.label}><span className="rank-number">0{index + 1}</span><strong>{tag.label}</strong><span>{tag.value}</span></div>)}</div></article><article className="analytics-card"><span className="section-kicker">GEOGRAPHIC DEMAND</span><h2>Where the brief is</h2><div className="rank-list">{data.geographicDemand.map((place) => <div className="place-row" key={place.label}><div><strong>{place.label}</strong><small>{place.detail}</small></div><span className="demand-pill">{place.value}</span></div>)}</div></article></div><div className="opportunity-grid">{data.opportunities.map((item) => <article className={`opportunity-card ${item.tone}`} key={item.title}><span className="section-kicker">OPPORTUNITY</span><h3>{item.title}</h3><p>{item.detail}</p></article>)}</div><p className="privacy-note">Privacy note: Veld stores daily counters, coarse place labels, and approved asset context only. No IP address, device fingerprint, cookie, or raw search history is used for these signals.</p></section>;
 
   return <section className="analytics-page"><div className="workspace-intro"><span className="section-kicker">BUYER PERFORMANCE · {data.range}</span><h1>Know what your<br /><em>licence made possible.</em></h1><p>See campaign delivery and attributed results beside the exact assets your team licensed.</p></div><div className="metric-grid"><MetricCard label="Campaign spend" value={formatZar(data.summary.spendCents)} detail="licensed asset spend" /><MetricCard label="Licensed assets" value={data.summary.licensedAssets.toString()} detail="with campaign attribution" /><MetricCard label="Attributed ROI" value={`+${data.summary.roi}%`} detail="conversion value proxy" tone="green" /><MetricCard label="Conversions" value={data.summary.conversions.toLocaleString()} detail={`${data.summary.impressions.toLocaleString()} impressions`} /></div><div className="analytics-columns buyer-columns"><article className="analytics-card analytics-wide"><div className="card-heading"><div><span className="section-kicker">DELIVERY TREND</span><h2>Campaign impressions</h2></div><span className="status-pill cool">Licensed assets only</span></div><MetricBars points={data.performance} tone="green" /></article><article className="analytics-card"><span className="section-kicker">CAMPAIGNS</span><h2>Asset-level ROI</h2><div className="campaign-list">{data.campaigns.map((campaign) => <div className="campaign-row" key={campaign.id}><div><strong>{campaign.name}</strong><small>{campaign.assetTitle}</small></div><b>+{campaign.roi}%</b><span>{formatZar(campaign.spendCents)}</span></div>)}</div></article></div><div className="campaign-table">{data.campaigns.map((campaign) => <article className="campaign-detail" key={campaign.id}><div><span className="section-kicker">LICENSED ASSET</span><h3>{campaign.assetTitle}</h3><p>{campaign.name} · {campaign.status}</p></div><div><strong>{campaign.impressions.toLocaleString()}</strong><small>impressions</small></div><div><strong>{campaign.conversions.toLocaleString()}</strong><small>conversions</small></div><div><strong>+{campaign.roi}%</strong><small>attributed ROI</small></div></article>)}</div><p className="privacy-note">ROI is tied to licences in D1 and campaign events from your authenticated workspace. Conversion value is a configurable reporting assumption until your ad platform is connected.</p></section>;
+}
+
+type BuyerFinancePlan = { id: "monthly" | "annual"; amountCents: number; currency: string; interval: string };
+type BuyerFinanceSnapshot = {
+  subscription: { configured: boolean; plans: BuyerFinancePlan[]; plan: { amountCents: number; currency: string; interval: string } | null; subscription: Record<string, unknown> | null; sourceOfTruth: string };
+  purchases: Array<Record<string, unknown>>;
+  credits: { oneCreditCents: number; balanceCredits: number; transactions: Array<Record<string, unknown>>; pendingPurchases: Array<Record<string, unknown>> };
+};
+
+function formatBuyerPurchaseDate(value: unknown): string {
+  const date = new Date(String(value ?? ""));
+  return Number.isNaN(date.getTime()) ? String(value ?? "") : new Intl.DateTimeFormat("en-ZA", { dateStyle: "medium" }).format(date);
+}
+
+function BuyerFinancePanel({ api, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
+  const [snapshot, setSnapshot] = useState<BuyerFinanceSnapshot | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [selectedPlan, setSelectedPlan] = useState<"monthly" | "annual">("monthly");
+  const [creditQuantity, setCreditQuantity] = useState("1");
+  const [busy, setBusy] = useState<"subscription" | "credits" | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const responses = await Promise.all([api("/api/my/purchases"), api("/api/my/credits"), api("/api/subscription")]);
+      if (responses.some((response) => !response.ok)) throw new Error("Buyer finance data unavailable");
+      const [purchaseData, creditData, subscriptionData] = await Promise.all(responses.map((response) => response.json()));
+      const purchasePayload = purchaseData as { results?: unknown };
+      const creditPayload = creditData as BuyerFinanceSnapshot["credits"];
+      const nextSubscription = subscriptionData as BuyerFinanceSnapshot["subscription"];
+      setSnapshot({
+        purchases: Array.isArray(purchasePayload.results) ? purchasePayload.results as Array<Record<string, unknown>> : [],
+        credits: creditPayload,
+        subscription: nextSubscription,
+      });
+      if (nextSubscription.plans.length && !nextSubscription.plans.some((plan) => plan.id === selectedPlan)) setSelectedPlan(nextSubscription.plans[0].id);
+    } catch {
+      setSnapshot(null);
+      setError("Buyer payment details are unavailable. No cached balances or purchase records are shown.");
+    } finally {
+      setLoading(false);
+    }
+  }, [api, selectedPlan]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  async function startSubscription(event: React.FormEvent): Promise<void> {
+    event.preventDefault();
+    setBusy("subscription");
+    try {
+      const response = await api("/api/subscription/session", { method: "POST", body: JSON.stringify({ plan: selectedPlan, successUrl: `${window.location.origin}/account?subscription=complete`, cancelUrl: `${window.location.origin}/account?subscription=cancelled` }) });
+      const body = await response.json().catch(() => ({})) as { checkoutUrl?: string; error?: string };
+      if (!response.ok || !body.checkoutUrl) throw new Error(body.error ?? "Subscription checkout is unavailable");
+      window.location.assign(body.checkoutUrl);
+    } catch (failure) {
+      onNotice(failure instanceof Error ? failure.message : "Subscription checkout is unavailable. No recurring payment was created.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function buyCredits(event: React.FormEvent): Promise<void> {
+    event.preventDefault();
+    const quantity = Number(creditQuantity);
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 1000) { onNotice("Enter a whole number of credits between 1 and 1,000."); return; }
+    setBusy("credits");
+    try {
+      const response = await api("/api/buyer/credits/checkout", { method: "POST", body: JSON.stringify({ credits: quantity, successUrl: `${window.location.origin}/account?bundle=complete`, cancelUrl: `${window.location.origin}/account?bundle=cancelled` }) });
+      const body = await response.json().catch(() => ({})) as { checkoutUrl?: string; error?: string };
+      if (!response.ok || !body.checkoutUrl) throw new Error(body.error ?? "Credit checkout is unavailable");
+      window.location.assign(body.checkoutUrl);
+    } catch (failure) {
+      onNotice(failure instanceof Error ? failure.message : "Credit checkout is unavailable. Credits are added only after verified payment.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const subscription = snapshot?.subscription.subscription;
+  const subscriptionStatus = String(subscription?.status ?? "not_started");
+  const subscriptionBusy = ["pending", "active", "non-renewing", "attention"].includes(subscriptionStatus);
+  const selectedPlanData = snapshot?.subscription.plans.find((plan) => plan.id === selectedPlan);
+  const creditTotal = (Number(creditQuantity) || 0) * (snapshot?.credits.oneCreditCents ?? 10000);
+
+  return <section id="buyer-finance" className="buyer-finance" aria-labelledby="buyer-finance-title">
+    <div className="card-heading"><div><span className="section-kicker">BUYER ACCOUNT / PAYMENTS</span><h2 id="buyer-finance-title">Your purchase history and <em>buying power.</em></h2></div><span className="status-pill cool">Live account data</span></div>
+    {loading && <div className="empty-state" role="status">Loading your purchase history, membership, and credits...</div>}
+    {!loading && error && <div className="buyer-finance-error" role="alert"><span>{error}</span><button type="button" className="outline-button" onClick={() => void load()}>Try again</button></div>}
+    {!loading && !error && snapshot && <>
+      <div className="metric-grid buyer-finance-metrics"><MetricCard label="Purchases recorded" value={snapshot.purchases.length.toString()} detail="licences, credits, and membership" /><MetricCard label="Available credits" value={snapshot.credits.balanceCredits.toLocaleString()} detail="1 credit = R100" tone={snapshot.credits.balanceCredits ? "green" : "rust"} /><MetricCard label="Membership" value={subscriptionStatus === "active" ? "Active" : subscriptionStatus.replaceAll("-", " ")} detail={snapshot.subscription.plan ? `${formatZar(snapshot.subscription.plan.amountCents)} / ${snapshot.subscription.plan.interval}` : "Paystack plan not configured"} tone={subscriptionStatus === "active" ? "green" : "rust"} /><MetricCard label="Paid history" value={formatZar(snapshot.purchases.filter((item) => ["paid", "payment_succeeded", "success"].includes(String(item.status))).reduce((sum, item) => sum + Number(item.amountCents ?? 0), 0))} detail="verified completed payments" /></div>
+      <div className="buyer-finance-columns">
+        <article className="buyer-finance-card"><div className="card-heading"><div><span className="section-kicker">MONTHLY MEMBERSHIP</span><h3>Keep access ready for the next brief.</h3></div><span className="status-pill warm">Paystack recurring</span></div><p className="buyer-finance-copy">Choose a configured monthly or annual plan. Membership remains pending until Paystack confirms the payment by signed webhook.</p>{subscriptionBusy ? <div className="buyer-finance-status"><strong>{subscriptionStatus.replaceAll("-", " ")}</strong><span>{subscription?.next_payment_date ? `Next payment: ${formatBuyerPurchaseDate(subscription.next_payment_date)}` : "Payment provider confirmation is still required before access changes."}</span></div> : snapshot.subscription.configured && snapshot.subscription.plans.length ? <form className="buyer-finance-form" onSubmit={(event) => void startSubscription(event)}><div className="buyer-plan-options" role="radiogroup" aria-label="Membership plan">{snapshot.subscription.plans.map((plan) => <label key={plan.id} className={selectedPlan === plan.id ? "selected" : ""}><input type="radio" name="buyer-plan" value={plan.id} checked={selectedPlan === plan.id} onChange={() => setSelectedPlan(plan.id)} /><span><strong>{plan.id === "annual" ? "Annual" : "Monthly"}</strong><small>{formatZar(plan.amountCents)} / {plan.interval}</small></span></label>)}</div><button type="submit" className="dark-button" disabled={busy !== null}>{busy === "subscription" ? "Opening checkout..." : `Start ${selectedPlanData?.id ?? "monthly"} membership`}</button></form> : <div className="buyer-finance-status"><strong>Not configured</strong><span>The recurring Paystack plan is not configured for this deployment. No payment can be created.</span></div>}</article>
+        <article className="buyer-finance-card"><div className="card-heading"><div><span className="section-kicker">ARCHIVE CREDITS</span><h3>Buy credits for artist quotes.</h3></div><span className="status-pill cool">R100 / credit</span></div><p className="buyer-finance-copy">Credits are added to your account only after verified payment and can be used toward custom licences agreed with artists.</p><form className="buyer-finance-form buyer-credit-form" onSubmit={(event) => void buyCredits(event)}><label htmlFor="buyer-credit-quantity">Credits to buy<input id="buyer-credit-quantity" type="number" min="1" max="1000" step="1" value={creditQuantity} onChange={(event) => setCreditQuantity(event.target.value)} required /></label><div className="buyer-finance-total"><span>1 credit = R100</span><strong>{formatZar(creditTotal)}</strong></div><button type="submit" className="dark-button" disabled={busy !== null}>{busy === "credits" ? "Opening checkout..." : "Buy credits"}</button></form><div className="buyer-finance-balance"><strong>{snapshot.credits.balanceCredits.toLocaleString()}</strong><span>credits available for future custom licences</span></div></article>
+      </div>
+      <article className="buyer-finance-card buyer-purchase-history"><div className="card-heading"><div><span className="section-kicker">ALL PURCHASES</span><h3>Everything bought on this account.</h3></div><span className="status-pill cool">{snapshot.purchases.length} record{snapshot.purchases.length === 1 ? "" : "s"}</span></div>{snapshot.purchases.length ? <div className="purchase-history-list">{snapshot.purchases.map((purchase) => <div className="purchase-history-row" key={`${String(purchase.kind)}:${String(purchase.id)}`}><div><strong>{String(purchase.title)}</strong><small>{String(purchase.details)} - {formatBuyerPurchaseDate(purchase.createdAt)}</small></div><b className={`purchase-status ${String(purchase.status)}`}>{String(purchase.status).replaceAll("_", " ")}</b><span>{formatZar(Number(purchase.amountCents ?? 0))}</span></div>)}</div> : <div className="empty-state">No purchases are recorded yet. Completed licences, credits, and membership payments will appear here.</div>}</article>
+    </>}
+  </section>;
 }
 
 function MetricCard({ label, value, detail, tone = "rust" }: { label: string; value: string; detail: string; tone?: "rust" | "green" }) { return <article className={`metric-card ${tone}`}><span className="section-kicker">{label}</span><strong>{value}</strong><small>{detail}</small></article>; }
@@ -1479,7 +1634,75 @@ function CampaignWorkspace({ api, onNotice, onOpen }: { api: (path: string, init
 }
 
 */
-function GovernanceWorkspace({ api, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
+function formatApprovalLedgerDate(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date);
+}
+
+function ApprovalLedgerPanel({ api, onClose }: { api: (path: string, init?: RequestInit) => Promise<Response>; onClose: () => void }) {
+  const [category, setCategory] = useState<ApprovalLedgerCategory>("all");
+  const [ledger, setLedger] = useState<ApprovalLedgerResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const loadLedger = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const response = await api(`/api/admin/approval-ledger?category=${category}&source=all&limit=250`);
+      const payload = await response.json().catch(() => ({})) as Partial<ApprovalLedgerResponse> & { error?: string };
+      if (!response.ok || !Array.isArray(payload.results) || !payload.summary) throw new Error(payload.error ?? "Approval ledger unavailable");
+      setLedger(payload as ApprovalLedgerResponse);
+    } catch {
+      setLedger(null);
+      setError("The approval ledger is unavailable right now. Check your admin access and try again.");
+    } finally {
+      setLoading(false);
+    }
+  }, [api, category]);
+
+  useEffect(() => { void loadLedger(); }, [loadLedger]);
+
+  const tabs: Array<{ value: ApprovalLedgerCategory; label: string }> = [
+    { value: "all", label: "All events" },
+    { value: "user_account", label: "User accounts" },
+    { value: "image", label: "Images" },
+  ];
+
+  return <section className="approval-ledger-panel" aria-labelledby="approval-ledger-title">
+    <div className="approval-ledger-heading">
+      <div><span className="section-kicker">TOP ADMIN / APPROVAL LEDGER</span><h2 id="approval-ledger-title">Every sign-off in one record.</h2><p>Review the actor, subject, decision, resource, and proof state behind every approval event.</p></div>
+      <button type="button" className="text-button" onClick={onClose}>Close ledger</button>
+    </div>
+    <div className="approval-ledger-summary" aria-label="Approval ledger summary">
+      <span><strong>{ledger?.summary.total ?? 0}</strong> all events</span>
+      <span><strong>{ledger?.summary.userAccount ?? 0}</strong> user accounts</span>
+      <span><strong>{ledger?.summary.image ?? 0}</strong> images</span>
+    </div>
+    <div className="approval-ledger-tabs" role="tablist" aria-label="Approval ledger filters">
+      {tabs.map((tab) => <button key={tab.value} type="button" role="tab" aria-selected={category === tab.value} tabIndex={category === tab.value ? 0 : -1} onClick={() => setCategory(tab.value)}>{tab.label}</button>)}
+    </div>
+    {loading && <p className="approval-ledger-status" role="status">Loading approval ledger...</p>}
+    {!loading && error && <div className="approval-ledger-error" role="alert"><span>{error}</span><button type="button" className="outline-button" onClick={() => void loadLedger()}>Try again</button></div>}
+    {!loading && !error && ledger && ledger.results.length === 0 && <p className="approval-ledger-status">No approval events match this filter.</p>}
+    {!loading && !error && ledger && ledger.results.length > 0 && <div className="approval-ledger-list" role="list">
+      {ledger.results.map((entry) => <article className="approval-ledger-entry" key={`${entry.source}-${entry.id}`} role="listitem">
+        <div className="approval-ledger-entry-heading"><div><span className="section-kicker">{entry.category === "image" ? "IMAGE" : "USER ACCOUNT"}</span><h3>{entry.action}</h3></div><span className={`approval-ledger-decision ${entry.decision.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`}>{entry.decision}</span></div>
+        <dl className="approval-ledger-facts"><div><dt>Actor</dt><dd>{entry.actor.name}<small>{entry.actor.role}</small></dd></div><div><dt>Subject</dt><dd>{entry.subject.name}<small>{entry.subject.type}</small></dd></div><div><dt>Resource</dt><dd>{entry.resource.title}<small>{entry.resource.type} / {entry.resource.id}</small></dd></div><div><dt>Recorded</dt><dd>{formatApprovalLedgerDate(entry.occurredAt)}<small>{entry.action}</small></dd></div></dl>
+        <div className="approval-ledger-proof"><span>Source: {entry.source === "signed_audit" ? "signed audit" : entry.source === "workflow_event" ? "legacy workflow" : "catalog record"}</span><span>Proof: {entry.integrity.status}</span>{entry.sequence !== null && <span>Sequence: {entry.sequence}</span>}</div>
+        {entry.notes && <p className="approval-ledger-notes">{entry.notes}</p>}
+      </article>)}
+    </div>}
+  </section>;
+}
+
+function GovernanceWorkspace({ api, onNotice, isAdmin = false }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void; isAdmin?: boolean }) {
+  const [ledgerOpen, setLedgerOpen] = useState(false);
+  if (ledgerOpen) return <main className="governance-page governance-ledger-page"><ApprovalLedgerPanel api={api} onClose={() => setLedgerOpen(false)} /></main>;
+  return <><div className="governance-ledger-launch">{isAdmin && <button type="button" className="outline-button" onClick={() => setLedgerOpen(true)}>Admin ledger</button>}</div><GovernanceWorkspaceContent api={api} onNotice={onNotice} /></>;
+}
+
+function GovernanceWorkspaceContent({ api, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
   const [items, setItems] = useState<Asset[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [stage, setStage] = useState<WorkflowStage | "all">("all");
@@ -1556,7 +1779,7 @@ function GovernanceDetail({ asset, licenceType, setLicenceType, validation, onAc
     </div>
     <div className="draft-status" role="status" aria-live="polite">{dirty ? "Unsaved metadata changes" : "All metadata changes saved"}</div>
     <div className="release-evidence"><div><span className="section-kicker">CONTRIBUTOR RELEASES</span><h3>Evidence cross-check</h3></div><div className="evidence-grid"><Evidence label="Model release" status={asset.modelReleaseStatus} /><Evidence label="Property release" status={asset.propertyReleaseStatus} /></div></div>
-    <div className="governance-actions">{!approved && <><button className="outline-button" onClick={() => onAction("run_ai_tagging", { aiTags: ["South Africa", asset.city ?? "location", asset.kind, "context pending"] })}>Run AI tagging ↗</button><button className="dark-button" disabled={!dirty || !corrections.title} onClick={() => onAction("save_correction", corrections)}>Save correction ↗</button><button className="approve-button" disabled={!corrections.title} onClick={() => onAction("approve", corrections)}>Approve asset ✓</button></>}{approved && <span className="approved-copy"><span className="verified-dot"></span> Approval recorded; checkout gate is active.</span>}</div>
+    <div className="governance-actions">{!approved && <><button className="outline-button" onClick={() => onAction("run_ai_tagging", { aiTags: ["South Africa", asset.city ?? "location", asset.kind, "context pending"] })}>Run AI tagging ↗</button><button className="dark-button" disabled={!dirty || !corrections.title} onClick={() => onAction("save_correction", corrections)}>Save correction ↗</button><button className="approve-button" disabled={!corrections.title} onClick={() => onAction("approve")}>Approve asset ✓</button></>}{approved && <span className="approved-copy"><span className="verified-dot"></span> Approval recorded; checkout gate is active.</span>}</div>
     <div className={`checkout-guard ${validation.allowed ? "clear" : "blocked"}`}><div><span className="section-kicker">PRE-CHECKOUT GATE</span><h3>Licence rules <em>before</em> payment.</h3><p>Requested licence is checked against approval, rights scope, and contributor releases.</p><p className="pricing-note">Seller access: <strong>{assetPricingLabel(asset)}</strong></p></div><div className="checkout-controls"><label>Requested licence<select value={licenceType} onChange={(event) => setLicenceType(event.target.value as LicenceType)}>{licences.map((licence) => <option key={licence} value={licence}>{licence[0].toUpperCase() + licence.slice(1)}</option>)}</select></label><button className={validation.allowed && asset.monetizationModel !== "custom_quote" ? "approve-button" : "blocked-button"} onClick={onCheckout}>{validation.allowed && asset.monetizationModel !== "custom_quote" ? "Continue to checkout ↗" : asset.monetizationModel === "custom_quote" ? "Request custom quote" : "Checkout blocked"}</button></div><div className="checkout-checks">{validation.checks.map((check) => <div key={check.label}><span className={check.passed ? "check-pass" : "check-fail"}>{check.passed ? "✓" : "×"}</span><span><strong>{check.label}</strong><small>{check.detail}</small></span></div>)}</div></div>
   </article>;
 }
@@ -1564,7 +1787,38 @@ function GovernanceDetail({ asset, licenceType, setLicenceType, validation, onAc
 function Evidence({ label, status }: { label: string; status: Asset["modelReleaseStatus"] }) { return <div className="evidence-row"><span className={`evidence-icon ${status}`}>{status === "verified" ? "✓" : status === "pending" ? "!" : "—"}</span><span><strong>{label}</strong><small>{status === "verified" ? "Document verified" : status === "not_required" ? "Not required" : status === "pending" ? "Evidence needs review" : "No document attached"}</small></span><b>{status.replace("_", " ")}</b></div>; }
 
 function AssetPricingFields({ asset, setAsset }: { asset: { monetizationModel: MonetizationModel; licensePriceZar: string; artistLicenseKey: string; artistLicenseUrl: string; artistLicenseTerms: string; freeDownloadEnabled: boolean; kind?: string }; setAsset: (asset: any) => void }) {
-  return <div className="asset-pricing-fields"><label>How should this asset be sold?<select value={asset.monetizationModel} onChange={(event) => setAsset({ ...asset, monetizationModel: event.target.value as MonetizationModel })}><option value="membership">Membership access</option><option value="individual_license">Sell an individual licence</option><option value="custom_quote">Custom quote for premium work</option></select></label>{asset.kind !== "video" && <label className="checkbox-row"><input type="checkbox" checked={asset.freeDownloadEnabled} onChange={(event) => setAsset({ ...asset, freeDownloadEnabled: event.target.checked })} /> Include this photo in the introductory free-download offer<small className="field-help">You choose the images. Only published, rights-approved photos are eligible; each buyer can download up to 3 once.</small></label>}{asset.monetizationModel === "individual_license" && <label>Annual licence price (ZAR)<input required min="1" step="0.01" type="number" value={asset.licensePriceZar} onChange={(event) => setAsset({ ...asset, licensePriceZar: event.target.value })} placeholder="e.g. 2500" /><small className="field-help">Your price is used for a standard one-year licence. Rights and releases still need editorial approval.</small></label>}<label>Artist licence<select value={asset.artistLicenseKey} onChange={(event) => setAsset({ ...asset, artistLicenseKey: event.target.value })}><option value="custom">Custom image licence</option><option value="cc_by_4_0">Creative Commons BY 4.0</option><option value="cc_by_sa_4_0">Creative Commons BY-SA 4.0</option><option value="mit">MIT (only if intentionally chosen)</option><option value="other">Other established licence</option></select></label>{asset.artistLicenseKey !== "custom" && <label>Licence proof URL<input required type="url" value={asset.artistLicenseUrl} onChange={(event) => setAsset({ ...asset, artistLicenseUrl: event.target.value })} placeholder="https://..." /></label>}<label>Licence version / terms<textarea required={asset.artistLicenseKey === "custom" || asset.artistLicenseKey === "other"} value={asset.artistLicenseTerms} onChange={(event) => setAsset({ ...asset, artistLicenseTerms: event.target.value })} placeholder="State the exact permission, restrictions, attribution and enforcement terms." /></label>{asset.monetizationModel === "custom_quote" && <small className="field-help">Buyers will be asked to contact you for a bespoke price instead of checking out immediately.</small>}</div>;
+  return <div className="asset-pricing-fields"><label>How should this asset be sold?<select value={asset.monetizationModel} onChange={(event) => setAsset({ ...asset, monetizationModel: event.target.value as MonetizationModel })}><option value="membership">Membership access</option><option value="individual_license">Sell an individual licence</option><option value="custom_quote">Custom quote for premium work</option></select></label>{asset.kind !== "video" && <label className="checkbox-row"><input type="checkbox" checked={asset.freeDownloadEnabled} onChange={(event) => setAsset({ ...asset, freeDownloadEnabled: event.target.checked })} /> Include this photo in the introductory free-download offer<small className="field-help">You choose the images. Only published, rights-approved photos are eligible; each buyer can download up to 3 once.</small></label>}{asset.monetizationModel === "individual_license" && <label>Annual licence price (ZAR)<input required min="1" step="0.01" type="number" value={asset.licensePriceZar} onChange={(event) => setAsset({ ...asset, licensePriceZar: event.target.value })} placeholder="e.g. 2500" /><small className="field-help">Your price is used for a standard one-year licence. Rights and releases still need editorial approval.</small></label>}<label>Artist licence<select value={asset.artistLicenseKey} onChange={(event) => setAsset({ ...asset, artistLicenseKey: event.target.value })}><option value="custom">Custom image licence</option><option value="cc_by_4_0">Creative Commons BY 4.0</option><option value="cc_by_sa_4_0">Creative Commons BY-SA 4.0</option><option value="mit">MIT (only if intentionally chosen)</option><option value="other">Other established licence</option></select></label>{asset.artistLicenseKey !== "custom" && <label>Licence proof URL<input required type="text" inputMode="url" value={asset.artistLicenseUrl} onChange={(event) => setAsset({ ...asset, artistLicenseUrl: event.target.value })} onBlur={() => { if (!asset.artistLicenseUrl.trim()) return; try { setAsset({ ...asset, artistLicenseUrl: archiveDomain.normalizeHttpUrl(asset.artistLicenseUrl) }); } catch { /* createAsset reports the actionable validation message. */ } }} placeholder="www.example.com/proof" /><small className="field-help">You can enter www.example.com/proof; https:// is added automatically.</small></label>}<label>Licence version / terms<textarea required={asset.artistLicenseKey === "custom" || asset.artistLicenseKey === "other"} value={asset.artistLicenseTerms} onChange={(event) => setAsset({ ...asset, artistLicenseTerms: event.target.value })} placeholder="State the exact permission, restrictions, attribution and enforcement terms." /></label>{asset.monetizationModel === "custom_quote" && <small className="field-help">Buyers will be asked to contact you for a bespoke price instead of checking out immediately.</small>}</div>;
+}
+
+type SellerEvidenceDraft = Pick<Asset, "rightsStatus" | "modelReleaseStatus" | "propertyReleaseStatus">;
+
+function SellerRightsFields({ value, onChange }: { value: SellerEvidenceDraft; onChange: (key: keyof SellerEvidenceDraft, value: SellerEvidenceDraft[keyof SellerEvidenceDraft]) => void }) {
+  return <section className="seller-rights-fields" aria-label="Rights and permissions">
+    <div className="card-heading"><span className="section-kicker">RIGHTS & PERMISSIONS</span><span className="status-pill warm">Veld reviews</span></div>
+    <h3>Tell us what you know about permissions.</h3>
+    <p className="field-help rights-intro">You keep copyright. These answers help us route the record for review; they do not publish or verify the rights themselves.</p>
+    <label>Permission to list and license<select value={value.rightsStatus} onChange={(event) => onChange("rightsStatus", event.target.value as SellerEvidenceDraft["rightsStatus"])}>
+      <option value="pending">I own or am authorised to license it — review needed</option>
+      <option value="editorial_only">Editorial use only — no commercial use</option>
+      <option value="restricted">Permission or restrictions need review</option>
+      {value.rightsStatus === "verified" && <option value="verified" disabled>Verified by Veld — read only</option>}
+    </select><small className="field-help">Choose editorial-only when the work may be shown for news, documentary, or other editorial context but not commercial promotion.</small></label>
+    <div className="two-fields">
+      <label>Recognizable people<select value={value.modelReleaseStatus} onChange={(event) => onChange("modelReleaseStatus", event.target.value as SellerEvidenceDraft["modelReleaseStatus"])}>
+        <option value="unknown">Not sure yet</option>
+        <option value="not_required">No recognizable people</option>
+        <option value="pending">People shown — permission evidence needs review</option>
+        {value.modelReleaseStatus === "verified" && <option value="verified" disabled>Verified by Veld — read only</option>}
+      </select><small className="field-help">A model release is written permission from a recognizable person for certain uses, especially commercial or advertising use.</small></label>
+      <label>Private property or location<select value={value.propertyReleaseStatus} onChange={(event) => onChange("propertyReleaseStatus", event.target.value as SellerEvidenceDraft["propertyReleaseStatus"])}>
+        <option value="unknown">Not sure yet</option>
+        <option value="not_required">No private-property permission needed</option>
+        <option value="pending">Permission evidence needs review</option>
+        {value.propertyReleaseStatus === "verified" && <option value="verified" disabled>Verified by Veld — read only</option>}
+      </select><small className="field-help">Use this for a private building, venue, artwork, or other place where the intended licence may need permission.</small></label>
+    </div>
+    <p className="field-help rights-review-note">If a release or permission is needed, submit the record and keep the supporting evidence ready. An editor will confirm it before publication or commercial licensing.</p>
+  </section>;
 }
 
 function MarketplaceLegalDocuments({ api }: { api: (path: string, init?: RequestInit) => Promise<Response> }) {
@@ -1573,8 +1827,53 @@ function MarketplaceLegalDocuments({ api }: { api: (path: string, init?: Request
   return <section className="workspace-card legal-documents" aria-label="Marketplace legal documents"><div className="card-heading"><span className="section-kicker">LEGAL TERMS</span><span className="status-pill">Versioned</span></div><h2>Read before listing or buying</h2><p className="dialog-intro">The artist keeps copyright. Paystack processes buyer payments and, for approved sellers, splits the agreed percentage directly to the seller subaccount. Your acceptance is recorded with the version and hash.</p>{documents.map((document) => <details key={document.type}><summary>{document.title} · {document.version}</summary>{document.sections.map((section) => <section key={section.heading}><h4>{section.heading}</h4><p>{section.body}</p></section>)}</details>)}</section>;
 }
 
+function AgreementReviewModal({ api, onClose, onAccept, returnFocusRef }: { api: (path: string, init?: RequestInit) => Promise<Response>; onClose: () => void; onAccept: (version: string) => void; returnFocusRef: React.RefObject<HTMLButtonElement | null> }) {
+  const [agreement, setAgreement] = useState<MarketplaceAgreement | null>(null);
+  const [accepted, setAccepted] = useState(false);
+  const [error, setError] = useState("");
+  const closeRef = React.useRef<HTMLButtonElement>(null);
+
+  const loadAgreement = useCallback(async () => {
+    setAgreement(null);
+    setError("");
+    try {
+      const response = await api("/api/legal/agreements");
+      if (!response.ok) throw new Error("The current seller agreement could not be loaded.");
+      const data = await response.json() as { documents?: MarketplaceAgreement[] };
+      const current = data.documents?.find((document) => document.type === "seller");
+      if (!current) throw new Error("The current seller agreement is unavailable.");
+      setAgreement(current);
+    } catch (reason: unknown) {
+      setError(reason instanceof Error ? reason.message : "The current seller agreement could not be loaded.");
+    }
+  }, [api]);
+
+  useEffect(() => { void loadAgreement(); }, [loadAgreement]);
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    closeRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", onKeyDown);
+      window.requestAnimationFrame(() => returnFocusRef.current?.focus());
+    };
+  }, []);
+
+  return <div className="modal-backdrop terms-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="terms-modal" role="dialog" aria-modal="true" aria-labelledby="seller-terms-title" aria-describedby="seller-terms-intro" onMouseDown={(event) => event.stopPropagation()}><button ref={closeRef} type="button" className="dialog-close" aria-label="Close seller terms" onClick={onClose}>×</button><span className="section-kicker">SELLER AGREEMENT</span><h2 id="seller-terms-title">Read the terms before you accept.</h2><p id="seller-terms-intro" className="dialog-intro">Review the current agreement in full. Your acceptance is recorded against this version and its content hash before seller onboarding can continue.</p>{error ? <div className="terms-load-error" role="alert"><strong>{error}</strong><button type="button" className="outline-button" onClick={() => void loadAgreement()}>Try again</button></div> : agreement ? <><div className="terms-document-meta"><strong>{agreement.version}</strong><span>Effective {agreement.effectiveDate}</span></div><div className="terms-document" tabIndex={0}>{agreement.sections.map((section) => <section key={section.heading}><h3>{section.heading}</h3><p>{section.body}</p></section>)}</div><label className="terms-modal-check"><input type="checkbox" checked={accepted} onChange={(event) => setAccepted(event.target.checked)} /><span>I have read and agree to the current Seller and Artist Marketplace Agreement.</span></label><div className="dialog-footer"><span>Need advice? Review this with your legal adviser before signing.</span><button type="button" className="dark-button" disabled={!accepted} onClick={() => onAccept(agreement.version)}>Accept seller terms <span>↗</span></button></div></> : <p className="terms-loading" role="status" aria-live="polite">Loading the current seller agreement…</p>}</div></div>;
+}
+
+function SellerTermsAcceptance({ api, accepted, termsVersion, onAccept }: { api: (path: string, init?: RequestInit) => Promise<Response>; accepted: boolean; termsVersion: string; onAccept: (version: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const triggerRef = React.useRef<HTMLButtonElement>(null);
+  return <><div className={`seller-terms-control${accepted ? " accepted" : ""}`}><div><span className="section-kicker">SELLER AGREEMENT</span><strong>{accepted ? `Accepted · ${termsVersion}` : "Read and accept before submitting"}</strong><small>The current version is shown in a review window and recorded with your seller onboarding.</small></div><button ref={triggerRef} type="button" className="outline-button" onClick={() => setOpen(true)}>{accepted ? "Review terms" : "Read & accept terms"}</button></div>{open && <AgreementReviewModal api={api} onClose={() => setOpen(false)} onAccept={(version) => { onAccept(version); setOpen(false); }} returnFocusRef={triggerRef} />}</>;
+}
+
 function SellerVerificationPanel({ api, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
-  const [seller, setSeller] = useState({ sellerType: "individual", legalName: "", phone: "", ageConfirmed: false, identityDocumentType: "sa_id", bankAccountName: "", registeredName: "", cipcRegistrationNumber: "", representativeName: "", representativeAuthority: false, beneficialOwnerRequired: false, copyrightDeclaration: false, taxResponsibilityDeclaration: false, contributorAgreement: false, signerName: "", signatureReference: "", provider: "paystack", providerAccountId: "", accountHolderName: "", accountLast4: "", branchLast4: "" });
+  const [seller, setSeller] = useState({ sellerType: "individual", legalName: "", phone: "", ageConfirmed: false, identityDocumentType: "sa_id", bankAccountName: "", registeredName: "", cipcRegistrationNumber: "", representativeName: "", representativeAuthority: false, beneficialOwnerRequired: false, copyrightDeclaration: false, taxResponsibilityDeclaration: false, contributorAgreement: false, termsVersion: "", signerName: "", signatureReference: "", provider: "paystack", providerAccountId: "", accountHolderName: "", accountLast4: "", branchLast4: "" });
   const [diditUrl, setDiditUrl] = useState("");
   const [turnstileToken, setTurnstileToken] = useState("");
   const [saving, setSaving] = useState(false);
@@ -1599,27 +1898,27 @@ function SellerVerificationPanel({ api, onNotice }: { api: (path: string, init?:
       onNotice("Seller details saved. Open Didit to finish identity verification; approval remains blocked until its signed result returns.");
   } catch (error) { onNotice(error instanceof Error && error.message === "didit" ? "Didit is not ready yet. Check the API key and KYC/KYB workflow ID." : error instanceof Error && error.message.includes("South African mobile") ? error.message : "Seller onboarding could not be submitted. Complete every field and configure the required provider."); } finally { setSaving(false); }
   }
-  return <form className="workspace-card seller-verification-panel" onSubmit={submit}><div className="card-heading"><span className="section-kicker">02 · SELLER SETUP</span><span className="status-pill warm">Pending verification</span></div><h2>Verify your seller identity</h2><p className="dialog-intro">Individuals and sole proprietors can onboard without a company. Didit verifies the ID/passport, liveness, and phone in a hosted flow; WeDoCMS stores only the decision and provider reference.</p><label>Seller type<select value={seller.sellerType} onChange={(event) => update("sellerType", event.target.value)}><option value="individual">Individual / sole proprietor</option><option value="company">Registered company</option></select></label><div className="two-fields"><label>Legal name<input required value={seller.legalName} onChange={(event) => update("legalName", event.target.value)} /></label><label>Verified phone<input required type="tel" placeholder="+27821234567" value={seller.phone} onChange={(event) => update("phone", event.target.value)} /></label></div><div className="two-fields"><label>ID or passport<select value={seller.identityDocumentType} onChange={(event) => update("identityDocumentType", event.target.value)}><option value="sa_id">South African ID</option><option value="passport">Passport</option></select></label><label className="checkbox-row"><input type="checkbox" checked={seller.ageConfirmed} onChange={(event) => update("ageConfirmed", event.target.checked)} /> I confirm I am at least 18</label></div>{seller.sellerType === "company" && <><label>Registered company name<input required value={seller.registeredName} onChange={(event) => update("registeredName", event.target.value)} /></label><div className="two-fields"><label>CIPC registration number<input required value={seller.cipcRegistrationNumber} onChange={(event) => update("cipcRegistrationNumber", event.target.value)} /></label><label>Director / authorised representative<input required value={seller.representativeName} onChange={(event) => update("representativeName", event.target.value)} /></label></div><label className="checkbox-row"><input type="checkbox" checked={seller.representativeAuthority} onChange={(event) => update("representativeAuthority", event.target.checked)} /> I confirm I am authorised to act for this company</label><label className="checkbox-row"><input type="checkbox" checked={seller.beneficialOwnerRequired} onChange={(event) => update("beneficialOwnerRequired", event.target.checked)} /> Beneficial-owner information is required by our payment provider / legal classification</label><small className="field-help">A configured CIPC lookup runs before the company Didit session.</small></>}<label>Bank account name<input required value={seller.bankAccountName} onChange={(event) => update("bankAccountName", event.target.value)} /><small className="field-help">Must match the legal name (or registered company name). Never enter the account number here.</small></label><label className="checkbox-row"><input type="checkbox" checked={seller.copyrightDeclaration} onChange={(event) => update("copyrightDeclaration", event.target.checked)} /> I own/control the copyright and required releases for my work.</label><label className="checkbox-row"><input type="checkbox" checked={seller.taxResponsibilityDeclaration} onChange={(event) => update("taxResponsibilityDeclaration", event.target.checked)} /> I accept responsibility for my tax affairs and declarations.</label><label className="checkbox-row"><input type="checkbox" checked={seller.contributorAgreement} onChange={(event) => update("contributorAgreement", event.target.checked)} /> I accept the current contributor agreement and licensing terms.</label>{diditUrl && <p className="dialog-intro"><strong>Didit is ready.</strong> <a href={diditUrl} target="_blank" rel="noreferrer">Open the secure verification flow ↗</a></p>}<label>Signer name<input required value={seller.signerName} onChange={(event) => update("signerName", event.target.value)} /></label><label>Firma signature reference<input required minLength={8} value={seller.signatureReference} onChange={(event) => update("signatureReference", event.target.value)} placeholder="Reference returned by Firma" /></label><div className="two-fields"><label>Payout rail<select value={seller.provider} onChange={(event) => update("provider", event.target.value)}><option value="paystack">Paystack marketplace split</option></select></label><label>Paystack subaccount code<input required value={seller.providerAccountId} onChange={(event) => update("providerAccountId", event.target.value)} placeholder="ACCT_... from Paystack" /></label></div><label>Account holder<input required value={seller.accountHolderName} onChange={(event) => update("accountHolderName", event.target.value)} /></label><div className="two-fields"><label>Account last 4<input inputMode="numeric" pattern="\d{4}" value={seller.accountLast4} onChange={(event) => update("accountLast4", event.target.value)} /></label><label>Branch last 4<input inputMode="numeric" pattern="\d{4}" value={seller.branchLast4} onChange={(event) => update("branchLast4", event.target.value)} /></label></div><TurnstileChallenge onToken={setTurnstileToken} /><label className="checkbox-row"><input type="checkbox" required /> I agree to the current Contributor Terms of Service and authorise this digital signature record.</label><button className="dark-button" disabled={saving}>{saving ? "Saving seller details…" : "Save & start Didit verification ↗"}</button></form>;
+  return <form className="workspace-card seller-verification-panel" onSubmit={submit}><div className="card-heading"><span className="section-kicker">02 · SELLER SETUP</span><span className="status-pill warm">Pending verification</span></div><h2>Verify your seller identity</h2><p className="dialog-intro">Individuals and sole proprietors can onboard without a company. Didit verifies the ID/passport, liveness, and phone in a hosted flow; WeDoCMS stores only the decision and provider reference.</p><label>Seller type<select value={seller.sellerType} onChange={(event) => update("sellerType", event.target.value)}><option value="individual">Individual / sole proprietor</option><option value="company">Registered company</option></select></label><div className="two-fields"><label>Legal name<input required value={seller.legalName} onChange={(event) => update("legalName", event.target.value)} /></label><label>Verified phone<input required type="tel" placeholder="+27821234567" value={seller.phone} onChange={(event) => update("phone", event.target.value)} /></label></div><div className="two-fields"><label>ID or passport<select value={seller.identityDocumentType} onChange={(event) => update("identityDocumentType", event.target.value)}><option value="sa_id">South African ID</option><option value="passport">Passport</option></select></label><label className="checkbox-row"><input type="checkbox" checked={seller.ageConfirmed} onChange={(event) => update("ageConfirmed", event.target.checked)} /> I confirm I am at least 18</label></div>{seller.sellerType === "company" && <><label>Registered company name<input required value={seller.registeredName} onChange={(event) => update("registeredName", event.target.value)} /></label><div className="two-fields"><label>CIPC registration number<input required value={seller.cipcRegistrationNumber} onChange={(event) => update("cipcRegistrationNumber", event.target.value)} /></label><label>Director / authorised representative<input required value={seller.representativeName} onChange={(event) => update("representativeName", event.target.value)} /></label></div><label className="checkbox-row"><input type="checkbox" checked={seller.representativeAuthority} onChange={(event) => update("representativeAuthority", event.target.checked)} /> I confirm I am authorised to act for this company</label><label className="checkbox-row"><input type="checkbox" checked={seller.beneficialOwnerRequired} onChange={(event) => update("beneficialOwnerRequired", event.target.checked)} /> Beneficial-owner information is required by our payment provider / legal classification</label><small className="field-help">A configured CIPC lookup runs before the company Didit session.</small></>}<label>Bank account name<input required value={seller.bankAccountName} onChange={(event) => update("bankAccountName", event.target.value)} /><small className="field-help">Must match the legal name (or registered company name). Never enter the account number here.</small></label><label className="checkbox-row"><input type="checkbox" checked={seller.copyrightDeclaration} onChange={(event) => update("copyrightDeclaration", event.target.checked)} /> I own/control the copyright and required releases for my work.</label><label className="checkbox-row"><input type="checkbox" checked={seller.taxResponsibilityDeclaration} onChange={(event) => update("taxResponsibilityDeclaration", event.target.checked)} /> I accept responsibility for my tax affairs and declarations.</label><SellerTermsAcceptance api={api} accepted={seller.contributorAgreement} termsVersion={seller.termsVersion} onAccept={(version) => setSeller((current) => ({ ...current, contributorAgreement: true, termsVersion: version }))} />{diditUrl && <p className="dialog-intro"><strong>Didit is ready.</strong> <a href={diditUrl} target="_blank" rel="noreferrer">Open the secure verification flow ↗</a></p>}<label>Signer name<input required value={seller.signerName} onChange={(event) => update("signerName", event.target.value)} /></label><label>Firma signature reference<input required minLength={8} value={seller.signatureReference} onChange={(event) => update("signatureReference", event.target.value)} placeholder="Reference returned by Firma" /></label><div className="two-fields"><label>Payout rail<select value={seller.provider} onChange={(event) => update("provider", event.target.value)}><option value="paystack">Paystack marketplace split</option></select></label><label>Paystack subaccount code<input required value={seller.providerAccountId} onChange={(event) => update("providerAccountId", event.target.value)} placeholder="ACCT_... from Paystack" /></label></div><label>Account holder<input required value={seller.accountHolderName} onChange={(event) => update("accountHolderName", event.target.value)} /></label><div className="two-fields"><label>Account last 4<input inputMode="numeric" pattern="\d{4}" value={seller.accountLast4} onChange={(event) => update("accountLast4", event.target.value)} /></label><label>Branch last 4<input inputMode="numeric" pattern="\d{4}" value={seller.branchLast4} onChange={(event) => update("branchLast4", event.target.value)} /></label></div><TurnstileChallenge onToken={setTurnstileToken} /><button className="dark-button" disabled={saving || !seller.contributorAgreement}>{saving ? "Saving seller details…" : "Save & start Didit verification ↗"}</button></form>;
 }
 
 function ContributorWorkspace({ api, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
-  const [form, setForm] = useState({ bio: "", organisationName: "", location: "", contributorType: "individual", equipment: "", portfolioUrl: "", acceptTerms: false });
-  const [asset, setAsset] = useState({ kind: "image", title: "", description: "", caption: "", city: "", province: "", locality: "", landmark: "", subjectTags: "", culturalTags: "", rightsStatus: "pending", modelReleaseStatus: "unknown", propertyReleaseStatus: "unknown", monetizationModel: "membership" as MonetizationModel, licensePriceZar: "", artistLicenseKey: "custom", artistLicenseVersion: "", artistLicenseUrl: "", artistLicenseTerms: "", freeDownloadEnabled: false });
+  const [form, setForm] = useState({ bio: "", organisationName: "", location: "", contributorType: "individual", equipment: "", portfolioUrl: "", acceptTerms: false, termsVersion: "" });
+  const [asset, setAsset] = useState({ kind: "image", title: "", description: "", caption: "", city: "", province: "", locality: "", landmark: "", subjectTags: "", culturalTags: "", rightsStatus: "pending" as Asset["rightsStatus"], modelReleaseStatus: "unknown" as Asset["modelReleaseStatus"], propertyReleaseStatus: "unknown" as Asset["propertyReleaseStatus"], monetizationModel: "membership" as MonetizationModel, licensePriceZar: "", artistLicenseKey: "custom", artistLicenseVersion: "", artistLicenseUrl: "", artistLicenseTerms: "", freeDownloadEnabled: false });
   const [file, setFile] = useState<File | null>(null);
-  const [seller, setSeller] = useState({ sellerType: "individual", legalName: "", phone: "", ageConfirmed: false, identityDocumentType: "sa_id", bankAccountName: "", registeredName: "", cipcRegistrationNumber: "", representativeName: "", representativeAuthority: false, beneficialOwnerRequired: false, copyrightDeclaration: false, taxResponsibilityDeclaration: false, contributorAgreement: false, signerName: "", signatureReference: "", provider: "paystack", providerAccountId: "", accountHolderName: "", accountLast4: "", branchLast4: "" });
+  const [seller, setSeller] = useState({ sellerType: "individual", legalName: "", phone: "", ageConfirmed: false, identityDocumentType: "sa_id", bankAccountName: "", registeredName: "", cipcRegistrationNumber: "", representativeName: "", representativeAuthority: false, beneficialOwnerRequired: false, copyrightDeclaration: false, taxResponsibilityDeclaration: false, contributorAgreement: false, termsVersion: "", signerName: "", signatureReference: "", provider: "paystack", providerAccountId: "", accountHolderName: "", accountLast4: "", branchLast4: "" });
   const [turnstileToken, setTurnstileToken] = useState("");
   const [diditUrl, setDiditUrl] = useState("");
   const [saving, setSaving] = useState(false);
 
   async function saveOnboarding(event: React.FormEvent) {
     event.preventDefault(); setSaving(true);
-    try { const response = await api("/api/onboarding", { method: "PUT", body: JSON.stringify({ ...form, languages: ["English", "isiXhosa", "Afrikaans"], specialties: asset.subjectTags.split(",").map((tag) => tag.trim()).filter(Boolean) }) }); if (!response.ok) throw new Error(); onNotice("Contributor profile submitted for verification."); } catch { onNotice("Profile captured in the workspace. Apply migration 0002_phase1_core.sql and connect auth to persist it."); } finally { setSaving(false); }
+    try { const response = await api("/api/onboarding", { method: "PUT", body: JSON.stringify({ ...form, languages: ["English", "isiXhosa", "Afrikaans"], specialties: asset.subjectTags.split(",").map((tag) => tag.trim()).filter(Boolean) }) }); if (!response.ok) throw new Error(); onNotice(form.acceptTerms ? "Contributor profile and seller terms submitted for verification." : "Contributor profile saved as a draft. Review the seller terms before submitting."); } catch { onNotice("Profile could not be saved. Check your connection and try again; your entered data is still here."); } finally { setSaving(false); }
   }
 
   async function createAsset(event: React.FormEvent) {
     event.preventDefault(); setSaving(true);
     try {
-      const payload = { ...asset, subjectTags: asset.subjectTags.split(",").map((tag) => tag.trim()).filter(Boolean), culturalTags: asset.culturalTags.split(",").map((tag) => tag.trim()).filter(Boolean), licensePriceCents: asset.monetizationModel === "individual_license" && asset.licensePriceZar ? Math.round(Number(asset.licensePriceZar) * 100) : null };
+      const payload = { ...asset, subjectTags: asset.subjectTags.split(",").map((tag) => tag.trim()).filter(Boolean), culturalTags: asset.culturalTags.split(",").map((tag) => tag.trim()).filter(Boolean), artistLicenseUrl: asset.artistLicenseUrl.trim() ? archiveDomain.normalizeHttpUrl(asset.artistLicenseUrl) : "", licensePriceCents: asset.monetizationModel === "individual_license" && asset.licensePriceZar ? Math.round(Number(asset.licensePriceZar) * 100) : null };
       const createdResponse = await api("/api/assets", { method: "POST", body: JSON.stringify(payload) });
       if (!createdResponse.ok) throw new Error();
       const created = await createdResponse.json() as { id: string };
@@ -1632,13 +1931,13 @@ function ContributorWorkspace({ api, onNotice }: { api: (path: string, init?: Re
         await api(`/api/uploads/${session.uploadId}/complete`, { method: "POST", body: "{}" });
       }
       onNotice("Asset submitted to the editorial review queue."); setAsset({ ...asset, title: "", description: "", caption: "" }); setFile(null);
-    } catch { onNotice("The metadata form is ready, but persistence needs a local D1 migration and R2 credentials."); } finally { setSaving(false); }
+    } catch (error) { onNotice(error instanceof Error ? error.message : "The metadata form could not be submitted. Check the licence proof URL and try again."); } finally { setSaving(false); }
   }
 
   async function submitSellerWorkflow(event: React.FormEvent) {
     event.preventDefault(); setSaving(true);
     try {
-      const sellerResponse = await api("/api/onboarding/seller", { method: "PUT", body: JSON.stringify({ sellerType: seller.sellerType, legalName: seller.legalName, phone: seller.phone, ageConfirmed: seller.ageConfirmed, identityDocumentType: seller.identityDocumentType, bankAccountName: seller.bankAccountName, registeredName: seller.sellerType === "company" ? seller.registeredName : undefined, cipcRegistrationNumber: seller.sellerType === "company" ? seller.cipcRegistrationNumber : undefined, representativeName: seller.sellerType === "company" ? seller.representativeName : undefined, representativeAuthority: seller.sellerType === "company" ? seller.representativeAuthority : false, beneficialOwnerRequired: seller.sellerType === "company" && seller.beneficialOwnerRequired, copyrightDeclaration: seller.copyrightDeclaration, taxResponsibilityDeclaration: seller.taxResponsibilityDeclaration, contributorAgreement: seller.contributorAgreement }) });
+      const sellerResponse = await api("/api/onboarding/seller", { method: "PUT", body: JSON.stringify({ sellerType: seller.sellerType, legalName: seller.legalName, phone: seller.phone, ageConfirmed: seller.ageConfirmed, identityDocumentType: seller.identityDocumentType, bankAccountName: seller.bankAccountName, registeredName: seller.sellerType === "company" ? seller.registeredName : undefined, cipcRegistrationNumber: seller.sellerType === "company" ? seller.cipcRegistrationNumber : undefined, representativeName: seller.sellerType === "company" ? seller.representativeName : undefined, representativeAuthority: seller.sellerType === "company" ? seller.representativeAuthority : false, beneficialOwnerRequired: seller.sellerType === "company" && seller.beneficialOwnerRequired, copyrightDeclaration: seller.copyrightDeclaration, taxResponsibilityDeclaration: seller.taxResponsibilityDeclaration, contributorAgreement: seller.contributorAgreement, termsVersion: seller.termsVersion }) });
       if (!sellerResponse.ok) throw new Error("seller");
       const diditResponse = await api("/api/onboarding/didit/session", { method: "POST", body: "{}" });
       if (diditResponse.ok) { const didit = await diditResponse.json() as { url?: string }; if (didit.url) setDiditUrl(didit.url); }
@@ -1650,9 +1949,9 @@ function ContributorWorkspace({ api, onNotice }: { api: (path: string, init?: Re
     } catch { onNotice("Seller workflow needs the 0005 migration, a configured Turnstile secret, and provider wallet credentials."); } finally { setSaving(false); }
   }
 
-  return <main className="workspace-page"><div className="workspace-intro"><span className="section-kicker">CONTRIBUTOR WORKSPACE</span><h1>Keep the <em>context.</em></h1><p>Submit a record with the location, rights, and cultural context an editor needs to trust it.</p></div><div className="workspace-grid"><form className="workspace-card" onSubmit={saveOnboarding}><div className="card-heading"><span className="section-kicker">01 · PROFILE</span><span className="status-pill">Draft</span></div><h2>Your contributor profile</h2><label>Organisation or public name<input value={form.organisationName} onChange={(event) => setForm({ ...form, organisationName: event.target.value })} /></label><label>Biography<textarea value={form.bio} onChange={(event) => setForm({ ...form, bio: event.target.value })} /></label><div className="two-fields"><label>Contributor type<select value={form.contributorType} onChange={(event) => setForm({ ...form, contributorType: event.target.value })}><option value="individual">Individual</option><option value="agency">Agency</option><option value="archive">Archive</option><option value="institution">Institution</option></select></label><label>Base location<input value={form.location} onChange={(event) => setForm({ ...form, location: event.target.value })} /></label></div><label>Portfolio URL<input value={form.portfolioUrl} onChange={(event) => setForm({ ...form, portfolioUrl: event.target.value })} placeholder="https://…" /></label><label className="checkbox-row"><input type="checkbox" checked={form.acceptTerms} onChange={(event) => setForm({ ...form, acceptTerms: event.target.checked })} /> I accept the contributor terms</label><button className="dark-button" disabled={saving}>Save profile <span>↗</span></button></form>
-    <form className="workspace-card" onSubmit={submitSellerWorkflow}><div className="card-heading"><span className="section-kicker">02 · SELLER SETUP</span><span className="status-pill warm">Pending tender</span></div><h2>Sign terms & set payout</h2><p className="dialog-intro">Your signed terms hash, KYC case, and payout wallet are linked to one internal approval record. Raw bank credentials are never stored here.</p><label>Signer name<input required value={seller.signerName} onChange={(event) => setSeller({ ...seller, signerName: event.target.value })} /></label><label>Firma signature reference<input required minLength={8} value={seller.signatureReference} onChange={(event) => setSeller({ ...seller, signatureReference: event.target.value })} placeholder="Reference returned by Firma" /></label><div className="two-fields"><label>Payout rail<select value={seller.provider} onChange={(event) => setSeller({ ...seller, provider: event.target.value })}><option value="paystack">Paystack marketplace split</option></select></label><label>Paystack subaccount code<input required value={seller.providerAccountId} onChange={(event) => setSeller({ ...seller, providerAccountId: event.target.value })} placeholder="ACCT_..." /></label></div><label>Account holder<input required value={seller.accountHolderName} onChange={(event) => setSeller({ ...seller, accountHolderName: event.target.value })} /></label><div className="two-fields"><label>Account last 4<input inputMode="numeric" pattern="\d{4}" value={seller.accountLast4} onChange={(event) => setSeller({ ...seller, accountLast4: event.target.value })} /></label><label>Branch last 4<input inputMode="numeric" pattern="\d{4}" value={seller.branchLast4} onChange={(event) => setSeller({ ...seller, branchLast4: event.target.value })} /></label></div><TurnstileChallenge onToken={setTurnstileToken} /><label className="checkbox-row"><input type="checkbox" required /> I agree to the current Contributor Terms of Service and authorize this digital signature record.</label><button className="dark-button" disabled={saving}>Submit seller tender <span>↗</span></button></form>
-    <form className="workspace-card" onSubmit={createAsset}><div className="card-heading"><span className="section-kicker">02 · INGESTION</span><span className="status-pill warm">Needs review</span></div><h2>Submit a record</h2><AssetPricingFields asset={asset} setAsset={setAsset} /><div className="two-fields"><label>Media type<select value={asset.kind} onChange={(event) => setAsset({ ...asset, kind: event.target.value })}><option value="image">Photography</option><option value="video">Film & video</option></select></label><label>File<input type="file" accept="image/*,video/*" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label></div><label>Title<input required value={asset.title} onChange={(event) => setAsset({ ...asset, title: event.target.value })} placeholder="A precise, human title" /></label><label>Caption<textarea value={asset.caption} onChange={(event) => setAsset({ ...asset, caption: event.target.value })} placeholder="What is actually happening in the frame?" /></label><div className="two-fields"><label>City<input value={asset.city} onChange={(event) => setAsset({ ...asset, city: event.target.value })} /></label><label>Locality<input value={asset.locality} onChange={(event) => setAsset({ ...asset, locality: event.target.value })} placeholder="Cape Flats, Bo-Kaap…" /></label></div><label>Subject tags<input value={asset.subjectTags} onChange={(event) => setAsset({ ...asset, subjectTags: event.target.value })} placeholder="people, food, community" /></label><label>Cultural context tags<input value={asset.culturalTags} onChange={(event) => setAsset({ ...asset, culturalTags: event.target.value })} placeholder="South African braai, wood-fire braai" /></label><div className="two-fields"><label>Rights<select value={asset.rightsStatus} onChange={(event) => setAsset({ ...asset, rightsStatus: event.target.value })}><option value="pending">Pending verification</option><option value="editorial_only">Editorial only</option><option value="verified">Verified</option></select></label><label>Model release<select value={asset.modelReleaseStatus} onChange={(event) => setAsset({ ...asset, modelReleaseStatus: event.target.value })}><option value="unknown">Unknown</option><option value="not_required">Not required</option><option value="pending">Pending</option><option value="verified">Verified</option></select></label></div><button className="dark-button" disabled={saving || !asset.title}>{saving ? "Submitting…" : "Submit for review"} <span>↗</span></button></form></div></main>;
+  return <main className="workspace-page"><div className="workspace-intro"><span className="section-kicker">CONTRIBUTOR WORKSPACE</span><h1>Keep the <em>context.</em></h1><p>Submit a record with the location, rights, and cultural context an editor needs to trust it.</p></div><div className="workspace-grid"><form className="workspace-card" onSubmit={saveOnboarding}><div className="card-heading"><span className="section-kicker">01 · PROFILE</span><span className="status-pill">Draft</span></div><h2>Your contributor profile</h2><label>Organisation or public name<input value={form.organisationName} onChange={(event) => setForm({ ...form, organisationName: event.target.value })} /></label><label>Biography<textarea value={form.bio} onChange={(event) => setForm({ ...form, bio: event.target.value })} /></label><div className="two-fields"><label>Contributor type<select value={form.contributorType} onChange={(event) => setForm({ ...form, contributorType: event.target.value })}><option value="individual">Individual</option><option value="agency">Agency</option><option value="archive">Archive</option><option value="institution">Institution</option></select></label><label>Base location<input value={form.location} onChange={(event) => setForm({ ...form, location: event.target.value })} /></label></div><label>Portfolio URL<input value={form.portfolioUrl} onChange={(event) => setForm({ ...form, portfolioUrl: event.target.value })} placeholder="https://…" /></label><SellerTermsAcceptance api={api} accepted={form.acceptTerms} termsVersion={form.termsVersion} onAccept={(version) => setForm((current) => ({ ...current, acceptTerms: true, termsVersion: version }))} /><button className="dark-button" disabled={saving}>Save profile <span>↗</span></button></form>
+    <form className="workspace-card" onSubmit={submitSellerWorkflow}><div className="card-heading"><span className="section-kicker">02 · SELLER SETUP</span><span className="status-pill warm">Pending tender</span></div><h2>Sign terms & set payout</h2><p className="dialog-intro">Your signed terms hash, KYC case, and payout wallet are linked to one internal approval record. Raw bank credentials are never stored here.</p><label>Signer name<input required value={seller.signerName} onChange={(event) => setSeller({ ...seller, signerName: event.target.value })} /></label><label>Firma signature reference<input required minLength={8} value={seller.signatureReference} onChange={(event) => setSeller({ ...seller, signatureReference: event.target.value })} placeholder="Reference returned by Firma" /></label><div className="two-fields"><label>Payout rail<select value={seller.provider} onChange={(event) => setSeller({ ...seller, provider: event.target.value })}><option value="paystack">Paystack marketplace split</option></select></label><label>Paystack subaccount code<input required value={seller.providerAccountId} onChange={(event) => setSeller({ ...seller, providerAccountId: event.target.value })} placeholder="ACCT_..." /></label></div><label>Account holder<input required value={seller.accountHolderName} onChange={(event) => setSeller({ ...seller, accountHolderName: event.target.value })} /></label><div className="two-fields"><label>Account last 4<input inputMode="numeric" pattern="\d{4}" value={seller.accountLast4} onChange={(event) => setSeller({ ...seller, accountLast4: event.target.value })} /></label><label>Branch last 4<input inputMode="numeric" pattern="\d{4}" value={seller.branchLast4} onChange={(event) => setSeller({ ...seller, branchLast4: event.target.value })} /></label></div><SellerTermsAcceptance api={api} accepted={seller.contributorAgreement} termsVersion={seller.termsVersion} onAccept={(version) => setSeller((current) => ({ ...current, contributorAgreement: true, termsVersion: version }))} /><TurnstileChallenge onToken={setTurnstileToken} /><button className="dark-button" disabled={saving || !seller.contributorAgreement}>Submit seller tender <span>↗</span></button></form>
+     <form className="workspace-card" onSubmit={createAsset}><div className="card-heading"><span className="section-kicker">02 · INGESTION</span><span className="status-pill warm">Needs review</span></div><h2>Submit a record</h2><AssetPricingFields asset={asset} setAsset={setAsset} /><div className="two-fields"><label>Media type<select value={asset.kind} onChange={(event) => setAsset({ ...asset, kind: event.target.value })}><option value="image">Photography</option><option value="video">Film & video</option></select></label><label>File<input type="file" accept="image/*,video/*" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label></div><label>Title<input required value={asset.title} onChange={(event) => setAsset({ ...asset, title: event.target.value })} placeholder="A precise, human title" /></label><label>Caption<textarea value={asset.caption} onChange={(event) => setAsset({ ...asset, caption: event.target.value })} placeholder="What is actually happening in the frame?" /></label><div className="two-fields"><label>City<input value={asset.city} onChange={(event) => setAsset({ ...asset, city: event.target.value })} /></label><label>Locality<input value={asset.locality} onChange={(event) => setAsset({ ...asset, locality: event.target.value })} placeholder="Cape Flats, Bo-Kaap…" /></label></div><label>Subject tags<input value={asset.subjectTags} onChange={(event) => setAsset({ ...asset, subjectTags: event.target.value })} placeholder="people, food, community" /></label><label>Cultural context tags<input value={asset.culturalTags} onChange={(event) => setAsset({ ...asset, culturalTags: event.target.value })} placeholder="South African braai, wood-fire braai" /></label><SellerRightsFields value={asset} onChange={(key, value) => setAsset({ ...asset, [key]: value })} /><button className="dark-button" disabled={saving || !asset.title}>{saving ? "Submitting…" : "Submit for review"} <span>↗</span></button></form></div></main>;
 }
 
 type ContributorMetadataDraft = {
@@ -1743,7 +2042,7 @@ function ContributorAssetLibrary({ api, onNotice }: { api: (path: string, init?:
     setDraft(contributorMetadataDraft(asset));
   }
 
-  function updateDraft<K extends keyof ContributorMetadataDraft>(key: K, value: ContributorMetadataDraft[K]) {
+  function updateDraft(key: keyof ContributorMetadataDraft, value: ContributorMetadataDraft[keyof ContributorMetadataDraft]) {
     setDraft((current) => current ? { ...current, [key]: value } : current);
   }
 
@@ -1812,7 +2111,7 @@ function ContributorAssetLibrary({ api, onNotice }: { api: (path: string, init?:
     {!error && reviewCount > 0 && <div className="contributor-review-banner" role="status"><Icon name="shield" /><div><strong>{reviewCount} record{reviewCount === 1 ? " needs" : "s need"} your review before publishing.</strong><span>Metadata can be edited now, but these records remain private until rights, context, and editorial checks are complete.</span></div></div>}
     {loading && !assets.length ? <div className="empty-state contributor-assets-empty">Loading your owned assets…</div> : !assets.length ? <div className="empty-state contributor-assets-empty"><Icon name="image" /><strong>No uploaded photos yet.</strong><span>Submit a record above and it will appear here for future metadata updates.</span></div> : <div className="contributor-assets-layout">
       <div className="contributor-asset-list" aria-label="Your uploaded assets">{assets.map((asset) => <button type="button" className={`contributor-asset-row ${selectedId === asset.id ? "active" : ""}`} key={asset.id} onClick={() => selectAsset(asset)}><span className="contributor-asset-thumb"><Icon name={asset.kind === "image" ? "image" : "workflow"} /></span><span className="contributor-asset-copy"><strong>{asset.title || "Untitled asset"}</strong><small>{asset.city || asset.country || "Location not set"} · {asset.status.replaceAll("_", " ")}</small></span><Icon name="chevron" size={15} /></button>)}</div>
-      {draft && <form className="workspace-card contributor-metadata-editor" onSubmit={(event) => void saveMetadata(event)} aria-label={`Edit metadata for ${draft.title || "asset"}`}><div className="card-heading"><span className="section-kicker">SELLER-OWNED RECORD</span><span className={`status-pill ${assets.find((asset) => asset.id === draft.id)?.status === "published" ? "cool" : "warm"}`}>{assets.find((asset) => asset.id === draft.id)?.status.replaceAll("_", " ")}</span></div><h3>{draft.title || "Edit asset"}</h3><p className="metadata-editor-note">These fields are yours to maintain. Editorial review still controls publication and search visibility.</p><label>Title<input required maxLength={180} value={draft.title} onChange={(event) => updateDraft("title", event.target.value)} /></label><label>Description<textarea required maxLength={4000} value={draft.description} onChange={(event) => updateDraft("description", event.target.value)} placeholder="Describe what is actually visible and the story context you can verify." /></label><label>Caption<textarea maxLength={2000} value={draft.caption} onChange={(event) => updateDraft("caption", event.target.value)} placeholder="A concise caption for buyers and editors." /></label><div className="two-fields"><label>Province<input value={draft.province} onChange={(event) => updateDraft("province", event.target.value)} /></label><label>City<input value={draft.city} onChange={(event) => updateDraft("city", event.target.value)} /></label></div><div className="two-fields"><label>Locality<input value={draft.locality} onChange={(event) => updateDraft("locality", event.target.value)} /></label><label>Landmark<input value={draft.landmark} onChange={(event) => updateDraft("landmark", event.target.value)} /></label></div><label>Subject tags<input value={draft.subjectTags} onChange={(event) => updateDraft("subjectTags", event.target.value)} placeholder="people, food, community" /><small className="field-help">Separate tags with commas.</small></label><label>Cultural context tags<input value={draft.culturalTags} onChange={(event) => updateDraft("culturalTags", event.target.value)} placeholder="Only add context you can evidence" /><small className="field-help">Avoid identity or cultural claims that cannot be supported; these are checked before saving.</small></label><div className="two-fields"><label>Rights<select value={draft.rightsStatus} onChange={(event) => updateDraft("rightsStatus", event.target.value as Asset["rightsStatus"])}><option value="pending">Pending verification</option><option value="editorial_only">Editorial only</option><option value="verified">Verified</option><option value="restricted">Restricted</option></select></label><label>Model release<select value={draft.modelReleaseStatus} onChange={(event) => updateDraft("modelReleaseStatus", event.target.value as Asset["modelReleaseStatus"])}><option value="unknown">Unknown</option><option value="not_required">Not required</option><option value="pending">Pending</option><option value="verified">Verified</option></select></label></div><div className="two-fields"><label>Property release<select value={draft.propertyReleaseStatus} onChange={(event) => updateDraft("propertyReleaseStatus", event.target.value as Asset["propertyReleaseStatus"])}><option value="unknown">Unknown</option><option value="not_required">Not required</option><option value="pending">Pending</option><option value="verified">Verified</option></select></label><label>Listing access<select value={draft.monetizationModel} onChange={(event) => updateDraft("monetizationModel", event.target.value as MonetizationModel)}><option value="membership">Membership</option><option value="individual_license">Individual licence</option><option value="custom_quote">Custom quote</option></select></label></div>{draft.monetizationModel === "individual_license" && <label>Price in ZAR<input type="number" min="1" step="0.01" value={draft.licensePriceZar} onChange={(event) => updateDraft("licensePriceZar", event.target.value)} /></label>}<details className="metadata-license-details"><summary>Artist licence evidence</summary><div><label>Licence key<input value={draft.artistLicenseKey} onChange={(event) => updateDraft("artistLicenseKey", event.target.value as NonNullable<Asset["artistLicenseKey"]>)} /></label><label>Version<input value={draft.artistLicenseVersion} onChange={(event) => updateDraft("artistLicenseVersion", event.target.value)} /></label><label>Proof URL<input type="url" value={draft.artistLicenseUrl} onChange={(event) => updateDraft("artistLicenseUrl", event.target.value)} /></label><label>Licence terms<textarea value={draft.artistLicenseTerms} onChange={(event) => updateDraft("artistLicenseTerms", event.target.value)} placeholder="Required when changing to a custom or other licence." /></label></div></details><div className="metadata-editor-footer"><span>Last saved records remain auditable.</span><button type="submit" className="dark-button" disabled={saving || !draft.title.trim() || !draft.description.trim()}>{saving ? "Saving metadata…" : "Save metadata"} <Icon name="arrow" size={15} /></button></div></form>}
+       {draft && <form className="workspace-card contributor-metadata-editor" onSubmit={(event) => void saveMetadata(event)} aria-label={`Edit metadata for ${draft.title || "asset"}`}><div className="card-heading"><span className="section-kicker">SELLER-OWNED RECORD</span><span className={`status-pill ${assets.find((asset) => asset.id === draft.id)?.status === "published" ? "cool" : "warm"}`}>{assets.find((asset) => asset.id === draft.id)?.status.replaceAll("_", " ")}</span></div><h3>{draft.title || "Edit asset"}</h3><p className="metadata-editor-note">These fields are yours to maintain. Editorial review still controls publication and search visibility.</p><label>Title<input required maxLength={180} value={draft.title} onChange={(event) => updateDraft("title", event.target.value)} /></label><label>Description<textarea required maxLength={4000} value={draft.description} onChange={(event) => updateDraft("description", event.target.value)} placeholder="Describe what is actually visible and the story context you can verify." /></label><label>Caption<textarea maxLength={2000} value={draft.caption} onChange={(event) => updateDraft("caption", event.target.value)} placeholder="A concise caption for buyers and editors." /></label><div className="two-fields"><label>Province<input value={draft.province} onChange={(event) => updateDraft("province", event.target.value)} /></label><label>City<input value={draft.city} onChange={(event) => updateDraft("city", event.target.value)} /></label></div><div className="two-fields"><label>Locality<input value={draft.locality} onChange={(event) => updateDraft("locality", event.target.value)} /></label><label>Landmark<input value={draft.landmark} onChange={(event) => updateDraft("landmark", event.target.value)} /></label></div><label>Subject tags<input value={draft.subjectTags} onChange={(event) => updateDraft("subjectTags", event.target.value)} placeholder="people, food, community" /><small className="field-help">Separate tags with commas.</small></label><label>Cultural context tags<input value={draft.culturalTags} onChange={(event) => updateDraft("culturalTags", event.target.value)} placeholder="Only add context you can evidence" /><small className="field-help">Avoid identity or cultural claims that cannot be supported; these are checked before saving.</small></label><SellerRightsFields value={draft} onChange={(key, value) => updateDraft(key, value)} /><div className="two-fields"><label>Listing access<select value={draft.monetizationModel} onChange={(event) => updateDraft("monetizationModel", event.target.value as MonetizationModel)}><option value="membership">Membership</option><option value="individual_license">Individual licence</option><option value="custom_quote">Custom quote</option></select></label>{draft.monetizationModel === "individual_license" && <label>Price in ZAR<input type="number" min="1" step="0.01" value={draft.licensePriceZar} onChange={(event) => updateDraft("licensePriceZar", event.target.value)} /></label>}</div><details className="metadata-license-details"><summary>Artist licence evidence</summary><div><label>Licence key<input value={draft.artistLicenseKey} onChange={(event) => updateDraft("artistLicenseKey", event.target.value as NonNullable<Asset["artistLicenseKey"]>)} /></label><label>Version<input value={draft.artistLicenseVersion} onChange={(event) => updateDraft("artistLicenseVersion", event.target.value)} /></label><label>Proof URL<input type="url" value={draft.artistLicenseUrl} onChange={(event) => updateDraft("artistLicenseUrl", event.target.value)} /></label><label>Licence terms<textarea value={draft.artistLicenseTerms} onChange={(event) => updateDraft("artistLicenseTerms", event.target.value)} placeholder="Required when changing to a custom or other licence." /></label></div></details><div className="metadata-editor-footer"><span>Last saved records remain auditable.</span><button type="submit" className="dark-button" disabled={saving || !draft.title.trim() || !draft.description.trim()}>{saving ? "Saving metadata…" : "Save metadata"} <Icon name="arrow" size={15} /></button></div></form>}
     </div>}
   </section>;
 }
@@ -1992,6 +2291,21 @@ function AssetModal({ asset, api, autoOpenPurchase = false, onClose, onNotice: n
       const session = await payment.json().catch(() => ({})) as { checkoutUrl?: string; provider?: string; error?: string };
       if (!payment.ok || !session.checkoutUrl) throw new Error(session.error ?? "Secure payment checkout could not be opened.");
       notify(session.provider === "demo" ? "Demo licence created. Opening the simulated checkout; no real transaction will be made." : "Licence created. Opening secure payment checkout.");
+      if (session.provider === "demo") {
+        // Do not navigate directly to the demo API GET. Cloudflare's SPA asset
+        // cache can serve index.html for an HTML navigation before the Worker
+        // gets a chance to return its 303 completion redirect. An API fetch
+        // keeps the request on the Worker route, follows the redirect, and
+        // lets us verify that the completion actually reached the account.
+        const completion = await api(session.checkoutUrl, { method: "GET" });
+        const completedUrl = new URL(completion.url, window.location.origin);
+        if (!completion.ok || completedUrl.pathname !== "/account" || completedUrl.searchParams.get("payment") !== "complete" || completedUrl.searchParams.get("demo") !== "1") {
+          const completed = await completion.json().catch(() => ({})) as { error?: string };
+          throw new Error(completed.error ?? "Demo payment could not be completed.");
+        }
+        window.location.assign(completedUrl.toString());
+        return;
+      }
       window.location.assign(session.checkoutUrl);
     } catch (error) {
       const reason = error instanceof Error ? error.message : "Secure checkout could not be opened.";
