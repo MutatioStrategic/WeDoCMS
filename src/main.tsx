@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Auth0Provider, useAuth0, type Auth0ContextInterface } from "@auth0/auth0-react";
-import { createClient, type Session as SupabaseSession, type SupabaseClient } from "@supabase/supabase-js";
+import { type Session as SupabaseSession, type SupabaseClient } from "@supabase/supabase-js";
 import { archiveDomain, type AccountLifecycle, type Asset, type BuyerAnalytics, type CommunityOverview, type ContributorAnalytics, type ContributorPerformance, type CreatorProfile, type DiscoveryResponse, type LicenceProduct, type LicenceType, type MonetizationModel, type PortfolioCollection, type SavedSearch, type SearchResponse, type TakedownReason, type UserLightbox, type WorkflowStage } from "./shared";
 import { friendlySupabasePhoneError } from "./phone";
 import { friendlyIdentityExchangeError, friendlySupabaseAuthError } from "./supabase-auth";
+import { getSupabaseClient } from "./supabase-client";
 import "./styles.css";
 import { CommunityWorkspace } from "./community";
 import { StudioWorkspace } from "./studio";
@@ -90,7 +91,7 @@ const demoMode = import.meta.env.MODE === "demo" || import.meta.env.VITE_DEMO_MO
 const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.trim();
 const supabaseKey = ((import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string | undefined) ?? (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined))?.trim();
 const supabaseConfigured = configuredValue(supabaseUrl) && configuredValue(supabaseKey);
-const staticSupabaseClient: SupabaseClient | undefined = supabaseConfigured ? createClient(supabaseUrl!, supabaseKey!, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } }) : undefined;
+const staticSupabaseClient: SupabaseClient | undefined = supabaseConfigured ? getSupabaseClient(supabaseUrl!, supabaseKey!) : undefined;
 const defaultAuthRedirectUrl = ((import.meta.env.VITE_AUTH_REDIRECT_URL as string | undefined)?.trim() || "https://veld-archive.pages.dev").replace(/\/$/, "");
 const emptyDiscovery: DiscoveryResponse = { trending: [], savedSearches: [], recommendations: [], personalized: false };
 const recoveryLinkPresent = (): boolean => typeof window !== "undefined" && (new URLSearchParams(window.location.search).get("passwordRecovery") === "1" || /(?:^|&)type=recovery(?:&|$)/.test(window.location.hash.replace(/^#/, "")));
@@ -2378,7 +2379,7 @@ function AuthBootstrap({ auth0 }: { auth0?: Auth0Bridge }) {
       const config = parseRuntimeAuthConfig(await response.json());
       if (!config) throw new Error("Auth configuration response was invalid");
       if (config.provider === "supabase") {
-        setAuthState({ supabase: createClient(config.supabaseUrl, config.publishableKey, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } }), redirectUrl: config.redirectUrl.replace(/\/$/, ""), loading: false, unavailable: false });
+        setAuthState({ supabase: getSupabaseClient(config.supabaseUrl, config.publishableKey), redirectUrl: config.redirectUrl.replace(/\/$/, ""), loading: false, unavailable: false });
         return;
       }
       setAuthState({ supabase: staticSupabaseClient, redirectUrl: config.redirectUrl.replace(/\/$/, ""), loading: false, unavailable: !staticSupabaseClient });
