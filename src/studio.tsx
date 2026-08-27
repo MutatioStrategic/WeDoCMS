@@ -10,6 +10,7 @@ type StudioWorkspaceProps = {
   assets: Asset[];
   api: (path: string, init?: RequestInit) => Promise<Response>;
   onNotice: (notice: string) => void;
+  notice: string;
 };
 
 function safeMediaUrl(value: string | null | undefined): string | null {
@@ -52,7 +53,7 @@ function isLocalSource(source: StudioSource): boolean {
   return source.id.startsWith("local-");
 }
 
-export function StudioWorkspace({ assets, api, onNotice }: StudioWorkspaceProps) {
+export function StudioWorkspace({ assets, api, onNotice, notice }: StudioWorkspaceProps) {
   const archiveSources = useMemo(() => assets.filter((asset) => asset.kind === "image").map(sourceFromAsset), [assets]);
   const [localSources, setLocalSources] = useState<StudioSource[]>([]);
   const allSources = useMemo(() => [...archiveSources, ...localSources], [archiveSources, localSources]);
@@ -240,6 +241,8 @@ export function StudioWorkspace({ assets, api, onNotice }: StudioWorkspaceProps)
         <div><span className="section-kicker">MEDIA STUDIO</span><h1 id="media-studio-heading">Make a campaign. Keep it simple.</h1><p>Choose a photo for a quick edit, or collect several images into a clean campaign page you can download and use anywhere.</p></div>
         <span className="studio-local-note">Browser edits only · archive originals stay protected</span>
       </header>
+
+      <p className="studio-notice" role="status" aria-live="polite">{notice}</p>
 
       <nav className="studio-primary-actions" aria-label="Studio actions">
         <button type="button" className="outline-button" onClick={startNewCampaign}>New campaign</button>

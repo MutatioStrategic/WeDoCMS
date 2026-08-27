@@ -1110,6 +1110,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .minimal-studio-page { max-width: 1180px; margin: 0 auto; padding: 54px 30px 100px; }
 .minimal-studio { display: grid; gap: 14px; }
 .minimal-studio-header { display: flex; justify-content: space-between; gap: 28px; align-items: end; padding-bottom: 8px; }
+.studio-notice { margin: 0; border: 1px solid #d8c9b8; padding: 11px 13px; color: #5d4438; background: #fbf4ea; font-size: 11px; line-height: 1.45; }
 .minimal-studio-header h1 { max-width: 720px; margin: 12px 0 10px; color: #172019; font-size: clamp(36px, 5vw, 64px); line-height: .98; letter-spacing: -.07em; font-weight: 600; }
 .minimal-studio-header p { max-width: 650px; margin: 0; color: #59655b; font-size: 14px; line-height: 1.55; }
 .studio-local-note { max-width: 220px; padding-bottom: 7px; color: #68756b; font: 9px/1.5 'DM Mono', monospace; text-align: right; text-transform: uppercase; }

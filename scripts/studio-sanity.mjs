@@ -48,9 +48,12 @@ try {
   await page.route("**/api/lightboxes", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ results: [] }) }));
   await page.route("**/api/discovery", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ trending: [], savedSearches: [], recommendations: [], personalized: false }) }));
   await page.route("**/api/notifications", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ results: [] }) }));
+  await page.route("**/api/assets/studio-sanity-asset/original", (route) => route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: "A paid licence is required to download this original." }) }));
 
   await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
   await page.getByRole("button", { name: "Media studio" }).click();
+  await page.getByRole("button", { name: "Download selected photo" }).click();
+  await page.locator(".studio-notice").filter({ hasText: "A paid licence is required" }).waitFor();
   await page.locator("input[type=file][accept='image/*']").setInputFiles({ name: "studio-sanity.png", mimeType: "image/png", buffer: onePixelPng });
   await page.locator(".studio-photo-editor").waitFor();
   await page.getByLabel(/Text overlay/).fill("A simple message");

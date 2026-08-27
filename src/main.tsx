@@ -733,7 +733,7 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
     {view === "governance" && <><MarketplaceLegalDocuments api={api} /><GovernanceWorkspace api={api} onNotice={setNotice} isAdmin={sessionUser?.role === "admin"} /></>}
     {view === "community" && <CommunityWorkspace api={api} onNotice={setNotice} sessionUser={sessionUser} />}
     {view === "account" && <>{["buyer", "contributor", "editor", "admin"].includes(sessionUser?.role ?? "") && <BuyerSubscriptionPanel api={api} onNotice={setNotice} account={sessionUser} />}<AccountWorkspace api={api} auth0={auth0} onNotice={setNotice} buyer={["buyer", "contributor", "editor", "admin"].includes(sessionUser?.role ?? "")} /></>}
-    {view === "studio" && <StudioWorkspace assets={assets} api={api} onNotice={setNotice} />}
+    {view === "studio" && <StudioWorkspace assets={assets} api={api} notice={notice} onNotice={setNotice} />}
     {view === "rights" && <RightsGuide />}
     {view === "stakeholders" && <StakeholderDiagrams />}
     {view === "wordpress" && <WordPressIntegrationPanel api={api} onNotice={setNotice} />}
