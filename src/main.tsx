@@ -1459,15 +1459,26 @@ function CreatorMarketplace({ onOpen }: { onOpen: (asset: Asset) => void }) {
 }
 
 function BuyerSubscriptionPanel({ api, onNotice }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void }) {
-  const [data, setData] = useState<{ configured: boolean; hasAccess: boolean; sourceOfTruth: string; plans: Array<{ id: "monthly" | "annual"; amountCents: number; currency: string; interval: string }>; plan: { amountCents: number; currency: string; interval: string } | null; subscription: Record<string, unknown> | null; payments: Array<Record<string, unknown>>; free?: { limit: number; used: number; remaining: number } } | null>(null);
+  const [data, setData] = useState<{ configured: boolean; hasAccess: boolean; sourceOfTruth: string; plans: Array<{ id: "monthly" | "annual"; amountCents: number; currency: string; interval: string }>; plan: { amountCents: number; currency: string; interval: string } | null; subscription: Record<string, unknown> | null; payments: Array<Record<string, unknown>>; free: { limit: number; used: number; remaining: number }; credits: { balanceCredits: number } } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
   const [selectedPlan, setSelectedPlan] = useState<"monthly" | "annual">("monthly");
   const load = useCallback(async () => {
-    const [subscriptionResponse, freeResponse] = await Promise.all([api("/api/subscription"), api("/api/my/free-downloads")]);
-    if (subscriptionResponse.ok) {
-      const subscription = await subscriptionResponse.json() as Omit<NonNullable<typeof data>, "free">;
-      const free = freeResponse.ok ? await freeResponse.json() as { limit: number; used: number; remaining: number } : undefined;
-      setData({ ...subscription, free });
-      if (subscription.plans.length && !subscription.plans.some((plan) => plan.id === selectedPlan)) setSelectedPlan(subscription.plans[0].id);
+    setLoading(true);
+    setError("");
+    try {
+      const [subscriptionResponse, freeResponse, creditsResponse] = await Promise.all([api("/api/subscription"), api("/api/my/free-downloads"), api("/api/my/credits")]);
+      if (!subscriptionResponse.ok || !freeResponse.ok || !creditsResponse.ok) throw new Error("Buyer billing data unavailable");
+      const subscription = await subscriptionResponse.json() as Omit<NonNullable<typeof data>, "free" | "credits">;
+      const free = await freeResponse.json() as { limit: number; used: number; remaining: number };
+      const credits = await creditsResponse.json() as { balanceCredits?: number };
+      setData({ ...subscription, free, credits: { balanceCredits: Number(credits.balanceCredits ?? 0) } });
+      if (subscription.plans.length) setSelectedPlan((current) => subscription.plans.some((plan) => plan.id === current) ? current : subscription.plans[0].id);
+    } catch {
+      setData(null);
+      setError("Billing details are unavailable right now. No cached balance or allowance is shown.");
+    } finally {
+      setLoading(false);
     }
   }, [api]);
   useEffect(() => { void load(); }, [load]);
@@ -1493,32 +1504,44 @@ function BuyerSubscriptionPanel({ api, onNotice }: { api: (path: string, init?: 
     if (!response.ok || !body.manageUrl) { onNotice(body.error ?? "Paystack could not open subscription management."); return; }
     window.location.assign(body.manageUrl);
   }
-  if (!data) return <article className="buyer-subscription-card"><span className="section-kicker">BUYER SUBSCRIPTION</span><h2>Loading billing status…</h2></article>;
+  if (loading) return <article className="buyer-subscription-card"><span className="section-kicker">BUYER SUBSCRIPTION</span><h2>Loading billing status…</h2></article>;
+  if (error || !data) return <article className="buyer-subscription-card" role="alert"><span className="section-kicker">BUYER SUBSCRIPTION</span><h2>Billing status is unavailable.</h2><p>{error || "Try again to load the live account balance."}</p><button type="button" className="outline-button" onClick={() => void load()}>Try again</button></article>;
   const subscription = data.subscription;
   const status = String(subscription?.status ?? "not_started");
   const canStart = data.configured && (!subscription || ["cancelled", "completed"].includes(status));
-  return <article className="buyer-subscription-card"><div className="card-heading"><div><span className="section-kicker">BUYER ACCESS</span><h2>Try the archive before you subscribe</h2></div><span className={`status-pill ${status === "active" ? "cool" : ""}`}>{status.replaceAll("-", " ")}</span></div>{data.free && <div className="free-download-offer"><strong>{data.free.remaining} free photo download{data.free.remaining === 1 ? "" : "s"} remaining</strong><span>Registered buyers get {data.free.limit} artist-approved photos once, before any payment. No card is needed to claim the allowance.</span></div>}<div className="subscription-plan-choices"><div><span className="section-kicker">UNLIMITED ACCESS</span><h3>Choose monthly or annual</h3><small>Unlimited downloads from artists who participate in membership access.</small></div>{data.plans.map((plan) => <label key={plan.id} className={`subscription-plan-option ${selectedPlan === plan.id ? "selected" : ""}`}><input type="radio" name="buyer-plan" value={plan.id} checked={selectedPlan === plan.id} onChange={() => setSelectedPlan(plan.id)} /><span><strong>{plan.id === "annual" ? "Annual" : "Monthly"}</strong><b>{formatZar(plan.amountCents)}</b><small>{plan.id === "annual" ? "per year" : "per month"}</small></span></label>)}</div>{data.plans.length === 0 && <p>The recurring Paystack plans are not configured for this deployment.</p>}{canStart && data.plans.length > 0 && <button className="dark-button" onClick={() => void startSubscription()}>Start {selectedPlan} unlimited access ↗</button>}{Boolean(subscription?.provider_subscription_code) && ["active", "non-renewing", "attention"].includes(status) && <button className="ghost-button" onClick={() => void manageSubscription()}>Manage billing with Paystack</button>}{status === "pending" && <small>Checkout was started. This account becomes active only after Paystack confirms payment by webhook.</small>}{status === "attention" && <small>Paystack reported a billing issue. Update the card through Paystack before access is changed.</small>}<div className="download-bundle-offer"><div><span className="section-kicker">ON-DEMAND BUNDLES</span><h3>Buy downloads once-off</h3><small>Use credits when you do not need a recurring plan. One credit unlocks one original photo or video licence.</small></div><div className="bundle-options">{[1, 5, 10].map((credits) => <button key={credits} className="outline-button" onClick={() => void buyBundle(credits)}>{credits} download{credits === 1 ? "" : "s"} · {formatZar(credits * 10000)}</button>)}</div></div>{Boolean(data.free && data.free.remaining === 0) && <small>Your introductory allowance is used. A bundle or unlimited plan is the next access step.</small>}{Boolean(subscription?.next_payment_date) && <small>Next payment: {new Date(String(subscription?.next_payment_date)).toLocaleDateString("en-ZA")}</small>}{data.payments.length > 0 && <div className="subscription-payment-list"><strong>Paystack transaction history</strong>{data.payments.slice(0, 5).map((payment) => <div key={String(payment.provider_event_id)}><span>{String(payment.event_type)}</span><small>{String(payment.status)} · {String(payment.provider_reference ?? payment.invoice_code ?? "Paystack event")}</small><b>{payment.amount_cents ? formatZar(Number(payment.amount_cents)) : "—"}</b></div>)}</div>}<small className="privacy-note">Source of truth: {data.sourceOfTruth}. We only mirror signed Paystack webhook events and references.</small></article>;
+  return <article className="buyer-subscription-card"><div className="card-heading"><div><span className="section-kicker">BUYER ACCESS</span><h2>Try the archive before you subscribe</h2></div><span className={`status-pill ${status === "active" ? "cool" : ""}`}>{status.replaceAll("-", " ")}</span></div><div className="free-download-offer"><strong>{data.free.remaining} free photo download{data.free.remaining === 1 ? "" : "s"} remaining</strong><span>Registered buyers get {data.free.limit} artist-approved photos once, before any payment. Paid download credits: {data.credits.balanceCredits}. No card is needed to claim the allowance.</span></div><div className="subscription-plan-choices"><div><span className="section-kicker">UNLIMITED ACCESS</span><h3>Choose monthly or annual</h3><small>Unlimited downloads from artists who participate in membership access.</small></div>{data.plans.map((plan) => <label key={plan.id} className={`subscription-plan-option ${selectedPlan === plan.id ? "selected" : ""}`}><input type="radio" name="buyer-plan" value={plan.id} checked={selectedPlan === plan.id} onChange={() => setSelectedPlan(plan.id)} /><span><strong>{plan.id === "annual" ? "Annual" : "Monthly"}</strong><b>{formatZar(plan.amountCents)}</b><small>{plan.id === "annual" ? "per year" : "per month"}</small></span></label>)}</div>{data.plans.length === 0 && <p>The recurring Paystack plans are not configured for this deployment.</p>}{canStart && data.plans.length > 0 && <button className="dark-button" onClick={() => void startSubscription()}>Start {selectedPlan} unlimited access ↗</button>}{Boolean(subscription?.provider_subscription_code) && ["active", "non-renewing", "attention"].includes(status) && <button className="ghost-button" onClick={() => void manageSubscription()}>Manage billing with Paystack</button>}{status === "pending" && <small>Checkout was started. This account becomes active only after Paystack confirms payment by webhook.</small>}{status === "attention" && <small>Paystack reported a billing issue. Update the card through Paystack before access is changed.</small>}<div className="download-bundle-offer"><div><span className="section-kicker">ON-DEMAND BUNDLES</span><h3>Buy downloads once-off</h3><small>Use credits when you do not need a recurring plan. One credit unlocks one original photo or video licence.</small></div><div className="bundle-options">{[1, 5, 10].map((credits) => <button key={credits} className="outline-button" onClick={() => void buyBundle(credits)}>{credits} download{credits === 1 ? "" : "s"} · {formatZar(credits * 10000)}</button>)}</div></div>{data.free.remaining === 0 && <small>Your introductory allowance is used. A bundle or unlimited plan is the next access step.</small>}{Boolean(subscription?.next_payment_date) && <small>Next payment: {new Date(String(subscription?.next_payment_date)).toLocaleDateString("en-ZA")}</small>}{data.payments.length > 0 && <div className="subscription-payment-list"><strong>Paystack transaction history</strong>{data.payments.slice(0, 5).map((payment) => <div key={String(payment.provider_event_id)}><span>{String(payment.event_type)}</span><small>{String(payment.status)} · {String(payment.provider_reference ?? payment.invoice_code ?? "Paystack event")}</small><b>{payment.amount_cents ? formatZar(Number(payment.amount_cents)) : "—"}</b></div>)}</div>}<small className="privacy-note">Source of truth: {data.sourceOfTruth}. We only mirror signed Paystack webhook events and references.</small></article>;
 }
 
 function AccountWorkspace({ api, auth0, onNotice, buyer }: { api: (path: string, init?: RequestInit) => Promise<Response>; auth0?: Auth0Bridge; onNotice: (notice: string) => void; buyer: boolean }) {
   const [account, setAccount] = useState<(AccountLifecycle & { accountPortalUrl?: string | null }) | null>(null);
   const [purchases, setPurchases] = useState<Array<Record<string, unknown>>>([]);
   const [paymentBusyId, setPaymentBusyId] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
-  const reload = useCallback(() => {
-    const purchaseRequest = buyer
-      ? api("/api/my/purchases").then(async (response) => response.ok ? response.json() as Promise<{ results: Array<Record<string, unknown>> }> : { results: [] })
-      : Promise.resolve({ results: [] as Array<Record<string, unknown>> });
-    void Promise.all([
-      api("/api/account/lifecycle").then(async (response) => response.ok ? response.json() as Promise<AccountLifecycle & { accountPortalUrl?: string | null }> : null),
-      purchaseRequest,
-    ]).then(([lifecycle, history]) => {
+  const reload = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const [lifecycleResponse, purchaseResponse] = await Promise.all([
+        api("/api/account/lifecycle"),
+        buyer ? api("/api/my/purchases") : Promise.resolve(null),
+      ]);
+      if (!lifecycleResponse.ok || (purchaseResponse && !purchaseResponse.ok)) throw new Error("Account data unavailable");
+      const lifecycle = await lifecycleResponse.json() as AccountLifecycle & { accountPortalUrl?: string | null };
+      const history = purchaseResponse ? await purchaseResponse.json() as { results: Array<Record<string, unknown>> } : { results: [] };
       setAccount(lifecycle);
       setPurchases(history.results);
-    });
+    } catch {
+      setAccount(null);
+      setPurchases([]);
+      setError("Account controls are unavailable right now. Try again to load your live account state.");
+    } finally {
+      setLoading(false);
+    }
   }, [api, buyer]);
 
-  useEffect(() => { reload(); }, [reload]);
+  useEffect(() => { void reload(); }, [reload]);
 
   async function continueToPayment(licenceId: string): Promise<void> {
     setPaymentBusyId(licenceId);
@@ -1553,7 +1576,8 @@ function AccountWorkspace({ api, auth0, onNotice, buyer }: { api: (path: string,
     onNotice(body.error ?? "Licensed delivery could not be opened. Try again.");
   }
 
-  if (!account) return <main className="account-page"><div className="empty-state">Loading your account controls…</div></main>;
+  if (loading) return <main className="account-page"><div className="empty-state" role="status">Loading your account controls…</div></main>;
+  if (error || !account) return <main className="account-page"><div className="empty-state" role="alert"><p>{error || "Account controls are unavailable."}</p><button type="button" className="outline-button" onClick={() => void reload()}>Try again</button></div></main>;
   const openIdentity = () => {
     if (account.accountPortalUrl) { window.location.assign(account.accountPortalUrl); return; }
     if (auth0) { void auth0.loginWithRedirect({ authorizationParams: { prompt: "login" } }); return; }
