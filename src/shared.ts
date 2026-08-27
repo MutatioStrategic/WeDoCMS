@@ -35,6 +35,9 @@ export const INTRODUCTORY_FREE_DOWNLOAD_LIMIT = 3;
 export const MEDIA_MEMBERSHIP_CREDITS = 100;
 export const MEDIA_MEMBERSHIP_DURATION_DAYS = 365;
 export const MEDIA_CREDIT_REFERENCE_UNIT_CENTS = 299;
+/** Starter credit offer: three approved photos at 100 credits each. */
+export const INTRODUCTORY_FREE_CREDIT_COST = MEDIA_MEMBERSHIP_CREDITS;
+export const INTRODUCTORY_FREE_CREDITS = INTRODUCTORY_FREE_DOWNLOAD_LIMIT * INTRODUCTORY_FREE_CREDIT_COST;
 
 export function mediaLicenceCreditCost(durationDays: number, baseCredits = MEDIA_MEMBERSHIP_CREDITS): number {
   if (!Number.isInteger(durationDays) || durationDays < 1 || durationDays > 3650) {

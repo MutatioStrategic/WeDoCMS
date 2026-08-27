@@ -163,7 +163,10 @@ published-asset state sends the buyer back to approved archive search.
    payment. A confirmed payment activates the membership and records the next
    charge date; a failed payment shows an attention state.
 4. The buyer sees the standard credit product first: **100 credits — 12 months
-   access**. The buyer can purchase credits through hosted checkout; credits
+   access**. A new buyer also receives **300 starter credits**. Each of the
+   three introductory approved-photo choices uses 100 starter credits; the
+   buyer can purchase more credits through hosted checkout after that offer.
+   Purchased credits
    are added to the buyer ledger only after the signed payment webhook confirms
    payment. Any Rand amount is a single optional display-only reference, never
    the buyer-facing product price.
@@ -185,11 +188,12 @@ require a signed provider webhook before credits are added to the wallet.
    required before any allowance can be claimed. If the confirmation email is
    missing, the sign-in state keeps the address and offers **Resend confirmation
    email**; provider rate limits and delivery failures show a recovery action.
-2. After sign-in, the account surface shows a server-authoritative allowance
-   of three free photo downloads. The Worker atomically claims one published
-   artist-approved photo per buyer and asset; retries do not spend another
-   download, and the limit cannot be bypassed by browser storage or a client
-   counter.
+2. After sign-in, the account surface shows a server-authoritative starter
+   balance of 300 credits: three free photo choices at 100 credits each. The
+   Worker atomically claims one published artist-approved photo per buyer and
+   asset and spends the matching starter credits; retries do not spend
+   another download or credit, and the offer cannot be bypassed by browser
+   storage or a client counter.
 3. When the allowance is exhausted, the buyer sees the evidence and next
    action: buy a once-off download bundle or choose unlimited monthly/annual
    access. Paystack webhook confirmation remains the source of truth for paid

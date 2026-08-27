@@ -83,8 +83,9 @@ when the verified production catalogue is intentionally smaller.
 
 ### Buyer access demo environment
 
-The demo build includes the complete buyer access choice: three introductory
-free photo downloads, once-off download bundles, and monthly/annual unlimited
+The demo build includes the complete buyer access choice: a 300-credit starter
+offer covering three introductory approved-photo choices at 100 credits each,
+once-off download bundles, and monthly/annual unlimited
 plan cards. Run `npm run build:demo` for the Pages asset and
 `npm run worker:deploy:demo` for the `env.demo` Worker. Demo authentication is
 explicitly enabled, the payment provider is set to `demo` (so no real charge

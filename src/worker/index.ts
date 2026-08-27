@@ -1,7 +1,7 @@
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { z } from "zod";
-import { archiveDomain, MEDIA_MEMBERSHIP_CREDITS, MEDIA_MEMBERSHIP_DURATION_DAYS } from "../shared";
+import { archiveDomain, INTRODUCTORY_FREE_CREDIT_COST, INTRODUCTORY_FREE_CREDITS, INTRODUCTORY_FREE_DOWNLOAD_LIMIT, MEDIA_MEMBERSHIP_CREDITS, MEDIA_MEMBERSHIP_DURATION_DAYS } from "../shared";
 import type { Asset, BuyerAnalytics, CommunityOverview, ContributorAnalytics, CreatorProfile, DiscoveryResponse, LicenceProduct, LicenceRequest, MonetizationModel, PortfolioCollection, RightsCase, SavedSearch, SearchResponse, TakedownReason, UserLightbox } from "../shared";
 import {
   elapsedMilliseconds,
@@ -2608,6 +2608,23 @@ function buyerAccount(c: { env: Bindings; req: { raw: Request } }): Promise<Requ
   return getRequestUser(c.env, c.req.raw);
 }
 
+/**
+ * Give each buyer one immutable starter-credit grant. The idempotency key
+ * makes this safe for existing accounts and for repeated account loads while
+ * keeping the credit ledger as the only balance source of truth.
+ */
+async function ensureIntroductoryCreditGrant(env: Bindings, user: Pick<RequestUser, "organizationId" | "id">): Promise<void> {
+  await env.DB.prepare(`INSERT OR IGNORE INTO buyer_credit_transactions
+    (id, organization_id, buyer_id, transaction_type, credits, amount_cents, reference_type, reference_id, idempotency_key)
+    VALUES (?, ?, ?, 'adjustment', ?, 0, 'introductory_offer', ?, ?)`)
+    .bind(crypto.randomUUID(), user.organizationId, user.id, INTRODUCTORY_FREE_CREDITS, user.id, `introductory-credit-grant:${user.id}`)
+    .run();
+}
+
+function introductoryFreeDownloadLimit(env: Pick<Bindings, "INTRODUCTORY_FREE_DOWNLOAD_LIMIT">): number {
+  return Math.max(0, Math.min(INTRODUCTORY_FREE_DOWNLOAD_LIMIT, Number(env.INTRODUCTORY_FREE_DOWNLOAD_LIMIT ?? INTRODUCTORY_FREE_DOWNLOAD_LIMIT)));
+}
+
 function demoPaymentEnabled(env: Pick<Bindings, "APP_ENV" | "PAYMENT_PROVIDER">): boolean {
   return String(env.APP_ENV) === "demo" && env.PAYMENT_PROVIDER === "demo";
 }
@@ -2683,6 +2700,7 @@ app.post("/api/buyer/credits/checkout", async (c) => {
 app.get("/api/my/credits", async (c) => {
   const user = await buyerAccount(c);
   if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, 403);
+  await ensureIntroductoryCreditGrant(c.env, user);
   const [balance, transactions, pending] = await c.env.DB.batch([
     c.env.DB.prepare("SELECT COALESCE(SUM(credits), 0) AS balance FROM buyer_credit_transactions WHERE organization_id = ? AND buyer_id = ?").bind(user.organizationId, user.id),
     c.env.DB.prepare("SELECT id, transaction_type, credits, amount_cents, reference_type, reference_id, created_at FROM buyer_credit_transactions WHERE organization_id = ? AND buyer_id = ? ORDER BY created_at DESC LIMIT 100").bind(user.organizationId, user.id),
@@ -2693,6 +2711,9 @@ app.get("/api/my/credits", async (c) => {
     creditPackCredits: MEDIA_MEMBERSHIP_CREDITS,
     creditPackDurationDays: MEDIA_MEMBERSHIP_DURATION_DAYS,
     balanceCredits: Number((balance.results[0] as Record<string, unknown> | undefined)?.balance ?? 0),
+    introductoryFreeCredits: INTRODUCTORY_FREE_CREDITS,
+    introductoryFreeCreditCost: INTRODUCTORY_FREE_CREDIT_COST,
+    introductoryFreeDownloadLimit: INTRODUCTORY_FREE_DOWNLOAD_LIMIT,
     transactions: transactions.results,
     pendingPurchases: pending.results,
     currency: "CREDITS",
@@ -3894,7 +3915,8 @@ app.on(["GET", "HEAD"], "/api/assets/:id/preview", async (c) => {
 app.get("/api/assets/:id/preview-access", async (c) => {
   const user = await requestUser(c);
   if (!user) return c.json({ paid: false });
-  const freeLimit = Math.max(0, Math.min(5, Number(c.env.INTRODUCTORY_FREE_DOWNLOAD_LIMIT ?? 3)));
+  if (allowedRole(user, ["buyer", "contributor", "editor", "admin"])) await ensureIntroductoryCreditGrant(c.env, user);
+  const freeLimit = introductoryFreeDownloadLimit(c.env);
   const row = await c.env.DB.prepare(`
     SELECT a.organization_id, a.owner_id, a.kind, a.rights_status, a.free_download_enabled,
       a.subscription_included,
@@ -3927,17 +3949,20 @@ app.get("/api/assets/:id/preview-access", async (c) => {
     String(row.owner_id) === user.id || allowedRole(user, ["editor", "admin"])
       || Number(row.paid_entitlement ?? 0) === 1 || Number(row.subscription_entitlement ?? 0) === 1 || Number(row.platform_subscription_entitlement ?? 0) === 1 || Number(row.introductory_free_entitlement ?? 0) === 1
   ));
-  return c.json({ paid, freeDownload: Boolean(row && row.kind === "image" && row.rights_status === "verified" && Number(row.free_download_enabled) === 1), freeDownloadsUsed: used, freeDownloadsRemaining: archiveDomain.introductoryDownloadsRemaining(used, freeLimit), freeDownloadLimit: freeLimit });
+  const freeDownloadsRemaining = archiveDomain.introductoryDownloadsRemaining(used, freeLimit);
+  return c.json({ paid, freeDownload: Boolean(row && row.kind === "image" && row.rights_status === "verified" && Number(row.free_download_enabled) === 1), freeDownloadsUsed: used, freeDownloadsRemaining, freeDownloadLimit: freeLimit, freeCreditCost: INTRODUCTORY_FREE_CREDIT_COST, freeCreditsRemaining: freeDownloadsRemaining * INTRODUCTORY_FREE_CREDIT_COST });
 });
 
 app.get("/api/my/free-downloads", async (c) => {
   const user = await buyerAccount(c);
   if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Buyer access required" }, user ? 403 : 401);
-  const limit = Math.max(0, Math.min(5, Number(c.env.INTRODUCTORY_FREE_DOWNLOAD_LIMIT ?? 3)));
+  await ensureIntroductoryCreditGrant(c.env, user);
+  const limit = introductoryFreeDownloadLimit(c.env);
   const claims = await c.env.DB.prepare(`SELECT fd.id, fd.asset_id, a.title, fd.created_at
     FROM buyer_free_downloads fd JOIN assets a ON a.id = fd.asset_id
     WHERE fd.organization_id = ? AND fd.buyer_id = ? ORDER BY fd.created_at DESC LIMIT 100`).bind(user.organizationId, user.id).all<Record<string, unknown>>();
-  return c.json({ limit, used: claims.results.length, remaining: archiveDomain.introductoryDownloadsRemaining(claims.results.length, limit), downloads: claims.results });
+  const remaining = archiveDomain.introductoryDownloadsRemaining(claims.results.length, limit);
+  return c.json({ limit, used: claims.results.length, remaining, freeCreditCost: INTRODUCTORY_FREE_CREDIT_COST, freeCreditsRemaining: remaining * INTRODUCTORY_FREE_CREDIT_COST, downloads: claims.results });
 });
 
 app.on(["GET", "HEAD"], "/api/assets/:id/poster", async (c) => {
@@ -3986,11 +4011,12 @@ app.on(["GET", "HEAD"], "/api/assets/:id/original", async (c) => {
   `).bind(user.id, user.id, user.id, user.id, c.req.param("id"), user.organizationId).first<Record<string, unknown>>();
   if (!row) return c.json({ error: "Original media not found" }, 404);
   const elevated = allowedRole(user, ["editor", "admin"]);
+  if (allowedRole(user, ["buyer", "contributor", "editor", "admin"])) await ensureIntroductoryCreditGrant(c.env, user);
   const platformSubscription = Number(row.platform_subscription_entitlement) === 1;
   const existingFree = Number(row.introductory_free_entitlement) === 1;
   let freeClaimed = existingFree;
   const freeEligible = row.kind === "image" && row.status === "published" && row.rights_status === "verified" && Number(row.free_download_enabled) === 1;
-  const freeLimit = Math.max(0, Math.min(5, Number(c.env.INTRODUCTORY_FREE_DOWNLOAD_LIMIT ?? 3)));
+  const freeLimit = introductoryFreeDownloadLimit(c.env);
 
   // Validate storage before claiming an allowance or spending a bundle credit.
   // This keeps unavailable originals from consuming user entitlements.
@@ -4012,10 +4038,20 @@ app.on(["GET", "HEAD"], "/api/assets/:id/original", async (c) => {
 
   if (!elevated && String(row.owner_id) !== user.id && !Number(row.paid_entitlement) && !Number(row.subscription_entitlement) && !platformSubscription && !existingFree && freeEligible && c.req.method === "GET") {
     const claimId = crypto.randomUUID();
-    const claim = await c.env.DB.prepare(`INSERT OR IGNORE INTO buyer_free_downloads (id, organization_id, buyer_id, asset_id, object_key)
-      SELECT ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM buyer_free_downloads WHERE organization_id = ? AND buyer_id = ?) < ?`)
-      .bind(claimId, user.organizationId, user.id, row.id, originalKey, user.organizationId, user.id, freeLimit).run();
-    freeClaimed = Number(claim.meta.changes ?? 0) === 1 || existingFree;
+    const creditSpendIdempotencyKey = `introductory-free-credit:${claimId}`;
+    const claimResult = await c.env.DB.batch([
+      c.env.DB.prepare(`INSERT OR IGNORE INTO buyer_free_downloads (id, organization_id, buyer_id, asset_id, object_key)
+        SELECT ?, ?, ?, ?, ?
+        WHERE (SELECT COUNT(*) FROM buyer_free_downloads WHERE organization_id = ? AND buyer_id = ?) < ?
+          AND (SELECT COALESCE(SUM(credits), 0) FROM buyer_credit_transactions WHERE organization_id = ? AND buyer_id = ?) >= ?`)
+        .bind(claimId, user.organizationId, user.id, row.id, originalKey, user.organizationId, user.id, freeLimit, user.organizationId, user.id, INTRODUCTORY_FREE_CREDIT_COST),
+      c.env.DB.prepare(`INSERT OR IGNORE INTO buyer_credit_transactions
+        (id, organization_id, buyer_id, transaction_type, credits, amount_cents, reference_type, reference_id, idempotency_key)
+        SELECT ?, ?, ?, 'spend', ?, 0, 'introductory_free_photo', ?, ?
+        WHERE EXISTS (SELECT 1 FROM buyer_free_downloads WHERE id = ? AND organization_id = ? AND buyer_id = ?)`)
+        .bind(crypto.randomUUID(), user.organizationId, user.id, -INTRODUCTORY_FREE_CREDIT_COST, row.id, creditSpendIdempotencyKey, claimId, user.organizationId, user.id),
+    ]);
+    freeClaimed = Number(claimResult[0]?.meta?.changes ?? 0) === 1 || existingFree;
   }
   const creditCost = Math.max(1, Number(row.license_credit_cost ?? MEDIA_MEMBERSHIP_CREDITS));
   const customBuying = row.monetization_model === "custom_quote";
@@ -4027,7 +4063,8 @@ app.on(["GET", "HEAD"], "/api/assets/:id/original", async (c) => {
       : freeEligible && archiveDomain.introductoryDownloadsRemaining(used, freeLimit) === 0
         ? "Your introductory free photo downloads are used. Choose a credit purchase or unlimited subscription to continue."
         : `A paid ${creditCost}-credit media licence or subscription is required to download this original`;
-    return c.json({ error, code: customBuying ? "custom_buying_opt_in_required" : freeEligible ? "free_download_limit_reached" : "download_entitlement_required", creditCost, freeDownloadsRemaining: archiveDomain.introductoryDownloadsRemaining(used, freeLimit) }, 403);
+    const freeDownloadsRemaining = archiveDomain.introductoryDownloadsRemaining(used, freeLimit);
+    return c.json({ error, code: customBuying ? "custom_buying_opt_in_required" : freeEligible ? "free_download_limit_reached" : "download_entitlement_required", creditCost, freeDownloadsRemaining, freeCreditCost: INTRODUCTORY_FREE_CREDIT_COST, freeCreditsRemaining: freeDownloadsRemaining * INTRODUCTORY_FREE_CREDIT_COST }, 403);
   }
   const entitlementType = elevated ? "staff" : String(row.owner_id) === user.id ? "owner" : platformSubscription || Number(row.subscription_entitlement) === 1 ? "subscription" : "licence";
   if (!freeClaimed || entitlementType !== "licence") {

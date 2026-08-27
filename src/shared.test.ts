@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { archiveDomain, buildMatchExplanation, evaluateLicenceRequest, metadataSearchEvidence, metadataSearchSuggestions, normalizeHttpUrl, rankMetadataSearchRows, type Asset } from "./shared";
+import { archiveDomain, buildMatchExplanation, evaluateLicenceRequest, INTRODUCTORY_FREE_CREDIT_COST, INTRODUCTORY_FREE_CREDITS, INTRODUCTORY_FREE_DOWNLOAD_LIMIT, MEDIA_MEMBERSHIP_CREDITS, metadataSearchEvidence, metadataSearchSuggestions, normalizeHttpUrl, rankMetadataSearchRows, type Asset } from "./shared";
 import { friendlySupabasePhoneError, normalizeSouthAfricanPhone } from "./phone";
 
 describe("South African phone rules", () => {
@@ -126,6 +126,12 @@ describe("asset domain contract", () => {
     expect(archiveDomain.introductoryDownloadsRemaining(2)).toBe(1);
     expect(archiveDomain.introductoryDownloadsRemaining(8)).toBe(0);
     expect(archiveDomain.introductoryDownloadsRemaining(1, 5)).toBe(4);
+  });
+
+  it("defines the starter offer as 300 credits for three 100-credit photos", () => {
+    expect(INTRODUCTORY_FREE_DOWNLOAD_LIMIT).toBe(3);
+    expect(INTRODUCTORY_FREE_CREDIT_COST).toBe(MEDIA_MEMBERSHIP_CREDITS);
+    expect(INTRODUCTORY_FREE_CREDITS).toBe(300);
   });
 
   it("filters broad one-token matches out of story searches", () => {
