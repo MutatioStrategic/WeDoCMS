@@ -4376,7 +4376,7 @@ const searchAssetsHandler = async (c: Context<{ Bindings: Bindings; Variables: V
   const params = { ...requestedParams, status: "published" as const };
 
   let rows: Record<string, unknown>[] = [];
-  let searchMode: SearchResponse["mode"] = params.mode;
+  let searchMode: SearchResponse["mode"] = params.q ? params.mode : "general";
   let searchSuggestions: string[] = [];
   let searchStages: import("./photo-indexing").MetadataSearchStage[] = [];
   if (params.q) {

@@ -31,7 +31,7 @@ requireText(openapi, /AuthConfigResponse:/, "OpenAPI is missing AuthConfigRespon
 const productionStart = wrangler.search(/"production"\s*:\s*\{/);
 const production = productionStart >= 0 ? wrangler.slice(productionStart) : "";
 requireText(production, /"APP_ENV"\s*:\s*"production"/, "Production Wrangler environment is missing APP_ENV=production.");
-requireText(production, /"AUTH_PROVIDER"\s*:\s*"(?:supabase|both)"/, "Production Wrangler environment does not enable Supabase authentication.");
+requireText(production, /"AUTH_PROVIDER"\s*:\s*"supabase"/, "Production Wrangler environment must use Supabase-only authentication while Auth0 is paused.");
 requireText(production, /"SUPABASE_URL"\s*:\s*"https:\/\/[^"/]+\.supabase\.co"/, "Production Wrangler environment is missing its HTTPS Supabase URL.");
 requireText(production, /"SUPABASE_AUDIENCE"\s*:\s*"[^"}]+"/, "Production Wrangler environment is missing SUPABASE_AUDIENCE.");
 requireText(production, /"SUPABASE_ANON_KEY"/, "Production Wrangler secrets do not require SUPABASE_ANON_KEY.");

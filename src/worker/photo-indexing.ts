@@ -1154,7 +1154,11 @@ export async function searchPhotoIndex(
     const minimumScore = Math.max(AI_SEARCH_MIN_SCORE, Number(vectorResult.matches[0]?.score ?? 0) - 0.22);
     const matches = vectorResult.matches.filter((match) => Number(match.score ?? 0) >= minimumScore);
     const vectorIds = [...new Set(matches.map((match) => String(match.id)).filter(Boolean))];
-    const semanticScores = new Map(matches.map((match) => [String(match.id), Number(match.score ?? 0)]));
+    // Vectorize returns revision document IDs, while the domain ranker works
+    // with asset IDs. Keep both maps explicit so a current D1 row gets the
+    // score for its own current vector and a stale revision cannot inherit it.
+    const vectorScores = new Map(matches.map((match) => [String(match.id), Number(match.score ?? 0)]));
+    const semanticScores = new Map(matches.map((match) => [vectorAssetId(String(match.id)), Number(match.score ?? 0)]));
     let rows: Record<string, unknown>[] = [];
     if (vectorIds.length) {
       const placeholders = vectorIds.map(() => "?").join(", ");
@@ -1166,7 +1170,7 @@ export async function searchPhotoIndex(
           AND a.vector_index_id IN (${placeholders})`)
         .bind(...filter.values, ...vectorIds).all<Record<string, unknown>>();
       rows = mergeHybridSearchRows(result.results as Record<string, unknown>[], result.results as Record<string, unknown>[], normalizedQuery, semanticScores)
-        .map((row) => ({ ...row, semantic_score: Math.round((semanticScores.get(String(row.vector_index_id)) ?? 0) * 1000) / 1000 }));
+        .map((row) => ({ ...row, semantic_score: Math.round((vectorScores.get(String(row.vector_index_id)) ?? 0) * 1000) / 1000 }));
     }
     return {
       rows,

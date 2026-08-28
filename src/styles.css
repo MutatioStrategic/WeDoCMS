@@ -693,6 +693,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .demo-top-actions > .subscription-button, .demo-top-actions > .ghost-button:not(.local-dev-login):not(.demo-sign-out) { display: none; }
 .better-shell .dark-button, .better-shell .light-button, .better-shell .search-box button, .better-shell .approve-button { border-radius: 8px; box-shadow: 0 5px 14px rgba(122,53,36,.11); }
 .better-shell .dark-button:hover, .better-shell .light-button:hover, .better-shell .search-box button:hover, .better-shell .approve-button:hover { transform: translateY(-1px); }
+.better-shell .search-mode-toggle button, .better-shell .search-mode-toggle button:hover { border-radius: 4px; background: transparent; color: #59675a; box-shadow: none; transform: none; }
+.better-shell .search-mode-toggle button.active, .better-shell .search-mode-toggle button.active:hover { background: #172019; color: #fffaf2; }
 .better-shell .ghost-button, .better-shell .outline-button, .better-shell .blocked-button, .better-shell .filter-tabs button, .better-shell .suggestion, .better-shell .light-outline-button { transition: border-color .18s ease, background .18s ease, color .18s ease, transform .18s ease; }
 .better-shell input, .better-shell select, .better-shell textarea { border-radius: 8px; }
 .better-shell button:focus-visible, .better-shell a:focus-visible, .better-shell input:focus-visible, .better-shell select:focus-visible, .better-shell textarea:focus-visible { outline: 3px solid rgba(213,138,89,.72); outline-offset: 3px; }

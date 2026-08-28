@@ -188,11 +188,15 @@ paths:
   /api/search:
     get:
       operationId: searchApprovedMetadata
-      summary: Search approved assets with deterministic title and description matching
+      summary: Search approved assets with General metadata matching or AI metadata-vector retrieval
       parameters:
         - name: q
           in: query
           schema: { type: string, maxLength: 240, default: '' }
+        - name: mode
+          in: query
+          description: General uses literal title/description matching. AI interprets a natural-language brief against vectors built from current approved metadata; it never re-analyses source images at query time.
+          schema: { type: string, enum: [general, ai], default: general }
         - name: kind
           in: query
           schema: { type: string, enum: [all, image, video], default: all }
@@ -213,7 +217,7 @@ paths:
           schema: { type: string, enum: [published, needs_review, all], default: published }
       responses:
         '200':
-          description: Deterministically ranked metadata search results
+          description: Ranked published metadata search results
           content:
             application/json:
               schema: { $ref: '#/components/schemas/SearchResponse' }
@@ -223,7 +227,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
         '503':
-          description: Approved metadata search is temporarily unavailable
+          description: The selected General or AI metadata search service is temporarily unavailable
   /api/assets/{id}:
     get:
       operationId: getAsset
@@ -2413,6 +2417,7 @@ components:
         matched_field: { type: string, nullable: true, enum: [title, description] }
         match_type: { type: string, enum: [exact, contains, fuzzy] }
         metadata_score: { type: number, minimum: 0, maximum: 100, description: Deterministic title/description score; exact title matches are 100. }
+        semantic_score: { type: number, minimum: 0, maximum: 1, description: Vector similarity from AI search against current approved metadata. }
         source_id: { type: string, description: Asset ID that supplied the matched metadata. }
         match_snippet: { type: string, description: Short excerpt from the matched title or description. }
         sourceFileName: { type: string, nullable: true }
@@ -2430,7 +2435,7 @@ components:
       required: [query, mode, results, facets]
       properties:
         query: { type: string }
-        mode: { type: string, enum: [keyword] }
+        mode: { type: string, enum: [general, ai] }
         results: { type: array, items: { $ref: '#/components/schemas/Asset' } }
         suggestions: { type: array, items: { type: string }, description: Metadata-derived alternatives returned when no results match. }
         total: { type: integer, minimum: 0 }

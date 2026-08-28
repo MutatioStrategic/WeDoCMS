@@ -38,7 +38,10 @@ if (!production || typeof production !== "object") {
   requireValue(production.name, expectedWorkerName, "env.production.name");
   requireValue(production.vars?.APP_ENV, "production", "env.production.vars.APP_ENV");
   requireValue(production.vars?.R2_BUCKET_NAME, "veld-archive-media", "env.production.vars.R2_BUCKET_NAME");
-  requireValue(production.vars?.AUTH_AUDIENCE, expectedWorkerOrigin, "env.production.vars.AUTH_AUDIENCE");
+  const authProvider = String(production.vars?.AUTH_PROVIDER ?? "").trim().toLowerCase();
+  if (authProvider === "auth0" || authProvider === "both") {
+    requireValue(production.vars?.AUTH_AUDIENCE, expectedWorkerOrigin, "env.production.vars.AUTH_AUDIENCE");
+  }
   requireValue(production.vars?.PHOTO_AI_SOURCE_ORIGIN, expectedWorkerOrigin, "env.production.vars.PHOTO_AI_SOURCE_ORIGIN");
 
   const database = production.d1_databases?.find((binding) => binding.binding === "DB");

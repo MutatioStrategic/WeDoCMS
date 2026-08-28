@@ -17,7 +17,7 @@
 - [ ] Configure R2 CORS and short-lived presigned PUT credentials.
 - [ ] Configure media-processing queues, image transformations, and Stream direct uploads.
 - [ ] Configure signed Stream playback and webhook delivery.
-- [x] Provision Workers AI and Vectorize for background photo enrichment and indexing; keep live buyer search metadata-only until a separately approved semantic-search release.
+- [x] Provision Workers AI and Vectorize for background photo enrichment and indexing; AI search now retrieves only current, approved metadata vectors and General search remains deterministic.
 - [ ] Replace all demo visual cards with approved, licensed media.
 - [ ] Configure Image Delivery variants (`thumb`, `card`, `preview`, `download`) and verify crop, format negotiation, cache policy, and private-original access.
 - [ ] Configure Stream direct uploads, signed playback, allowed origins, and the signed `/api/webhooks/stream` callback; verify a video progresses from processing to editorial review.

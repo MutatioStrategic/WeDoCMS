@@ -301,9 +301,13 @@ event attributes before creating the ZIP.
 - Every navigation control changes view or gives a clear prerequisite message.
 - Search submits on Enter and button click; suggestion chips never submit the form accidentally.
 - Search results remain useful when the read-only API is unavailable.
-- Live search uses approved title and description metadata only; exact title,
-  contains, and bounded typo-tolerant fuzzy matches remain deterministic, and
-  no semantic or image-AI result is mixed into the buyer result set.
+- General search uses approved title and description metadata only; exact title,
+  contains, and bounded typo-tolerant fuzzy matches remain deterministic.
+- AI search accepts a natural-language brief and compares it with vectors built
+  from the current approved description and structured metadata. It rechecks
+  every vector candidate against the current published D1 revision before it is
+  displayed, never inspects source images at search time, and is unavailable
+  rather than silently falling back to General search when AI/Vectorize fails.
 - A no-result response explains the empty state and may offer alternatives
   derived from stored metadata; each alternative is an explicit, non-submitting
   action.

@@ -7,10 +7,6 @@ The Worker now fails closed for identity and storage operations. Before a produc
 ```text
 SESSION_SECRET                 # >= 32 random characters; rotate by overlapping deployments
 SUPABASE_ANON_KEY              # browser-safe publishable/anon key; store with Wrangler, never service-role
-AUTH_JWKS_URL                  # Auth0/.well-known/jwks.json URL for RS256 verification
-AUTH_ISSUER                    # expected issuer, including trailing slash
-AUTH_AUDIENCE                  # expected API audience
-AUTH_ROLES_CLAIM               # optional namespaced claim containing application roles
 TURNSTILE_SECRET               # add when high-risk public actions are enabled
 MEDIA_SCANNER_SECRET           # only when MEDIA_SCANNER_URL is configured
 AUDIT_SIGNING_PRIVATE_JWK    # add before enabling audit exports/events
@@ -27,7 +23,7 @@ corresponding production controls are enabled.
 `x-user-id`, `x-user-role`, and `x-demo-user-id` are not accepted as identity. Browser sessions use an HttpOnly, signed, revocable cookie plus a CSRF token. External IdP tokens are accepted only through the verified JWT exchange endpoint.
 
 The production SPA obtains Supabase settings from the Worker-owned
-`GET /api/auth/config` route. Confirm `AUTH_PROVIDER=supabase` or `both`,
+`GET /api/auth/config` route. Confirm `AUTH_PROVIDER=supabase`,
 `SUPABASE_URL`, and `SUPABASE_AUDIENCE` in the selected Wrangler environment,
 then run `npm run auth:check` before every deployment. The route returns the
 publishable key only after validating its anon/publishable shape and never
@@ -61,9 +57,12 @@ must not be used to mask a failed token verification.
 
 Set `ALLOWED_ORIGINS` to exact HTTPS origins only. Do not use `*` with authenticated requests. The Worker emits CSP, HSTS, frame, MIME, referrer, permissions, and cross-origin isolation headers.
 
-## Auth0 bootstrap values
+## Paused Auth0 integration
 
-The deployed production Worker is `https://veld-archive-api-production.blewisorlando.workers.dev` and the SPA origin is `https://veld-archive.pages.dev`. Create an Auth0 SPA application and API with these values before adding the Worker secrets:
+Auth0 is not active in production. Keep `AUTH_PROVIDER=supabase` and leave
+`AUTH_JWKS_URL`, `AUTH_ISSUER`, `AUTH_AUDIENCE`, and frontend Auth0 variables
+unset. Re-enabling Auth0 requires a separate identity-boundary review and these
+deployment values:
 
 - Allowed callback URL: `https://veld-archive.pages.dev`
 - Allowed logout URL: `https://veld-archive.pages.dev`
