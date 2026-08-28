@@ -17,6 +17,8 @@ export type PhotoEnrichmentJob = {
 export type PhotoPipelineBindings = ObservabilityBindings & {
   DB: D1Database;
   MEDIA_BUCKET: R2Bucket;
+  /** Optional read-only fallback for catalogues whose originals live in the library bucket. */
+  MEDIA_LIBRARY_BUCKET?: Pick<R2Bucket, "get">;
   AI?: { run(model: string, input: Record<string, unknown>): Promise<unknown> };
   PHOTO_INDEX?: VectorizeIndex;
   PHOTO_ENRICHMENT_QUEUE?: Queue<PhotoEnrichmentJob>;
@@ -769,7 +771,7 @@ async function enrichPhoto(env: PhotoPipelineBindings, job: PhotoEnrichmentJob, 
     classified = classifyVisionResult(cached);
   } else {
     if (!localVision && !env.AI) throw new PhotoPipelineError("AI binding is not configured for photo enrichment", "retryable");
-    const object = await env.MEDIA_BUCKET.get(sourceKey);
+    const object = await env.MEDIA_BUCKET.get(sourceKey) ?? await env.MEDIA_LIBRARY_BUCKET?.get(sourceKey);
     if (!object) throw new PhotoPipelineError("Photo object was not found in R2", "retryable");
     const contentType = object.httpMetadata?.contentType?.toLowerCase() ?? "image/jpeg";
     if (!contentType.startsWith("image/")) throw new PhotoPipelineError("Photo object is not an image", "permanent");
@@ -1083,8 +1085,8 @@ export async function processPhotoJob(env: PhotoPipelineBindings, job: PhotoEnri
 }
 
 export type MetadataSearchStage = {
-  stage: "metadata" | "fuzzy";
-  queryType: "metadata" | "fuzzy";
+  stage: "metadata" | "fuzzy" | "semantic";
+  queryType: "metadata" | "fuzzy" | "semantic";
   resultCount: number;
   latencyMs: number;
   confidence: number;
@@ -1093,6 +1095,8 @@ export type MetadataSearchStage = {
 
 const DEFAULT_SEARCH_RESULT_TARGET = 10;
 const FUZZY_CANDIDATE_LIMIT = 1000;
+const AI_SEARCH_MAX_RESULTS = 36;
+const AI_SEARCH_MIN_SCORE = 0.35;
 
 function ftsQuery(value: string): string {
   return searchTokens(value)
@@ -1105,7 +1109,7 @@ function searchResultTarget(env: PhotoPipelineBindings): number {
   return Number.isInteger(parsed) && parsed > 0 ? Math.min(parsed, 60) : DEFAULT_SEARCH_RESULT_TARGET;
 }
 
-function filterClauses(filters: { kind: "all" | "image" | "video"; status: "published" | "needs_review" | "all"; location?: string; locationType?: string; category?: string; verified?: boolean; excludeDemo?: boolean }): { clauses: string[]; values: string[] } {
+function filterClauses(filters: { kind: "all" | "image" | "video"; status: "published" | "needs_review" | "all"; location?: string; locationType?: string; category?: string; verified?: boolean; orientation?: "all" | "landscape" | "portrait" | "square"; excludeDemo?: boolean }): { clauses: string[]; values: string[] } {
   const clauses = [filters.status === "all" ? "1 = 1" : "a.status = ?", "a.id NOT LIKE 'asset-test-photo-%'", "COALESCE(a.preview_key, a.original_key, '') <> ''"];
   const values: string[] = filters.status === "all" ? [] : [filters.status];
   if (filters.status === "published") clauses.push("a.approved_revision = a.asset_revision");
@@ -1118,6 +1122,9 @@ function filterClauses(filters: { kind: "all" | "image" | "video"; status: "publ
   }
   if (filters.locationType) { clauses.push("a.visual_location_type = ?"); values.push(filters.locationType); }
   if (filters.category) { clauses.push("a.primary_category = ?"); values.push(filters.category); }
+  if (filters.orientation === "landscape") clauses.push("COALESCE(a.media_width, 0) > COALESCE(a.media_height, 0)");
+  if (filters.orientation === "portrait") clauses.push("COALESCE(a.media_height, 0) > COALESCE(a.media_width, 0)");
+  if (filters.orientation === "square") clauses.push("COALESCE(a.media_width, 0) = COALESCE(a.media_height, 0) AND COALESCE(a.media_width, 0) > 0");
   if (filters.verified) clauses.push("a.human_verified = 1");
   return { clauses, values };
 }
@@ -1125,11 +1132,56 @@ function filterClauses(filters: { kind: "all" | "image" | "video"; status: "publ
 export async function searchPhotoIndex(
   env: PhotoPipelineBindings,
   query: string,
-  filters: { kind: "all" | "image" | "video"; status: "published" | "needs_review" | "all"; location?: string; locationType?: string; category?: string; verified?: boolean; excludeDemo?: boolean },
-): Promise<{ rows: Record<string, unknown>[]; usedVectorIndex: false; mode: "keyword"; stages: MetadataSearchStage[]; suggestions: string[]; fallbackReason?: "metadata_fts_unavailable" }> {
+  filters: { kind: "all" | "image" | "video"; status: "published" | "needs_review" | "all"; location?: string; locationType?: string; category?: string; verified?: boolean; orientation?: "all" | "landscape" | "portrait" | "square"; excludeDemo?: boolean },
+  mode: "general" | "ai" = "general",
+): Promise<{ rows: Record<string, unknown>[]; usedVectorIndex: boolean; mode: "general" | "ai"; stages: MetadataSearchStage[]; suggestions: string[]; fallbackReason?: "metadata_fts_unavailable" }> {
   const normalizedQuery = query.trim();
   const filter = filterClauses(filters);
   const target = searchResultTarget(env);
+  if (mode === "ai") {
+    if (!env.AI || !env.PHOTO_INDEX) throw new PhotoPipelineError("AI search requires the AI and Vectorize bindings", "retryable");
+    const semanticStartedAt = performance.now();
+    const embeddingModel = env.PHOTO_EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MODEL;
+    const embedding = await env.AI.run(embeddingModel, { text: normalizedQuery, pooling: "cls" }) as { data?: number[][] };
+    const queryVector = embedding.data?.[0];
+    if (!queryVector?.length) throw new PhotoPipelineError("AI search could not create a query embedding", "retryable");
+    const namespace = env.PHOTO_INDEX_NAMESPACE?.trim() || undefined;
+    const vectorResult = await env.PHOTO_INDEX.query(queryVector, {
+      topK: AI_SEARCH_MAX_RESULTS,
+      returnMetadata: "indexed",
+      ...(namespace ? { namespace } : {}),
+    });
+    const minimumScore = Math.max(AI_SEARCH_MIN_SCORE, Number(vectorResult.matches[0]?.score ?? 0) - 0.22);
+    const matches = vectorResult.matches.filter((match) => Number(match.score ?? 0) >= minimumScore);
+    const vectorIds = [...new Set(matches.map((match) => String(match.id)).filter(Boolean))];
+    const semanticScores = new Map(matches.map((match) => [String(match.id), Number(match.score ?? 0)]));
+    let rows: Record<string, unknown>[] = [];
+    if (vectorIds.length) {
+      const placeholders = vectorIds.map(() => "?").join(", ");
+      const result = await env.DB.prepare(`SELECT a.*, u.display_name AS contributor
+        FROM assets a JOIN users u ON u.id = a.owner_id
+        WHERE ${filter.clauses.join(" AND ")}
+          AND a.vector_index_status = 'indexed'
+          AND a.indexed_revision = a.approved_revision
+          AND a.vector_index_id IN (${placeholders})`)
+        .bind(...filter.values, ...vectorIds).all<Record<string, unknown>>();
+      rows = mergeHybridSearchRows(result.results as Record<string, unknown>[], result.results as Record<string, unknown>[], normalizedQuery, semanticScores)
+        .map((row) => ({ ...row, semantic_score: Math.round((semanticScores.get(String(row.vector_index_id)) ?? 0) * 1000) / 1000 }));
+    }
+    return {
+      rows,
+      usedVectorIndex: true,
+      mode: "ai",
+      stages: [{
+        stage: "semantic",
+        queryType: "semantic",
+        resultCount: rows.length,
+        latencyMs: Math.round((performance.now() - semanticStartedAt) * 100) / 100,
+        confidence: Number(rows[0]?.semantic_score ?? 0),
+      }],
+      suggestions: [],
+    };
+  }
   const metadataStartedAt = performance.now();
   const exactResult = normalizedQuery
     ? await env.DB.prepare(`SELECT a.*, u.display_name AS contributor
@@ -1211,7 +1263,7 @@ export async function searchPhotoIndex(
     return {
       rows: metadataRows.slice(0, 60),
       usedVectorIndex: false,
-      mode: "keyword",
+      mode: "general",
       stages,
       suggestions: metadataRows.length ? [] : archiveDomain.metadataSearchSuggestions(normalizedQuery, candidateRows),
       ...(fallbackReason ? { fallbackReason } : {}),
@@ -1221,7 +1273,7 @@ export async function searchPhotoIndex(
   return {
     rows: metadataRows.slice(0, 60),
     usedVectorIndex: false,
-    mode: "keyword",
+    mode: "general",
     stages,
     suggestions: [],
     ...(fallbackReason ? { fallbackReason } : {}),

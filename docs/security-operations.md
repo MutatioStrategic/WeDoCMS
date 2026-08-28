@@ -15,6 +15,7 @@ TURNSTILE_SECRET               # add when high-risk public actions are enabled
 MEDIA_SCANNER_SECRET           # only when MEDIA_SCANNER_URL is configured
 AUDIT_SIGNING_PRIVATE_JWK    # add before enabling audit exports/events
 AUDIT_SIGNING_PUBLIC_JWK     # add before enabling audit exports/events
+WEBHOOK_SECRET_ENCRYPTION_KEY # add before enabling outbound webhook subscriptions
 ```
 
 The production deployment gate currently requires only `SESSION_SECRET`,
@@ -31,6 +32,11 @@ The production SPA obtains Supabase settings from the Worker-owned
 then run `npm run auth:check` before every deployment. The route returns the
 publishable key only after validating its anon/publishable shape and never
 returns JWT audience, signing, or service-role secrets.
+
+Outbound webhook subscriptions require `WEBHOOK_SECRET_ENCRYPTION_KEY`. Their
+one-time signing secrets are AES-GCM encrypted in D1, returned only on
+creation, and legacy rows are re-encrypted by the scheduled Worker before the
+plaintext value is cleared.
 
 ### Supabase identity to Stockvel tenancy
 

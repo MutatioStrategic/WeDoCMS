@@ -4,7 +4,13 @@ import { parse } from "yaml";
 
 const specPath = new URL("../docs/openapi.yaml", import.meta.url);
 const spec = parse(await readFile(specPath, "utf8"));
-const openapi = await Enforcer(spec, { hideWarnings: false });
+for (const Schema of [Enforcer.v2_0.Schema, Enforcer.v3_0.Schema]) {
+  Schema.defineDataTypeFormat("string", "uri", null);
+  Schema.defineDataTypeFormat("string", "email", null);
+}
+// Several action endpoints create a provider session or async workflow rather
+// than a dereferenceable resource, so no stable Location URI exists to return.
+const openapi = await Enforcer(spec, { hideWarnings: false, componentOptions: { apiSuggestions: false } });
 
 const cases = [
   {

@@ -1,6 +1,7 @@
 node_modules/
 dist/
 contracts/reports/
+contracts/pacts/
 artifacts/qa/
 worker-smoke*.log
 *.log

@@ -68,6 +68,7 @@ import {
   responseWithSession,
   responseWithoutSession,
   verifyExternalJwt,
+  type ApplicationRole,
   type RequestUser,
 } from "./auth";
 import { allowedOrigin, applySecurityHeaders, enforceRateLimit, scanMediaObject, type SecurityBindings } from "./security";
@@ -82,6 +83,7 @@ import { sellerEvidenceUpdateAllowed } from "./asset-rights";
 import { createStoredZip, type ZipEntry } from "./zip";
 import { creditRedemptionSettlement, settlementAmounts } from "./payment-settlement";
 import { decryptZohoSecret, encryptZohoSecret, enqueueZohoOutbox, dispatchDueZohoOutbox, dispatchZohoOutboxJob, type ZohoOutboxJobMessage } from "./zoho-outbox";
+import { decryptSecret, encryptSecret } from "./secret-crypto";
 import type { ZohoCampaignSync, ZohoDeskCase, ZohoSocialDraft } from "../integrations/zoho";
 import { bearerToken, normalizeWordPressSiteUrl, WORDPRESS_SCOPES, wordPressApiBaseUrl } from "../integrations/wordpress";
 import {
@@ -242,6 +244,7 @@ type SecretBindings = {
   ZOHO_CAMPAIGNS_FLOW_WEBHOOK_URL?: string;
   ZOHO_ANALYTICS_FLOW_WEBHOOK_URL?: string;
   ZOHO_TOKEN_ENCRYPTION_KEY?: string;
+  WEBHOOK_SECRET_ENCRYPTION_KEY?: string;
   EMAIL?: SendEmail;
 };
 type WorkersAiBinding = {
@@ -334,15 +337,46 @@ async function notify(env: Bindings, organizationId: string, userId: string, con
 }
 
 /** Delivers a signed webhook to every subscription in the organization listening for this event. */
+function isSafeWebhookTarget(env: Pick<Bindings, "APP_ENV">, target: string): boolean {
+  try {
+    const url = new URL(target);
+    const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    if (url.username || url.password) return false;
+    if (url.protocol === "http:") return String(env.APP_ENV ?? "") === "development";
+    if (url.protocol !== "https:") return false;
+    if (hostname === "localhost" || hostname === "::1" || hostname.endsWith(".localhost") || hostname.endsWith(".internal")) return false;
+    if (/^(fc|fd)[0-9a-f]{2}:|^fe80:/i.test(hostname)) return false;
+    if (/^(127\.|10\.|192\.168\.|169\.254\.)/.test(hostname)) return false;
+    if (hostname.startsWith("172.")) {
+      const second = Number(hostname.split(".")[1]);
+      if (second >= 16 && second <= 31) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function dispatchWebhookEvent(env: Bindings, organizationId: string, eventType: string, payload: Record<string, unknown>): Promise<void> {
-  const subscriptions = await env.DB.prepare("SELECT id, target_url, secret, events FROM webhook_subscriptions WHERE organization_id = ? AND status = 'active'").bind(organizationId).all<{ id: string; target_url: string; secret: string; events: string }>();
+  const subscriptions = await env.DB.prepare("SELECT id, target_url, secret, secret_ciphertext, secret_iv, events FROM webhook_subscriptions WHERE organization_id = ? AND status = 'active'").bind(organizationId).all<{ id: string; target_url: string; secret: string; secret_ciphertext: string | null; secret_iv: string | null; events: string }>();
   for (const subscription of subscriptions.results) {
     let events: string[];
     try { events = JSON.parse(subscription.events); } catch { events = []; }
     if (!events.includes(eventType) && !events.includes("*")) continue;
+    if (!isSafeWebhookTarget(env, subscription.target_url)) {
+      await env.DB.prepare("UPDATE webhook_subscriptions SET status = 'disabled' WHERE id = ?").bind(subscription.id).run();
+      logEvent("warn", "webhook.target_rejected", traceContext(new Request("https://internal/webhook")), { subscriptionId: subscription.id, eventType });
+      continue;
+    }
+    const secret = await webhookSubscriptionSecret(env, subscription);
+    if (!secret) {
+      await env.DB.prepare("UPDATE webhook_subscriptions SET status = 'disabled' WHERE id = ?").bind(subscription.id).run();
+      logEvent("warn", "webhook.secret_unavailable", traceContext(new Request("https://internal/webhook")), { subscriptionId: subscription.id, eventType });
+      continue;
+    }
     const deliveryId = crypto.randomUUID();
     const body = JSON.stringify({ event: eventType, data: payload, deliveryId, timestamp: new Date().toISOString() });
-    const signature = hex(await hmac(utf8(subscription.secret), body));
+    const signature = hex(await hmac(utf8(secret), body));
     await env.DB.prepare("INSERT INTO webhook_deliveries (id, subscription_id, event_type, payload_json, status, attempts) VALUES (?, ?, ?, ?, 'pending', 1)").bind(deliveryId, subscription.id, eventType, body).run();
     try {
       // New consumers use the Stockvel headers; keep the legacy aliases during
@@ -416,6 +450,7 @@ app.use("/api/*", async (c, next) => {
 const devLoginSchema = z.object({ role: z.enum(["buyer", "contributor", "editor", "admin"]) });
 const exchangeSchema = z.object({
   organizationId: z.string().min(1).max(120).optional(),
+  invitationToken: z.string().min(20).max(200).optional(),
   sessionTransport: z.enum(["cookie", "bearer"]).optional(),
   accountIntent: z.literal("seller").optional(),
 });
@@ -537,20 +572,39 @@ app.post("/api/auth/exchange", async (c) => {
   const claims = await verifyExternalJwt(c.env, token);
   if (!claims) return c.json({ error: "Verified identity token required" }, 401);
   const requested = exchangeSchema.parse(await c.req.json().catch(() => ({})));
-  const organizationId = requested.organizationId ?? claims.org_id ?? c.env.DEFAULT_ORGANIZATION_ID;
+  const defaultOrganizationId = c.env.DEFAULT_ORGANIZATION_ID?.trim() || undefined;
+  let organizationId = requested.organizationId ?? claims.org_id ?? defaultOrganizationId;
   if (!organizationId) return c.json({ error: "An organization context is required" }, 422);
   let user = await c.env.DB.prepare("SELECT id, email FROM users WHERE auth_subject = ? AND status = 'active'").bind(claims.sub).first<{ id: string; email: string }>();
   if (!user) {
-    const organization = await c.env.DB.prepare("SELECT id, name FROM organizations WHERE id = ? AND status = 'active'").bind(organizationId).first<{ id: string; name: string }>();
-    if (!organization && String(c.env.AUTH_ALLOW_ORG_PROVISIONING) !== "true") return c.json({ error: "Organization is not provisioned" }, 403);
-    const userId = crypto.randomUUID();
-    const role = roleForNewAccount(applicationRoleFromClaims(claims, c.env), requested.accountIntent);
     const identityEmail = await identityEmailForClaims(claims);
+    let invitation: { id: string; organization_id: string; role: ApplicationRole } | null = null;
+    if (requested.invitationToken) {
+      invitation = await c.env.DB.prepare(`SELECT id, organization_id, role
+        FROM organization_invitations
+        WHERE token_hash = ? AND lower(email) = lower(?) AND accepted_at IS NULL AND expires_at > CURRENT_TIMESTAMP`)
+        .bind(await sha256Hex(requested.invitationToken), identityEmail).first<{ id: string; organization_id: string; role: ApplicationRole }>();
+      if (!invitation) return c.json({ error: "Invitation is invalid, expired, or addressed to another identity" }, 403);
+      organizationId = invitation.organization_id;
+    } else if (claims.org_id && defaultOrganizationId && claims.org_id !== defaultOrganizationId) {
+      // A verified provider organisation claim is not an application membership.
+      // A new account must use an invitation before entering another tenant.
+      return c.json({ error: "An invitation is required to join this organisation" }, 403);
+    }
+    const organization = await c.env.DB.prepare("SELECT id, name FROM organizations WHERE id = ? AND status = 'active'").bind(organizationId).first<{ id: string; name: string }>();
+    const canProvision = String(c.env.AUTH_ALLOW_ORG_PROVISIONING) === "true" && claims.org_id === organizationId;
+    if (!organization && !canProvision) return c.json({ error: "Organization is not provisioned" }, 403);
+    if (organization && organization.id !== defaultOrganizationId && !invitation) return c.json({ error: "An invitation is required to join this organisation" }, 403);
+    const userId = crypto.randomUUID();
+    const role = invitation?.role ?? roleForNewAccount(applicationRoleFromClaims(claims, c.env), requested.accountIntent);
     const displayName = identityDisplayNameForClaims(claims);
-    await c.env.DB.prepare("INSERT INTO users (id, auth_subject, email, display_name, role, email_verified_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)")
-      .bind(userId, claims.sub, identityEmail, displayName, role).run();
-    if (!organization) await c.env.DB.prepare("INSERT INTO organizations (id, name, slug, created_by) VALUES (?, ?, ?, ?)").bind(organizationId, claims.org_name ?? "New organization", organizationId.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 60), userId).run();
-    await c.env.DB.prepare("INSERT INTO organization_memberships (id, organization_id, user_id, role) VALUES (?, ?, ?, ?)").bind(crypto.randomUUID(), organizationId, userId, role).run();
+    const statements = [
+      c.env.DB.prepare("INSERT INTO users (id, auth_subject, email, display_name, role, email_verified_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)").bind(userId, claims.sub, identityEmail, displayName, role),
+      ...(!organization ? [c.env.DB.prepare("INSERT INTO organizations (id, name, slug, created_by) VALUES (?, ?, ?, ?)").bind(organizationId, claims.org_name ?? "New organization", organizationId.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 60), userId)] : []),
+      c.env.DB.prepare("INSERT INTO organization_memberships (id, organization_id, user_id, role) VALUES (?, ?, ?, ?)").bind(crypto.randomUUID(), organizationId, userId, role),
+      ...(invitation ? [c.env.DB.prepare("UPDATE organization_invitations SET accepted_at = CURRENT_TIMESTAMP WHERE id = ? AND accepted_at IS NULL").bind(invitation.id)] : []),
+    ];
+    await c.env.DB.batch(statements);
     user = { id: userId, email: identityEmail };
   }
   const membership = await c.env.DB.prepare("SELECT organization_id FROM organization_memberships WHERE organization_id = ? AND user_id = ? AND status = 'active'").bind(organizationId, user.id).first<{ organization_id: string }>();
@@ -819,6 +873,45 @@ async function listR2Keys(bucket: R2Bucket, prefix: string): Promise<string[]> {
   return keys;
 }
 
+function parseJsonValue<T>(value: unknown, fallback: T): T {
+  try {
+    const parsed = JSON.parse(String(value ?? ""));
+    return parsed as T;
+  } catch {
+    return fallback;
+  }
+}
+
+type WebhookSubscriptionSecret = { id: string; secret: string; secret_ciphertext: string | null; secret_iv: string | null };
+
+async function webhookSubscriptionSecret(env: Bindings, subscription: WebhookSubscriptionSecret): Promise<string | null> {
+  const key = env.WEBHOOK_SECRET_ENCRYPTION_KEY?.trim();
+  if (!key) return null;
+  try {
+    if (subscription.secret_ciphertext && subscription.secret_iv) {
+      return decryptSecret(subscription.secret_ciphertext, subscription.secret_iv, key, "WEBHOOK_SECRET_ENCRYPTION_KEY");
+    }
+    if (!subscription.secret) return null;
+    const encrypted = await encryptSecret(subscription.secret, key, "WEBHOOK_SECRET_ENCRYPTION_KEY");
+    await env.DB.prepare("UPDATE webhook_subscriptions SET secret = '', secret_ciphertext = ?, secret_iv = ? WHERE id = ? AND secret_ciphertext IS NULL")
+      .bind(encrypted.ciphertext, encrypted.iv, subscription.id).run();
+    return subscription.secret;
+  } catch {
+    return null;
+  }
+}
+
+async function migrateLegacyWebhookSecrets(env: Bindings, limit = 100): Promise<number> {
+  if (!env.WEBHOOK_SECRET_ENCRYPTION_KEY?.trim()) return 0;
+  const rows = await env.DB.prepare("SELECT id, secret, secret_ciphertext, secret_iv FROM webhook_subscriptions WHERE secret_ciphertext IS NULL AND secret <> '' LIMIT ?")
+    .bind(limit).all<WebhookSubscriptionSecret>();
+  let migrated = 0;
+  for (const row of rows.results) {
+    if (await webhookSubscriptionSecret(env, row)) migrated += 1;
+  }
+  return migrated;
+}
+
 const assetRowToDomain = (row: Record<string, unknown>, env?: Pick<SecretBindings, "STREAM_CUSTOMER_CODE" | "STREAM_PUBLIC_PLAYBACK_ENABLED">): Asset => ({
   id: String(row.id),
   kind: row.kind as Asset["kind"],
@@ -831,8 +924,8 @@ const assetRowToDomain = (row: Record<string, unknown>, env?: Pick<SecretBinding
   city: (row.city as string | null) ?? null,
   locality: (row.locality as string | null) ?? null,
   landmark: (row.landmark as string | null) ?? null,
-  subjectTags: JSON.parse(String(row.subject_tags ?? "[]")) as string[],
-  culturalTags: JSON.parse(String(row.cultural_tags ?? "[]")) as string[],
+  subjectTags: parseJsonValue<string[]>(row.subject_tags, []),
+  culturalTags: parseJsonValue<string[]>(row.cultural_tags, []),
   rightsStatus: row.rights_status as Asset["rightsStatus"],
   modelReleaseStatus: row.model_release_status as Asset["modelReleaseStatus"],
   propertyReleaseStatus: row.property_release_status as Asset["propertyReleaseStatus"],
@@ -841,18 +934,18 @@ const assetRowToDomain = (row: Record<string, unknown>, env?: Pick<SecretBinding
   humanVerified: Boolean(row.human_verified),
   contributor: String(row.contributor ?? "Stockvel Studio"),
   workflowStage: (row.workflow_stage as Asset["workflowStage"]) ?? "ingestion",
-  aiTags: JSON.parse(String(row.ai_tags ?? "[]")) as string[],
-  aiSuggestedMetadata: JSON.parse(String(row.ai_metadata_suggestion_json ?? "{}")) as Asset["aiSuggestedMetadata"],
+  aiTags: parseJsonValue<string[]>(row.ai_tags, []),
+  aiSuggestedMetadata: parseJsonValue<Asset["aiSuggestedMetadata"]>(row.ai_metadata_suggestion_json, {}),
   visualLocationType: (row.visual_location_type as Asset["visualLocationType"]) ?? "unknown",
   sceneContext: (row.scene_context as Asset["sceneContext"]) ?? "unknown",
   primaryCategory: (row.primary_category as Asset["primaryCategory"]) ?? "other",
-  sceneAttributes: JSON.parse(String(row.scene_attributes ?? "[]")) as string[],
+  sceneAttributes: parseJsonValue<string[]>(row.scene_attributes, []),
   visibleText: String(row.ocr_text ?? ""),
   detectedLanguage: String(row.detected_language ?? "none"),
   textReadability: (row.text_readability as Asset["textReadability"]) ?? "no_text",
   ocrConfidence: row.ocr_confidence == null ? null : Number(row.ocr_confidence),
-  aiFieldConfidences: JSON.parse(String(row.ai_field_confidences ?? "{}")) as Record<string, number>,
-  enrichmentValidation: JSON.parse(String(row.enrichment_validation_json ?? "{}")) as Asset["enrichmentValidation"],
+  aiFieldConfidences: parseJsonValue<Record<string, number>>(row.ai_field_confidences, {}),
+  enrichmentValidation: parseJsonValue<Asset["enrichmentValidation"]>(row.enrichment_validation_json, {}),
   geographicLocationSource: (row.geographic_location_source as Asset["geographicLocationSource"]) ?? "none",
   assetRevision: Number(row.asset_revision ?? 1),
   enrichedRevision: row.enriched_revision == null ? null : Number(row.enriched_revision),
@@ -885,6 +978,7 @@ const assetRowToDomain = (row: Record<string, unknown>, env?: Pick<SecretBinding
   matched_field: row.matched_field == null ? undefined : row.matched_field as Asset["matched_field"],
   match_type: row.match_type == null ? undefined : row.match_type as Asset["match_type"],
   metadata_score: row.metadata_score == null ? undefined : Number(row.metadata_score),
+  semantic_score: row.semantic_score == null ? undefined : Number(row.semantic_score),
   source_id: row.source_id == null ? undefined : String(row.source_id),
   match_snippet: row.match_snippet == null ? undefined : String(row.match_snippet),
 });
@@ -1020,12 +1114,15 @@ function portfolioCollectionFromRow(row: Record<string, unknown>): PortfolioColl
 
 const searchSchema = z.object({
   q: z.string().trim().max(240).default(""),
+  mode: z.enum(["general", "ai"]).default("general"),
   kind: z.enum(["all", "image", "video"]).default("all"),
   location: z.string().trim().max(80).optional(),
   locationType: z.enum(["urban_street", "coastal_landscape", "market_scene", "indoor", "residential", "rural_landscape", "industrial", "event", "transport", "nature", "sports", "food", "other", "unknown"]).optional(),
   category: z.enum(["people", "lifestyle", "travel", "nature", "architecture", "food", "business", "transport", "arts_culture", "sport", "news_editorial", "objects", "other"]).optional(),
   verified: z.enum(["true"]).optional(),
   status: z.enum(["published", "needs_review", "all"]).default("published"),
+  sort: z.enum(["relevance", "newest", "popular", "random"]).default("relevance"),
+  orientation: z.enum(["all", "landscape", "portrait", "square"]).default("all"),
 });
 
 const curationSchema = z.object({
@@ -1140,8 +1237,16 @@ app.post("/api/governance/assets/:id/action", async (c) => {
   if (payload.action === "approve" && governancePayloadEditsMetadata(payload)) {
     return c.json({ error: "Save the metadata correction before approving this revision", code: "review_revision_required" }, 422);
   }
-  if (payload.action === "approve" && !archiveDomain.canApproveMetadataRevision({ assetRevision: exists.asset_revision, reviewedRevision: exists.reviewed_revision, metadataReviewStatus: exists.metadata_review_status as Asset["metadataReviewStatus"] })) {
-    return c.json({ error: "The current metadata revision must be reviewed before approval", code: "review_revision_required" }, 422);
+  if (payload.action === "approve") {
+    const publication = archiveDomain.publicationGate({
+      rightsStatus: exists.rights_status,
+      modelReleaseStatus: exists.model_release_status,
+      propertyReleaseStatus: exists.property_release_status,
+      assetRevision: exists.asset_revision,
+      reviewedRevision: exists.reviewed_revision,
+      metadataReviewStatus: exists.metadata_review_status as Asset["metadataReviewStatus"],
+    });
+    if (!publication.allowed) return c.json({ error: "Rights, releases, and the current metadata revision must be verified before publication", code: publication.blockers[0], blockers: publication.blockers }, 422);
   }
   const stage = payload.action === "approve" ? "approval" : "curator_correction";
   const status = payload.action === "approve" ? "published" : payload.action === "reject" ? "rejected" : "needs_review";
@@ -1608,12 +1713,21 @@ app.post("/api/admin/assets/:id/review", async (c) => {
   const user = await requestUser(c);
   if (!user || !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Editor access required" }, 403);
   const payload = editorialReviewSchema.parse(await c.req.json());
-  const asset = await c.env.DB.prepare(`SELECT id, kind, owner_id, asset_revision, reviewed_revision, metadata_review_status
+  const asset = await c.env.DB.prepare(`SELECT id, kind, owner_id, asset_revision, reviewed_revision, metadata_review_status,
+      rights_status, model_release_status, property_release_status
     FROM assets WHERE id = ? AND organization_id = ?`).bind(c.req.param("id"), user.organizationId)
-    .first<{ id: string; kind: "image" | "video"; owner_id: string; asset_revision: number; reviewed_revision: number | null; metadata_review_status: string }>();
+    .first<{ id: string; kind: "image" | "video"; owner_id: string; asset_revision: number; reviewed_revision: number | null; metadata_review_status: string; rights_status: Asset["rightsStatus"]; model_release_status: Asset["modelReleaseStatus"]; property_release_status: Asset["propertyReleaseStatus"] }>();
   if (!asset) return c.json({ error: "Asset not found" }, 404);
-  if (payload.decision === "approved" && !archiveDomain.canApproveMetadataRevision({ assetRevision: asset.asset_revision, reviewedRevision: asset.reviewed_revision, metadataReviewStatus: asset.metadata_review_status as Asset["metadataReviewStatus"] })) {
-    return c.json({ error: "Save a correction for the current metadata revision before approval", code: "review_revision_required" }, 422);
+  if (payload.decision === "approved") {
+    const publication = archiveDomain.publicationGate({
+      rightsStatus: asset.rights_status,
+      modelReleaseStatus: asset.model_release_status,
+      propertyReleaseStatus: asset.property_release_status,
+      assetRevision: asset.asset_revision,
+      reviewedRevision: asset.reviewed_revision,
+      metadataReviewStatus: asset.metadata_review_status as Asset["metadataReviewStatus"],
+    });
+    if (!publication.allowed) return c.json({ error: "Rights, releases, and the current metadata revision must be verified before publication", code: publication.blockers[0], blockers: publication.blockers }, 422);
   }
   const status = payload.decision === "approved" ? "published" : payload.decision === "withdrawn" ? "withdrawn" : payload.decision === "rejected" ? "rejected" : "needs_review";
   if (payload.decision === "approved") {
@@ -2085,6 +2199,19 @@ const paymentSessionSchema = z.object({
   cancelUrl: z.string().url().max(2048),
 });
 
+function allowedPaymentReturnUrl(env: Pick<Bindings, "APP_PUBLIC_URL" | "ALLOWED_ORIGINS" | "APP_ENV">, value: string): boolean {
+  try {
+    const candidate = new URL(value);
+    if (candidate.protocol !== "https:" && String(env.APP_ENV ?? "") !== "development") return false;
+    const allowed = [env.APP_PUBLIC_URL ?? "", ...(env.ALLOWED_ORIGINS ?? "").split(",")]
+      .map((origin) => { try { return new URL(origin.trim()).origin; } catch { return ""; } })
+      .filter(Boolean);
+    return allowed.includes(candidate.origin);
+  } catch {
+    return false;
+  }
+}
+
 app.post("/api/payments/:licenceId/session", async (c) => {
   const user = await requestUser(c);
   if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, 401);
@@ -2103,6 +2230,7 @@ app.post("/api/payments/:licenceId/session", async (c) => {
   if (!licence) return c.json({ error: "Licence not found" }, 404);
   if (licence.status !== "pending") return c.json({ error: `Licence cannot be paid from status ${licence.status}` }, 409);
   if (Number(licence.agreement_count) !== 2) return c.json({ error: "Current buyer and payment terms must be accepted before payment" }, 409);
+  if (!allowedPaymentReturnUrl(c.env, payload.successUrl) || !allowedPaymentReturnUrl(c.env, payload.cancelUrl)) return c.json({ error: "Payment return URLs must belong to this archive deployment" }, 422);
   if (c.env.PAYMENT_PROVIDER === "paystack" && (licence.wallet_provider !== "paystack" || licence.wallet_status !== "verified" || !licence.provider_account_id)) {
     return c.json({ error: "The seller does not have a verified Paystack subaccount; checkout cannot safely split settlement" }, 409);
   }
@@ -2563,6 +2691,7 @@ app.post("/api/subscription/session", async (c) => {
   const configuration = buyerSubscriptionConfiguration(c.env);
   if (!configuration.configured) return c.json({ error: "The Paystack subscription plan is not fully configured" }, 503);
   const payload = buyerSubscriptionSessionSchema.parse(await c.req.json());
+  if (!allowedPaymentReturnUrl(c.env, payload.successUrl) || !allowedPaymentReturnUrl(c.env, payload.cancelUrl)) return c.json({ error: "Payment return URLs must belong to this archive deployment" }, 422);
   const selectedPlan = configuration.plans.find((plan) => plan.id === payload.plan);
   if (!selectedPlan) return c.json({ error: `The ${payload.plan} subscription plan is not configured` }, 503);
   const current = await c.env.DB.prepare("SELECT id, status FROM buyer_subscriptions WHERE organization_id = ? AND buyer_id = ? ORDER BY created_at DESC LIMIT 1").bind(user.organizationId, user.id).first<{ id: string; status: string }>();
@@ -2668,6 +2797,7 @@ app.post("/api/buyer/credits/checkout", async (c) => {
   if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, 403);
   if (!licencePaymentProviderConfigured(c.env)) return c.json({ error: "Payment provider is not configured for credit purchases" }, 503);
   const payload = creditPurchaseRequestSchema.parse(await c.req.json());
+  if (!allowedPaymentReturnUrl(c.env, payload.successUrl) || !allowedPaymentReturnUrl(c.env, payload.cancelUrl)) return c.json({ error: "Payment return URLs must belong to this archive deployment" }, 422);
   const amountCents = creditPurchaseAmountCents(payload.credits);
   const purchaseId = crypto.randomUUID();
   await c.env.DB.prepare("INSERT INTO buyer_credit_purchases (id, organization_id, buyer_id, credits, amount_cents, currency) VALUES (?, ?, ?, ?, ?, 'ZAR')")
@@ -4228,18 +4358,25 @@ app.post("/api/search/visual", async (c) => {
 
 const searchAssetsHandler = async (c: Context<{ Bindings: Bindings; Variables: Variables }>) => {
   const startedAt = performance.now();
-  const params = searchSchema.parse({
+  const requestedParams = searchSchema.parse({
     q: c.req.query("q") ?? "",
+    mode: c.req.query("mode") ?? "general",
     kind: c.req.query("kind") ?? "all",
     location: c.req.query("location"),
     locationType: c.req.query("locationType"),
     category: c.req.query("category"),
     verified: c.req.query("verified"),
     status: c.req.query("status") ?? "published",
+    sort: c.req.query("sort") ?? "relevance",
+    orientation: c.req.query("orientation") ?? "all",
   });
+  // This endpoint backs public discovery. Workflow states are never selectable
+  // by an unauthenticated query parameter; governance has its own tenant-scoped
+  // endpoint for review queues.
+  const params = { ...requestedParams, status: "published" as const };
 
   let rows: Record<string, unknown>[] = [];
-  let searchMode: SearchResponse["mode"] = "keyword";
+  let searchMode: SearchResponse["mode"] = params.mode;
   let searchSuggestions: string[] = [];
   let searchStages: import("./photo-indexing").MetadataSearchStage[] = [];
   if (params.q) {
@@ -4249,22 +4386,24 @@ const searchAssetsHandler = async (c: Context<{ Bindings: Bindings; Variables: V
         status: params.status,
         location: params.location,
         locationType: params.locationType,
-        category: params.category,
-        verified: params.verified === "true",
-        excludeDemo: String(c.env.APP_ENV) === "production",
-      });
+          category: params.category,
+          verified: params.verified === "true",
+          orientation: params.orientation,
+          excludeDemo: String(c.env.APP_ENV) === "production",
+      }, params.mode);
       rows = metadataSearch.rows;
       searchMode = metadataSearch.mode;
       searchSuggestions = metadataSearch.suggestions;
       searchStages = metadataSearch.stages;
       if (metadataSearch.fallbackReason) c.header("X-Search-Fallback-Reason", metadataSearch.fallbackReason);
     } catch (error) {
-      logEvent("error", "search.failed", c.get("trace"), { query: params.q, query_type: "metadata", error: error instanceof Error ? error.message : "unknown-error" });
-      return c.json({ error: "The verified metadata search service is temporarily unavailable", code: "search_unavailable" }, 503);
+      const code = params.mode === "ai" ? "ai_search_unavailable" : "search_unavailable";
+      logEvent("error", "search.failed", c.get("trace"), { query: params.q, query_type: params.mode, error: error instanceof Error ? error.message : "unknown-error" });
+      return c.json({ error: params.mode === "ai" ? "AI search is temporarily unavailable. Try General search while the metadata index recovers." : "The verified metadata search service is temporarily unavailable", code }, 503);
     }
   } else {
-    const clauses = [params.status === "all" ? "1 = 1" : "a.status = ?", "a.id NOT LIKE 'asset-test-photo-%'", ...(String(c.env.APP_ENV) === "production" ? ["COALESCE(a.demo_seed, 0) = 0", "a.id NOT LIKE 'asset-demo-%'"] : [])];
-    const values: string[] = params.status === "all" ? [] : [params.status];
+    const clauses = ["a.status = ?", "a.id NOT LIKE 'asset-test-photo-%'", ...(String(c.env.APP_ENV) === "production" ? ["COALESCE(a.demo_seed, 0) = 0", "a.id NOT LIKE 'asset-demo-%'"] : [])];
+    const values: string[] = ["published"];
 
     if (params.kind !== "all") {
       clauses.push("a.kind = ?");
@@ -4277,12 +4416,15 @@ const searchAssetsHandler = async (c: Context<{ Bindings: Bindings; Variables: V
     }
     if (params.locationType) { clauses.push("a.visual_location_type = ?"); values.push(params.locationType); }
     if (params.category) { clauses.push("a.primary_category = ?"); values.push(params.category); }
+    if (params.orientation === "landscape") clauses.push("COALESCE(a.media_width, 0) > COALESCE(a.media_height, 0)");
+    if (params.orientation === "portrait") clauses.push("COALESCE(a.media_height, 0) > COALESCE(a.media_width, 0)");
+    if (params.orientation === "square") clauses.push("COALESCE(a.media_width, 0) = COALESCE(a.media_height, 0) AND COALESCE(a.media_width, 0) > 0");
     if (params.verified) clauses.push("a.human_verified = 1");
     const result = await c.env.DB.prepare(`
       SELECT a.*, u.display_name AS contributor
       FROM assets a JOIN users u ON u.id = a.owner_id
       WHERE ${clauses.join(" AND ")}
-      ORDER BY a.human_verified DESC, a.authenticity_confidence DESC, a.created_at DESC
+       ORDER BY ${params.sort === "newest" ? "a.created_at DESC" : params.sort === "random" ? "RANDOM()" : "a.human_verified DESC, a.authenticity_confidence DESC, a.created_at DESC"}
       LIMIT 200
     `).bind(...values).all<Record<string, unknown>>();
 
@@ -4332,7 +4474,7 @@ const searchAssetsHandler = async (c: Context<{ Bindings: Bindings; Variables: V
   }
   logEvent("info", "search.request", c.get("trace"), {
     query: params.q,
-    query_type: params.q ? "metadata" : "browse",
+    query_type: params.q ? params.mode : "browse",
     result_count: matchedAssets.length,
     latency_ms: Math.round((performance.now() - startedAt) * 100) / 100,
     confidence,
@@ -6346,17 +6488,21 @@ app.get("/api/webhooks/subscriptions", async (c) => {
   const user = await requestUser(c);
   if (!user || !allowedRole(user, ["admin"])) return c.json({ error: "Admin access required" }, 403);
   const rows = await c.env.DB.prepare("SELECT id, target_url, events, status, created_at FROM webhook_subscriptions WHERE organization_id = ? ORDER BY created_at DESC LIMIT 50").bind(user.organizationId).all<Record<string, unknown>>();
-  return c.json({ results: rows.results.map((row) => ({ id: String(row.id), targetUrl: String(row.target_url), events: JSON.parse(String(row.events ?? "[]")), status: row.status, createdAt: String(row.created_at) })) });
+  return c.json({ results: rows.results.map((row) => ({ id: String(row.id), targetUrl: String(row.target_url), events: parseJsonValue<string[]>(row.events, []), status: row.status, createdAt: String(row.created_at) })) });
 });
 
 app.post("/api/webhooks/subscriptions", async (c) => {
   const user = await requestUser(c);
   if (!user || !allowedRole(user, ["admin"])) return c.json({ error: "Admin access required" }, 403);
   const payload = webhookSubscriptionSchema.parse(await c.req.json());
+  if (!isSafeWebhookTarget(c.env, payload.targetUrl)) return c.json({ error: "Webhook targets must use HTTPS and cannot resolve to local or private network addresses" }, 422);
+  const encryptionKey = c.env.WEBHOOK_SECRET_ENCRYPTION_KEY?.trim();
+  if (!encryptionKey) return c.json({ error: "Outbound webhook secret encryption is not configured" }, 503);
   const id = crypto.randomUUID();
   const secret = base64UrlToken();
-  await c.env.DB.prepare("INSERT INTO webhook_subscriptions (id, organization_id, created_by, target_url, secret, events) VALUES (?, ?, ?, ?, ?, ?)")
-    .bind(id, user.organizationId, user.id, payload.targetUrl, secret, JSON.stringify(payload.events)).run();
+  const encrypted = await encryptSecret(secret, encryptionKey, "WEBHOOK_SECRET_ENCRYPTION_KEY");
+  await c.env.DB.prepare("INSERT INTO webhook_subscriptions (id, organization_id, created_by, target_url, secret, secret_ciphertext, secret_iv, events) VALUES (?, ?, ?, ?, '', ?, ?, ?)")
+    .bind(id, user.organizationId, user.id, payload.targetUrl, encrypted.ciphertext, encrypted.iv, JSON.stringify(payload.events)).run();
   return c.json({ id, secret }, 201);
 });
 
@@ -6493,35 +6639,6 @@ app.post("/api/uploads/:uploadId/complete", async (c) => {
     return c.json({ error: "R2 object was not found", uploadId }, 409);
   }
 
-  let previewKey: string | null = null;
-  let preview640Key: string | null = null;
-  let preview1200Key: string | null = null;
-  let videoPosterKey: string | null = null;
-  if (session.content_type.startsWith("image/")) {
-    previewKey = previewObjectKey(session.object_key, session.content_type);
-    const previewExists = await c.env.MEDIA_BUCKET.head(previewKey);
-    if (!previewExists) {
-      try {
-        const previews = await writeWatermarkedPreview(c.env, session.object_key);
-        previewKey = previews.key;
-        preview640Key = previews.variants.preview640Key;
-        preview1200Key = previews.variants.preview1200Key;
-      } catch (error) {
-        await c.env.DB.prepare("UPDATE upload_sessions SET status = 'failed', failure_reason = ? WHERE id = ?")
-          .bind(`Preview transformation failed: ${error instanceof Error ? error.message : "unknown error"}`, uploadId).run();
-        return c.json({ error: "Image preview transformation is unavailable", code: "preview_transformation_unavailable", uploadId }, 503);
-      }
-    }
-  } else if (session.content_type.startsWith("video/")) {
-    try {
-      videoPosterKey = await writeVideoPoster(c.env, session.object_key);
-    } catch (error) {
-      await c.env.DB.prepare("UPDATE upload_sessions SET status = 'failed', failure_reason = ? WHERE id = ?")
-        .bind(`Video poster transformation failed: ${error instanceof Error ? error.message : "unknown error"}`, uploadId).run();
-      return c.json({ error: "Video poster transformation is unavailable", code: "video_preview_transformation_unavailable", uploadId }, 503);
-    }
-  }
-
   const observedSize = chaos === "partial-upload" ? Math.max(0, session.size_bytes - 1) : object.size;
   if (observedSize !== session.size_bytes) {
     logChaos(c, trace, chaos ?? "size-mismatch", "completion-size-check");
@@ -6531,6 +6648,7 @@ app.post("/api/uploads/:uploadId/complete", async (c) => {
     return c.json({ error: "Uploaded object size does not match the upload session", uploadId }, 409);
   }
 
+  // Scan the original before spending CPU on image/video transformations.
   let scan: Awaited<ReturnType<typeof scanMediaObject>>;
   try {
     scan = await scanMediaObject(c.env, c.env.MEDIA_BUCKET, session.object_key, session.content_type);
@@ -6544,7 +6662,41 @@ app.post("/api/uploads/:uploadId/complete", async (c) => {
     return c.json({ error: "Media failed the security scan", code: scan.status === "error" ? "media_scan_unavailable" : "media_blocked" }, scan.status === "error" ? 503 : 422);
   }
 
-  const assetId = session.asset_id ?? crypto.randomUUID();
+  let previewKey: string | null = null;
+  let preview640Key: string | null = null;
+  let preview1200Key: string | null = null;
+  let videoPosterKey: string | null = null;
+  const generatedMediaKeys: string[] = [];
+  if (session.content_type.startsWith("image/")) {
+    previewKey = previewObjectKey(session.object_key, session.content_type);
+    const previewExists = await c.env.MEDIA_BUCKET.head(previewKey);
+    if (!previewExists) {
+      try {
+        const previews = await writeWatermarkedPreview(c.env, session.object_key);
+        previewKey = previews.key;
+        preview640Key = previews.variants.preview640Key;
+        preview1200Key = previews.variants.preview1200Key;
+        generatedMediaKeys.push(previews.key, previews.variants.preview640Key, previews.variants.preview1200Key);
+      } catch (error) {
+        await c.env.DB.prepare("UPDATE upload_sessions SET status = 'failed', failure_reason = ? WHERE id = ?")
+          .bind(`Preview transformation failed: ${error instanceof Error ? error.message : "unknown error"}`, uploadId).run();
+        return c.json({ error: "Image preview transformation is unavailable", code: "preview_transformation_unavailable", uploadId }, 503);
+      }
+    }
+  } else if (session.content_type.startsWith("video/")) {
+    try {
+      videoPosterKey = await writeVideoPoster(c.env, session.object_key);
+      generatedMediaKeys.push(videoPosterKey);
+    } catch (error) {
+      await c.env.DB.prepare("UPDATE upload_sessions SET status = 'failed', failure_reason = ? WHERE id = ?")
+        .bind(`Video poster transformation failed: ${error instanceof Error ? error.message : "unknown error"}`, uploadId).run();
+      return c.json({ error: "Video poster transformation is unavailable", code: "video_preview_transformation_unavailable", uploadId }, 503);
+    }
+  }
+
+  // Deterministic fallback prevents two concurrent completion requests from
+  // creating separate assets when a direct upload did not include assetId.
+  const assetId = session.asset_id ?? `asset-upload-${uploadId}`;
   const assetStatement = session.asset_id
     ? c.env.DB.prepare(`UPDATE assets SET original_key = ?, preview_key = ?, preview_640_key = ?, preview_1200_key = ?, video_poster_key = ?, source_file_name = ?, source_etag = ?,
         status = 'needs_review', workflow_stage = 'ai_tagging', asset_revision = asset_revision + 1,
@@ -6554,17 +6706,24 @@ app.post("/api/uploads/:uploadId/complete", async (c) => {
       .bind(session.object_key, previewKey, preview640Key, preview1200Key, videoPosterKey, session.filename, object.etag, assetId, session.organization_id)
     : c.env.DB.prepare("INSERT INTO assets (id, organization_id, owner_id, kind, status, title, source_file_name, original_key, preview_key, preview_640_key, preview_1200_key, video_poster_key, source_etag, workflow_stage) VALUES (?, ?, ?, ?, 'needs_review', ?, ?, ?, ?, ?, ?, ?, ?, 'ai_tagging')")
       .bind(assetId, session.organization_id, session.owner_id, session.content_type.startsWith("video/") ? "video" : "image", session.filename, session.filename, session.object_key, previewKey, preview640Key, preview1200Key, videoPosterKey, object.etag);
-  const persistence = await c.env.DB.batch([
-    assetStatement,
-    c.env.DB.prepare(`
-      UPDATE upload_sessions
-      SET status = 'uploaded', completed_at = CURRENT_TIMESTAMP, uploaded_etag = ?, failure_reason = NULL
-      WHERE id = ? AND status = 'created'
-    `).bind(object.etag, uploadId),
-  ]);
-  if (!persistence[0]?.success || !persistence[1]?.success) {
+  try {
+    const persistence = await c.env.DB.batch([
+      assetStatement,
+      c.env.DB.prepare(`
+        UPDATE upload_sessions
+        SET status = 'uploaded', completed_at = CURRENT_TIMESTAMP, uploaded_etag = ?, failure_reason = NULL
+        WHERE id = ? AND status = 'created'
+      `).bind(object.etag, uploadId),
+    ]);
+    if (Number(persistence[0]?.meta?.changes ?? 0) !== 1 || Number(persistence[1]?.meta?.changes ?? 0) !== 1) {
+      const current = await c.env.DB.prepare("SELECT status FROM upload_sessions WHERE id = ?").bind(uploadId).first<{ status: string }>();
+      if (current?.status === "uploaded") return c.json(validateContractResponse("POST /api/uploads/{uploadId}/complete 200", uploadCompleteResponseSchema, { uploadId, assetId, objectKey: session.object_key, status: "uploaded", idempotent: true }));
+      throw new Error("Asset or upload session was not changed");
+    }
+  } catch (error) {
+    for (const key of generatedMediaKeys) await c.env.MEDIA_BUCKET.delete(key).catch(() => undefined);
     await c.env.DB.prepare("UPDATE upload_sessions SET status = 'failed', failure_reason = ? WHERE id = ? AND status <> 'uploaded'")
-      .bind("Asset persistence failed", uploadId).run();
+      .bind(`Asset persistence failed: ${error instanceof Error ? error.message : "unknown"}`, uploadId).run();
     return c.json({ error: "Upload could not be persisted" }, 503);
   }
   const assetKind = session.content_type.startsWith("video/") ? "video" : "image";
@@ -6852,11 +7011,13 @@ const worker: ExportedHandler<Bindings, QueueMessage> = {
       await catchUpR2Replication(env, trace);
       const requeued = await retryQueuedPhotoJobs(photoPipeline(env));
       const repaired = await repairPendingPhotoPipeline(photoPipeline(env), 40);
+      const encryptedWebhookSecrets = await migrateLegacyWebhookSecrets(env);
       await runMaintenance(env);
       const alerted = await dispatchSavedSearchAlerts(env);
       const zohoDispatched = await dispatchDueZohoOutbox(env);
       recordMetric(env, "photo_jobs_requeued", trace, requeued, ["cron"]);
       recordMetric(env, "photo_pipeline_repairs", trace, repaired.queued + repaired.recovered + repaired.stale + repaired.resolvedReviews + repaired.reconciledIndexes, ["cron"]);
+      recordMetric(env, "webhook_secrets_encrypted", trace, encryptedWebhookSecrets, ["cron"]);
       recordMetric(env, "saved_search_alerts_sent", trace, alerted, ["cron"]);
       recordMetric(env, "zoho_outbox_dispatched", trace, zohoDispatched, ["cron"]);
     } catch (error) {

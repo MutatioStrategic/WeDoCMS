@@ -23,6 +23,7 @@ const requiredColumns = [
   'assets.stream_error_text', 'assets.stream_updated_at', 'assets.stream_ready_at',
   'audit_log_events.organization_id', 'audit_exports.organization_id',
   'audit_exports.created_by', 'contributor_verification_cases.organization_id',
+  'webhook_subscriptions.secret_ciphertext', 'webhook_subscriptions.secret_iv',
 ];
 writeFileSync(columnsSql, "SELECT " + requiredColumns.map((column) => {
   const [table, name] = column.split('.');

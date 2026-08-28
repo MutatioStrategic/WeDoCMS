@@ -32,6 +32,28 @@ describe("proof URL rules", () => {
 });
 
 describe("asset domain contract", () => {
+  it("requires rights, releases, and the current metadata revision before publication", () => {
+    expect(archiveDomain.publicationGate({
+      rightsStatus: "pending",
+      modelReleaseStatus: "pending",
+      propertyReleaseStatus: "verified",
+      assetRevision: 2,
+      reviewedRevision: 1,
+      metadataReviewStatus: "reviewed",
+    })).toEqual({
+      allowed: false,
+      blockers: ["rights_not_verified", "model_release_not_verified", "metadata_revision_not_reviewed"],
+    });
+    expect(archiveDomain.publicationGate({
+      rightsStatus: "verified",
+      modelReleaseStatus: "not_required",
+      propertyReleaseStatus: "not_required",
+      assetRevision: 2,
+      reviewedRevision: 2,
+      metadataReviewStatus: "reviewed",
+    })).toEqual({ allowed: true, blockers: [] });
+  });
+
   it("preserves the rights and authenticity fields needed for trusted discovery", () => {
     const asset: Asset = {
       id: "asset-1",

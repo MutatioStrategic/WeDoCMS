@@ -119,13 +119,14 @@ export const assetSchema = z.object({
   matched_field: z.enum(["title", "description"]).nullable().optional(),
   match_type: z.enum(["exact", "contains", "fuzzy"]).optional(),
   metadata_score: z.number().min(0).max(100).optional(),
+  semantic_score: z.number().min(0).max(1).optional(),
   source_id: z.string().min(1).optional(),
   match_snippet: z.string().optional(),
 }).passthrough();
 
 export const searchResponseSchema = z.object({
   query: z.string(),
-  mode: z.enum(["keyword"]),
+  mode: z.enum(["general", "ai"]),
   results: z.array(assetSchema),
   facets: z.array(z.object({ label: z.string(), value: z.string(), count: z.number().int().nonnegative() })),
   suggestions: z.array(z.string()).optional(),

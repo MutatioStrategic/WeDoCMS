@@ -287,7 +287,7 @@ describe("photo AI indexing", () => {
     expect(ranked[0]?.id).toBe("market");
   });
 
-  it("does not invoke AI or Vectorize for a live metadata search", async () => {
+  it("does not invoke AI or Vectorize for a General search", async () => {
     const vectorQuery = vi.fn(async () => ({ count: 0, matches: [] }));
     const aiRun = vi.fn(async () => ({ data: [[0.1, 0.2, 0.3]] }));
     const all = vi.fn(async () => ({ results: [] }));
@@ -301,8 +301,33 @@ describe("photo AI indexing", () => {
 
     expect(aiRun).not.toHaveBeenCalled();
     expect(vectorQuery).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ usedVectorIndex: false, mode: "keyword" });
+    expect(result).toMatchObject({ usedVectorIndex: false, mode: "general" });
     expect(result.stages.map((stage) => stage.stage)).toEqual(["metadata", "fuzzy"]);
+  });
+
+  it("uses only current published metadata vectors for an AI search", async () => {
+    const vectorQuery = vi.fn(async () => ({ matches: [
+      { id: "asset-market::r4", score: 0.86 },
+      { id: "asset-stale::r1", score: 0.2 },
+    ] }));
+    const aiRun = vi.fn(async () => ({ data: [[0.1, 0.2, 0.3]] }));
+    const all = vi.fn(async () => ({ results: [{
+      id: "asset-market", vector_index_id: "asset-market::r4", title: "Fresh bread market", description: "A busy open-air food market", subject_tags: '["market", "bread"]', ai_tags: "[]", scene_attributes: '["outdoor", "daylight"]', ocr_text: "Fresh bread", visual_location_type: "market_scene", primary_category: "food", human_verified: 1,
+    }] }));
+    const prepare = vi.fn(() => ({ bind: vi.fn(() => ({ all })) }));
+
+    const result = await searchPhotoIndex({
+      DB: { prepare }, AI: { run: aiRun }, PHOTO_INDEX: { query: vectorQuery },
+      PHOTO_EMBEDDING_MODEL: "@cf/test/embedding", PHOTO_INDEX_NAMESPACE: "published-photos-v1",
+    } as unknown as PhotoPipelineBindings, "a warm neighbourhood bakery market", { kind: "image", status: "published" }, "ai");
+
+    expect(aiRun).toHaveBeenCalledWith("@cf/test/embedding", { text: "a warm neighbourhood bakery market", pooling: "cls" });
+    expect(vectorQuery).toHaveBeenCalledWith([0.1, 0.2, 0.3], expect.objectContaining({ topK: 36, namespace: "published-photos-v1" }));
+    const preparedSql = String((prepare.mock.calls as unknown as unknown[][])[0]?.[0] ?? "");
+    expect(preparedSql).toContain("a.indexed_revision = a.approved_revision");
+    expect(preparedSql).toContain("a.vector_index_id IN");
+    expect(result).toMatchObject({ usedVectorIndex: true, mode: "ai" });
+    expect(result.rows).toMatchObject([{ id: "asset-market", semantic_score: 0.86 }]);
   });
 
   it("keeps live relevance scoped to title and description metadata", async () => {

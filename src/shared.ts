@@ -188,13 +188,16 @@ export type Asset = {
   matched_field?: SearchMatchedField | null;
   match_type?: SearchMatchType;
   metadata_score?: number;
+  /** Vector similarity for AI metadata search; absent for General search. */
+  semantic_score?: number;
   source_id?: string;
   match_snippet?: string;
 };
 
 export type SearchResponse = {
   query: string;
-  mode: "keyword";
+  /** General is literal metadata matching; AI is metadata-vector retrieval. */
+  mode: "general" | "ai";
   results: Asset[];
   facets: { label: string; value: string; count: number }[];
   suggestions?: string[];
@@ -455,6 +458,25 @@ export function canApproveMetadataRevision(asset: { assetRevision?: number; revi
   return Number(asset.assetRevision) > 0
     && Number(asset.reviewedRevision) === Number(asset.assetRevision)
     && asset.metadataReviewStatus === "reviewed";
+}
+
+export type PublicationGateInput = {
+  rightsStatus?: Asset["rightsStatus"];
+  modelReleaseStatus?: ReleaseStatus;
+  propertyReleaseStatus?: ReleaseStatus;
+  metadataReviewStatus?: MetadataReviewStatus;
+  assetRevision?: number;
+  reviewedRevision?: number | null;
+};
+
+/** One publication gate shared by every editorial surface and API route. */
+export function publicationGate(input: PublicationGateInput): { allowed: boolean; blockers: string[] } {
+  const blockers: string[] = [];
+  if (input.rightsStatus !== "verified" && input.rightsStatus !== "editorial_only") blockers.push("rights_not_verified");
+  if (input.modelReleaseStatus !== "verified" && input.modelReleaseStatus !== "not_required") blockers.push("model_release_not_verified");
+  if (input.propertyReleaseStatus !== "verified" && input.propertyReleaseStatus !== "not_required") blockers.push("property_release_not_verified");
+  if (!canApproveMetadataRevision(input)) blockers.push("metadata_revision_not_reviewed");
+  return { allowed: blockers.length === 0, blockers };
 }
 
 /** Builds an evidence-led explanation without turning visual guesses into identity or cultural facts. */
@@ -998,6 +1020,10 @@ export class ArchiveDomain {
 
   canApproveMetadataRevision(asset: { assetRevision?: number; reviewedRevision?: number | null; metadataReviewStatus?: MetadataReviewStatus }): boolean {
     return canApproveMetadataRevision(asset);
+  }
+
+  publicationGate(input: PublicationGateInput): { allowed: boolean; blockers: string[] } {
+    return publicationGate(input);
   }
 
   evaluateLicenceRequest(asset: Asset, request: LicenceRequest): LicenceValidation {

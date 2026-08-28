@@ -8,6 +8,10 @@ const worker = spawn(process.execPath, [
   wrangler, "dev", "--local", "--port", "8787",
   "--var", "SESSION_SECRET:contract-session-secret-that-is-long-enough",
   "--var", "PAYMENT_WEBHOOK_SECRET:contract-payment-secret-that-is-long-enough",
+  "--var", "AUTH_PROVIDER:supabase",
+  "--var", "SUPABASE_URL:https://tenant.supabase.co",
+  "--var", "SUPABASE_ANON_KEY:sb_publishable_contract_test",
+  "--var", "APP_PUBLIC_URL:https://archive.example.com",
 ], { cwd: root, env: { ...process.env, PACT_DO_NOT_TRACK: "true" }, stdio: ["ignore", "pipe", "pipe"] });
 
 for (const stream of [worker.stdout, worker.stderr]) {

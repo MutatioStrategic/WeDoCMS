@@ -153,7 +153,7 @@
 		"UPLOAD_DAILY_QUOTA_BYTES": "50000000000",
 		"ORG_STORAGE_QUOTA_BYTES": "500000000000",
 		"MEDIA_SCANNER_URL": "",
-		"R2_BUCKET_NAME": "veld-archive-media",
+		"R2_BUCKET_NAME": "veld-archive-demo-media",
 		"R2_DR_BUCKET_NAME": "veld-archive-media-dr",
 		"BACKUP_BUCKET_NAME": "veld-archive-backups-dr",
 		"CHAOS_TESTING_ENABLED": "false",
@@ -405,9 +405,10 @@
 			"secrets": {
 				"required": [
 					"SESSION_SECRET",
-					"SUPABASE_ANON_KEY",
-					"DIDIT_API_KEY",
-					"DIDIT_SIGNING_SECRET"
+				"SUPABASE_ANON_KEY",
+				"DIDIT_API_KEY",
+				"DIDIT_SIGNING_SECRET",
+				"WEBHOOK_SECRET_ENCRYPTION_KEY"
 				]
 			},
 			"send_email": [

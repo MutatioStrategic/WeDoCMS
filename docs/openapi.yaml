@@ -1138,7 +1138,15 @@ paths:
           description: Hosted checkout URL returned
           content:
             application/json:
-              schema: { type: object, required: [licenceId, provider, checkoutUrl, status], additionalProperties: true }
+              schema:
+                type: object
+                required: [licenceId, provider, checkoutUrl, status]
+                properties:
+                  licenceId: { type: string }
+                  provider: { type: string }
+                  checkoutUrl: { type: string, format: uri }
+                  status: { type: string }
+                additionalProperties: true
         '401':
           description: Authenticated buyer required
           content:
@@ -1485,7 +1493,7 @@ paths:
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
         - { name: derivativeId, in: path, required: true, schema: { type: string } }
-        - { name: Range, in: header, required: false, schema: { type: string } }
+        - { name: range, in: header, required: false, schema: { type: string } }
       responses:
         '200': { description: Derivative content }
         '206': { description: Partial derivative content }
@@ -1576,7 +1584,7 @@ paths:
       security: [{ sessionCookie: [] }]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
-        - { name: Idempotency-Key, in: header, required: false, schema: { type: string, maxLength: 180 } }
+        - { name: idempotency-key, in: header, required: false, schema: { type: string, maxLength: 180 } }
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/StreamUploadRequest' } } }
@@ -1598,7 +1606,7 @@ paths:
       operationId: receiveStreamWebhook
       summary: Verify and persist a timestamped Cloudflare Stream status callback
       parameters:
-        - { name: Webhook-Signature, in: header, required: true, schema: { type: string } }
+        - { name: webhook-signature, in: header, required: true, schema: { type: string } }
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/StreamWebhookRequest' } } }
@@ -1986,7 +1994,7 @@ components:
             type: object
             required: [path, code]
             properties:
-              path: { type: array, items: {} }
+              path: { type: array, items: { oneOf: [{ type: string }, { type: integer }] } }
               code: { type: string }
       additionalProperties: true
     HealthResponse:
@@ -2264,7 +2272,7 @@ components:
           required: [authenticated, user]
           properties:
             authenticated: { type: boolean, enum: [false] }
-            user: { nullable: true }
+            user: { type: object, nullable: true, additionalProperties: true }
           additionalProperties: false
         - $ref: '#/components/schemas/AuthenticatedSessionResponse'
     AuthenticatedSessionResponse:
@@ -2315,6 +2323,10 @@ components:
           required: [id, name, query, mediaKind, alertFrequency, createdAt, updatedAt]
           properties:
             id: { type: string }
+            name: { type: string, minLength: 1, maxLength: 120 }
+            query: { type: string, minLength: 2, maxLength: 240 }
+            mediaKind: { type: string, enum: [all, image, video] }
+            alertFrequency: { type: string, enum: [none, daily, weekly] }
             createdAt: { type: string, format: date-time }
             updatedAt: { type: string, format: date-time }
     Lightbox:

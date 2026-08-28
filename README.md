@@ -271,7 +271,7 @@ and `npm run build`.
 
 ## Audit endpoints
 
-- `POST /api/audit/events` appends an event. Send `x-user-id`, `x-user-role`, and `x-residency-region`; event data is redacted for common identity fields before signing.
+- `POST /api/audit/events` appends an event for the authenticated session actor. `x-residency-region` is optional and must match that actor's session residency; event data is redacted for common identity fields before signing.
 - `GET /api/audit/events/:streamId?residencyRegion=za` returns events with hash/signature verification results.
 - `POST /api/audit/exports` creates a signed JSON legal export for an admin/service identity; `GET /api/audit/exports/:id` downloads it from the matching residency bucket.
 - `POST /api/verification/cases` starts a contributor verification case; documents are represented by hashes and provider references, not copied into the audit trail.

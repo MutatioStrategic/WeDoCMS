@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Auth0Provider, useAuth0, type Auth0ContextInterface } from "@auth0/auth0-react";
 import { type Session as SupabaseSession, type SupabaseClient } from "@supabase/supabase-js";
@@ -7,15 +7,20 @@ import { friendlySupabasePhoneError } from "./phone";
 import { friendlyIdentityExchangeError, friendlySupabaseAuthError } from "./supabase-auth";
 import { getSupabaseClient } from "./supabase-client";
 import "./styles.css";
-import { CommunityWorkspace } from "./community";
-import { StudioWorkspace } from "./studio";
-import { RightsGuide } from "./rights-guide";
-import { StakeholderDiagrams } from "./stakeholder-diagrams";
-import { WordPressIntegrationPanel } from "./wordpress-integration";
 import type { BrandKit, CampaignBrief, CampaignPlatform, CampaignRecommendation, CampaignStage } from "./campaign-intelligence";
 import { cropPresets, defaultEditRecipe, derivativeForPreset, fitCrop, safeZonePercent, type CropPreset, type EditRecipe } from "./campaign-editor";
 import { Icon, StockvelLogo, type IconName } from "./ui";
 import { buyerAgreement, paymentDisclosure, type MarketplaceAgreement } from "./legal/agreements";
+
+const CommunityWorkspace = lazy(async () => import("./community").then((module) => ({ default: module.CommunityWorkspace })));
+const StudioWorkspace = lazy(async () => import("./studio").then((module) => ({ default: module.StudioWorkspace })));
+const RightsGuide = lazy(async () => import("./rights-guide").then((module) => ({ default: module.RightsGuide })));
+const StakeholderDiagrams = lazy(async () => import("./stakeholder-diagrams").then((module) => ({ default: module.StakeholderDiagrams })));
+const WordPressIntegrationPanel = lazy(async () => import("./wordpress-integration").then((module) => ({ default: module.WordPressIntegrationPanel })));
+
+function WorkspaceFallback() {
+  return <section className="empty-state" role="status">Loading workspace...</section>;
+}
 
 declare global {
   interface Window {
@@ -35,6 +40,7 @@ function TurnstileChallenge({ onToken }: { onToken: (token: string) => void }) {
 }
 
 type View = "explore" | "search" | "campaigns" | "contributors" | "contributor" | "buyer" | "review" | "governance" | "community" | "account" | "studio" | "rights" | "stakeholders" | "wordpress";
+type SearchMode = "general" | "ai";
 type SidebarSection = { label: string; items: Array<{ view: View; label: string; icon: IconName; badge?: string }> };
 const gatedViews = new Set<View>(["campaigns", "contributor", "buyer", "review", "governance", "account", "studio", "wordpress"]);
 const sidebarSections: SidebarSection[] = [
@@ -135,6 +141,7 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
   const [view, setView] = useState<View>(() => window.location.pathname === "/account" ? "account" : window.location.pathname.startsWith("/creators") ? "contributors" : "explore");
   const [query, setQuery] = useState("");
   const [activeQuery, setActiveQuery] = useState("");
+  const [searchMode, setSearchMode] = useState<SearchMode>("general");
   const [assets, setAssets] = useState<Asset[]>([]);
   const [searchSuggestions, setSearchSuggestions] = useState<string[]>([]);
   const [assetsLoading, setAssetsLoading] = useState(true);
@@ -414,7 +421,7 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
     const startedAt = performance.now();
     let loadingTimer: ReturnType<typeof setTimeout> | undefined;
     setAssetsLoading(true);
-    const params = new URLSearchParams({ q: activeQuery, kind: filter, status: "published", sort, orientation });
+    const params = new URLSearchParams({ q: activeQuery, mode: searchMode, kind: filter, status: "published", sort, orientation });
     fetch(`/api/search?${params}`, { signal: controller.signal, credentials: "include" })
       .then(async (response) => { if (!response.ok) throw new Error("API unavailable"); return response.json() as Promise<SearchResponse>; })
       .then((data) => { setSearchSuggestions(data.suggestions ?? []); setAssets(data.results.map((asset) => archiveDomain.withMatchExplanation(asset, activeQuery))); })
@@ -422,7 +429,7 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
         if (controller.signal.aborted) return;
         setAssets([]);
         setSearchSuggestions([]);
-        setNotice("The verified content service is unavailable. No fallback media is shown.");
+        setNotice(searchMode === "ai" ? "AI search is temporarily unavailable. Try General search while the approved metadata index recovers." : "The verified content service is unavailable. No fallback media is shown.");
       })
       .finally(() => {
         if (controller.signal.aborted) return;
@@ -430,7 +437,7 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
         loadingTimer = setTimeout(() => setAssetsLoading(false), remaining);
       });
     return () => { controller.abort(); if (loadingTimer) clearTimeout(loadingTimer); };
-  }, [activeQuery, filter, sort, orientation, searchRequestId]);
+  }, [activeQuery, searchMode, filter, sort, orientation, searchRequestId]);
 
   useEffect(() => {
     if (!pendingAssetId || selectedAsset || assetsLoading || assetRestoreAttempted.current) return;
@@ -574,7 +581,7 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
     setAssetsLoading(true);
     setSearchRequestId((current) => current + 1);
     setView("search");
-    trackEvent({ type: "search", query: value });
+    trackEvent({ type: "search", query: value, mode: searchMode });
     setNotice(`Searching the archive for “${value}”`);
   }
 
@@ -585,7 +592,7 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
     setSearchSuggestions([]);
     setAssetsLoading(true);
     setSearchRequestId((current) => current + 1);
-    trackEvent({ type: "search", query: value });
+    trackEvent({ type: "search", query: value, mode: searchMode });
     setView("search");
     setNotice(query.trim() ? `Searching the archive for “${query.trim()}”` : "Showing the latest verified South African media");
   }
@@ -667,8 +674,9 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
   }
   async function downloadFreePhoto(asset: Asset): Promise<void> {
     if (!sessionUser) { setNotice("Create an account to claim 300 starter credits for 3 approved photos."); setSupabaseAuthMode("signup"); setSupabaseAuthOpen(Boolean(supabase)); return; }
-    const response = await fetch(`/api/assets/${encodeURIComponent(asset.id)}/original`, { credentials: "include", redirect: "manual" });
-    if (response.status === 302) { window.location.assign(response.headers.get("Location") ?? `/api/assets/${encodeURIComponent(asset.id)}/original`); return; }
+    const url = `/api/assets/${encodeURIComponent(asset.id)}/original`;
+    const response = await fetch(url, { method: "HEAD", credentials: "include", redirect: "manual" });
+    if (response.status === 200 || response.status === 302) { window.location.assign(url); return; }
     const body = await response.json().catch(() => ({})) as { error?: string };
     setNotice(body.error ?? "This photo could not be downloaded. Try again or choose a bundle.");
   }
@@ -723,20 +731,20 @@ function App({ auth0, supabase, authRedirectUrl = defaultAuthRedirectUrl, authLo
     {sessionUser && <details className="notification-center"><summary>Alerts {notifications.some((item) => !item.read_at) && <span>{notifications.filter((item) => !item.read_at).length}</span>}</summary><div><strong>In-app alerts</strong>{notifications.length ? notifications.slice(0, 8).map((item) => <article className={item.read_at ? "read" : ""} key={item.id}><h3>{item.title}</h3><p>{item.body}</p><small>{new Date(item.created_at).toLocaleDateString("en-ZA")}</small>{!item.read_at && <button type="button" onClick={() => void markNotificationRead(item.id)}>Mark read</button>}</article>) : <p>No alerts yet. Saved-search matches will appear here.</p>}</div></details>}
     {!analyticsConsent && <button className="privacy-consent" onClick={() => setAnalyticsConsent(true)}>Allow anonymous demand insights</button>}
 
-    {view === "explore" && <ExploreView query={query} setQuery={setQuery} runSearch={runSearch} assets={visibleAssets} filter={filter} setFilter={setFilter} sort={sort} setSort={setSort} orientation={orientation} setOrientation={setOrientation} includeCustomBuying={includeCustomBuying} setIncludeCustomBuying={setIncludeCustomBuying} verifiedCount={verifiedCount} notice={notice} onOpen={openAsset} authenticated={Boolean(sessionUser)} discovery={discovery} onUseQuery={useDiscoveryQuery} onSaveSearch={saveCurrentSearch} onDeleteSearch={deleteSavedSearch} />}
-    {view === "search" && <SearchResultsView query={query} setQuery={setQuery} activeQuery={activeQuery} runSearch={runSearch} assets={visibleAssets} assetsLoading={assetsLoading} suggestions={searchSuggestions} onUseQuery={useDiscoveryQuery} filter={filter} setFilter={setFilter} sort={sort} setSort={setSort} orientation={orientation} setOrientation={setOrientation} includeCustomBuying={includeCustomBuying} setIncludeCustomBuying={setIncludeCustomBuying} notice={notice} onOpen={openAsset} />}
+    {view === "explore" && <ExploreView query={query} setQuery={setQuery} searchMode={searchMode} setSearchMode={setSearchMode} runSearch={runSearch} assets={visibleAssets} filter={filter} setFilter={setFilter} sort={sort} setSort={setSort} orientation={orientation} setOrientation={setOrientation} includeCustomBuying={includeCustomBuying} setIncludeCustomBuying={setIncludeCustomBuying} verifiedCount={verifiedCount} notice={notice} onOpen={openAsset} authenticated={Boolean(sessionUser)} discovery={discovery} onUseQuery={useDiscoveryQuery} onSaveSearch={saveCurrentSearch} onDeleteSearch={deleteSavedSearch} />}
+    {view === "search" && <SearchResultsView query={query} setQuery={setQuery} searchMode={searchMode} setSearchMode={setSearchMode} activeQuery={activeQuery} runSearch={runSearch} assets={visibleAssets} assetsLoading={assetsLoading} suggestions={searchSuggestions} onUseQuery={useDiscoveryQuery} filter={filter} setFilter={setFilter} sort={sort} setSort={setSort} orientation={orientation} setOrientation={setOrientation} includeCustomBuying={includeCustomBuying} setIncludeCustomBuying={setIncludeCustomBuying} notice={notice} onOpen={openAsset} />}
     {view === "campaigns" && <CampaignWorkspace api={api} onNotice={setNotice} onOpen={openAsset} role={sessionUser?.role} />}
     {view === "contributors" && <CreatorMarketplace onOpen={openAsset} />}
     {view === "contributor" && <><ContributorFlowHeader onUpload={() => document.getElementById("contributor-upload")?.scrollIntoView({ behavior: "smooth", block: "start" })} /><AnalyticsDashboard role="contributor" /><MarketplaceLegalDocuments api={api} /><SellerVerificationPanel api={api} onNotice={setNotice} /><div id="contributor-upload"><ContributorWorkspace api={api} onNotice={setNotice} /></div><div id="contributor-library"><ContributorAssetLibrary api={api} onNotice={setNotice} /></div></>}
     {view === "buyer" && <><BuyerFlowHeader onSearch={() => navigate("search")} onCampaigns={sessionUser?.role === "buyer" || sessionUser?.role === "admin" ? () => navigate("campaigns") : undefined} onAccount={() => navigate("account")} /><AnalyticsDashboard role="buyer" onOpenAccount={() => navigate("account")} /><BuyerFinancePanel api={api} onNotice={setNotice} role={sessionUser?.role} account={sessionUser} /></>}
     {view === "review" && <ReviewWorkspace items={reviewItems} api={api} onNotice={setNotice} onReload={loadReviewQueue} />}
     {view === "governance" && <><MarketplaceLegalDocuments api={api} /><GovernanceWorkspace api={api} onNotice={setNotice} isAdmin={sessionUser?.role === "admin"} /></>}
-    {view === "community" && <CommunityWorkspace api={api} onNotice={setNotice} sessionUser={sessionUser} />}
+    {view === "community" && <Suspense fallback={<WorkspaceFallback />}><CommunityWorkspace api={api} onNotice={setNotice} sessionUser={sessionUser} /></Suspense>}
     {view === "account" && <>{["buyer", "contributor", "editor", "admin"].includes(sessionUser?.role ?? "") && <BuyerSubscriptionPanel api={api} onNotice={setNotice} account={sessionUser} />}<AccountWorkspace api={api} auth0={auth0} onNotice={setNotice} buyer={["buyer", "contributor", "editor", "admin"].includes(sessionUser?.role ?? "")} /></>}
-    {view === "studio" && <StudioWorkspace assets={assets} api={api} notice={notice} onNotice={setNotice} />}
-    {view === "rights" && <RightsGuide />}
-    {view === "stakeholders" && <StakeholderDiagrams />}
-    {view === "wordpress" && <WordPressIntegrationPanel api={api} onNotice={setNotice} />}
+    {view === "studio" && <Suspense fallback={<WorkspaceFallback />}><StudioWorkspace assets={assets} api={api} notice={notice} onNotice={setNotice} /></Suspense>}
+    {view === "rights" && <Suspense fallback={<WorkspaceFallback />}><RightsGuide /></Suspense>}
+    {view === "stakeholders" && <Suspense fallback={<WorkspaceFallback />}><StakeholderDiagrams /></Suspense>}
+    {view === "wordpress" && <Suspense fallback={<WorkspaceFallback />}><WordPressIntegrationPanel api={api} onNotice={setNotice} /></Suspense>}
 
     <footer><button className="wordmark wordmark-button" onClick={() => navigate("explore")}><StockvelLogo /></button><button className="footer-guide-link" onClick={() => navigate("rights")}>Rights guide ↗</button><button className="footer-guide-link" onClick={() => navigate("stakeholders")}>System overview ↗</button><span>© 2026 Stockvel · South Africa</span><span>Context before category.</span></footer>
     {selectedAsset && <AssetModal asset={selectedAsset} api={api} autoOpenPurchase={pendingAssetPurchase} includeCustomBuying={includeCustomBuying} onClose={() => { setSelectedAsset(null); setPendingAssetPurchase(false); }} onNotice={setNotice} onRequireSignIn={openBuyerSignIn} authenticated={Boolean(sessionUser)} lightboxes={lightboxes} onCreateLightbox={createLightbox} onSaveToLightbox={saveToLightbox} onDownload={downloadFreePhoto} />}
@@ -774,10 +782,17 @@ function CustomBuyingToggle({ enabled, onChange }: { enabled: boolean; onChange:
   return <label className="custom-buying-toggle"><input type="checkbox" checked={enabled} onChange={(event) => onChange(event.target.checked)} /><span><strong>Include custom buying</strong><small>Shows seller-listed credit amounts.</small></span></label>;
 }
 
-function ExploreView({ query, setQuery, runSearch, assets, filter, setFilter, sort, setSort, orientation, setOrientation, includeCustomBuying, setIncludeCustomBuying, verifiedCount, notice, onOpen, authenticated, discovery, onUseQuery, onSaveSearch, onDeleteSearch }: { query: string; setQuery: (value: string) => void; runSearch: (event: React.FormEvent) => void; assets: Asset[]; filter: "all" | "image" | "video"; setFilter: (value: "all" | "image" | "video") => void; sort: "relevance" | "newest" | "popular" | "random"; setSort: (value: "relevance" | "newest" | "popular" | "random") => void; orientation: "all" | "landscape" | "portrait" | "square"; setOrientation: (value: "all" | "landscape" | "portrait" | "square") => void; includeCustomBuying: boolean; setIncludeCustomBuying: (value: boolean) => void; verifiedCount: number; notice: string; onOpen: (asset: Asset) => void; authenticated: boolean; discovery: DiscoveryResponse; onUseQuery: (value: string) => void; onSaveSearch: (frequency: SavedSearch["alertFrequency"]) => Promise<void>; onDeleteSearch: (id: string) => Promise<void> }) {
+function SearchModeToggle({ mode, onChange }: { mode: SearchMode; onChange: (mode: SearchMode) => void }) {
+  return <div className="search-mode-toggle" role="group" aria-label="Search type">
+    <button type="button" className={mode === "general" ? "active" : ""} aria-pressed={mode === "general"} onClick={() => onChange("general")}><strong>General</strong><span>Exact metadata</span></button>
+    <button type="button" className={mode === "ai" ? "active" : ""} aria-pressed={mode === "ai"} onClick={() => onChange("ai")}><strong>AI search</strong><span>Describe a scene</span></button>
+  </div>;
+}
+
+function ExploreView({ query, setQuery, searchMode, setSearchMode, runSearch, assets, filter, setFilter, sort, setSort, orientation, setOrientation, includeCustomBuying, setIncludeCustomBuying, verifiedCount, notice, onOpen, authenticated, discovery, onUseQuery, onSaveSearch, onDeleteSearch }: { query: string; setQuery: (value: string) => void; searchMode: SearchMode; setSearchMode: (mode: SearchMode) => void; runSearch: (event: React.FormEvent) => void; assets: Asset[]; filter: "all" | "image" | "video"; setFilter: (value: "all" | "image" | "video") => void; sort: "relevance" | "newest" | "popular" | "random"; setSort: (value: "relevance" | "newest" | "popular" | "random") => void; orientation: "all" | "landscape" | "portrait" | "square"; setOrientation: (value: "all" | "landscape" | "portrait" | "square") => void; includeCustomBuying: boolean; setIncludeCustomBuying: (value: boolean) => void; verifiedCount: number; notice: string; onOpen: (asset: Asset) => void; authenticated: boolean; discovery: DiscoveryResponse; onUseQuery: (value: string) => void; onSaveSearch: (frequency: SavedSearch["alertFrequency"]) => Promise<void>; onDeleteSearch: (id: string) => Promise<void> }) {
   const suggestions = ["A real wood-fire braai in the Cape Flats", "A verified Table Mountain landscape at golden hour", "Right-hand-drive road footage in the Garden Route"];
   return <main id="top">
-    <section className="hero"><div className="eyebrow"><span className="pulse" /> The trusted South African visual archive</div><h1>Find the image<br /><em>behind the story.</em></h1><p className="hero-copy">Authentic photography and film for brands that care where a story comes from. Stockvel is deliberately focused on photo and video; audio and music are outside the product scope.</p><form className="search-box" onSubmit={runSearch}><span className="search-icon" aria-hidden="true"><Icon name="search" size={18} /></span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Describe the story you need to tell…" aria-label="Search photo and video" /><button type="submit">Search archive <span>↗</span></button></form><CustomBuyingToggle enabled={includeCustomBuying} onChange={setIncludeCustomBuying} /><div className="suggestion-row">{suggestions.map((suggestion) => <button type="button" key={suggestion} className="suggestion" onClick={() => onUseQuery(suggestion)}>{suggestion} <span>→</span></button>)}</div></section>
+    <section className="hero"><div className="eyebrow"><span className="pulse" /> The trusted South African visual archive</div><h1>Find the image<br /><em>behind the story.</em></h1><p className="hero-copy">Authentic photography and film for brands that care where a story comes from. Stockvel is deliberately focused on photo and video; audio and music are outside the product scope.</p><form className="search-box" onSubmit={runSearch}><span className="search-icon" aria-hidden="true"><Icon name="search" size={18} /></span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Describe the story you need to tell…" aria-label="Search photo and video" /><button type="submit">Search archive <span>↗</span></button><SearchModeToggle mode={searchMode} onChange={setSearchMode} /></form><CustomBuyingToggle enabled={includeCustomBuying} onChange={setIncludeCustomBuying} /><div className="suggestion-row">{suggestions.map((suggestion) => <button type="button" key={suggestion} className="suggestion" onClick={() => onUseQuery(suggestion)}>{suggestion} <span>→</span></button>)}</div></section>
     <section className="trust-strip"><div><strong>01</strong><span>Context-first metadata</span></div><div><strong>02</strong><span>Rights you can trust</span></div><div><strong>03</strong><span>Creators paid fairly</span></div><div className="trust-note">Built for the places we know.</div></section>
     <DiscoveryShelf discovery={discovery} authenticated={authenticated} activeQuery={query} includeCustomBuying={includeCustomBuying} onUseQuery={onUseQuery} onOpen={onOpen} onSaveSearch={onSaveSearch} onDeleteSearch={onDeleteSearch} />
     <section className="explore-section"><div className="section-heading"><div><span className="section-kicker">CURATED FROM THE GROUND UP</span><h2>The latest from <em>here.</em></h2></div><div className="result-note">{notice}</div></div><div className="toolbar"><div className="filter-tabs" role="tablist" aria-label="Media type">{(["all", "image", "video"] as const).map((value) => <button key={value} type="button" role="tab" aria-selected={filter === value} className={filter === value ? "active" : ""} onClick={() => setFilter(value)}>{value === "all" ? "All media" : value === "image" ? "Photography" : "Film & video"}</button>)}</div><label className="toolbar-select">Sort<select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="relevance">Most relevant</option><option value="newest">Newest</option><option value="popular">Popular</option><option value="random">Surprise me</option></select></label><label className="toolbar-select">Orientation<select value={orientation} onChange={(event) => setOrientation(event.target.value as typeof orientation)}><option value="all">Any orientation</option><option value="landscape">Landscape</option><option value="portrait">Portrait</option><option value="square">Square</option></select></label><div className="verified-stat"><span className="verified-dot" />{verifiedCount} human-verified results</div></div><div className="explainability-note"><strong>Search evidence is visible.</strong><span>Open a result to inspect the fields used, match confidence, and verification status.</span><span className="ai-badge">METADATA + HUMAN REVIEW</span></div><div className="asset-grid">{assets.length ? assets.map((asset, index) => <AssetCard key={asset.id} asset={asset} index={index} onOpen={onOpen} />) : <div className="empty-state">No assets matched this brief yet. Try a location, landmark, or cultural context.</div>}</div></section>
@@ -786,39 +801,46 @@ function ExploreView({ query, setQuery, runSearch, assets, filter, setFilter, so
   </main>;
 }
 
-const searchSteps = [
+const searchSteps = (mode: SearchMode) => mode === "ai" ? [
   "Reading the story brief",
-  "Searching approved metadata",
-  "Checking title and description evidence",
+  "Embedding the approved metadata brief",
+  "Retrieving current published candidates",
+  "Rechecking rights and metadata revision",
+  "Ranking the closest matches",
+] : [
+  "Reading the search terms",
+  "Searching approved title and description",
+  "Checking literal metadata evidence",
   "Ranking deterministic matches",
 ];
 
-function SearchResultsView({ query, setQuery, activeQuery, runSearch, assets, assetsLoading, suggestions, onUseQuery, filter, setFilter, sort, setSort, orientation, setOrientation, includeCustomBuying, setIncludeCustomBuying, notice, onOpen }: { query: string; setQuery: (value: string) => void; activeQuery: string; runSearch: (event: React.FormEvent) => void; assets: Asset[]; assetsLoading: boolean; suggestions: string[]; onUseQuery: (value: string) => void; filter: "all" | "image" | "video"; setFilter: (value: "all" | "image" | "video") => void; sort: "relevance" | "newest" | "popular" | "random"; setSort: (value: "relevance" | "newest" | "popular" | "random") => void; orientation: "all" | "landscape" | "portrait" | "square"; setOrientation: (value: "all" | "landscape" | "portrait" | "square") => void; includeCustomBuying: boolean; setIncludeCustomBuying: (value: boolean) => void; notice: string; onOpen: (asset: Asset) => void }) {
+function SearchResultsView({ query, setQuery, searchMode, setSearchMode, activeQuery, runSearch, assets, assetsLoading, suggestions, onUseQuery, filter, setFilter, sort, setSort, orientation, setOrientation, includeCustomBuying, setIncludeCustomBuying, notice, onOpen }: { query: string; setQuery: (value: string) => void; searchMode: SearchMode; setSearchMode: (mode: SearchMode) => void; activeQuery: string; runSearch: (event: React.FormEvent) => void; assets: Asset[]; assetsLoading: boolean; suggestions: string[]; onUseQuery: (value: string) => void; filter: "all" | "image" | "video"; setFilter: (value: "all" | "image" | "video") => void; sort: "relevance" | "newest" | "popular" | "random"; setSort: (value: "relevance" | "newest" | "popular" | "random") => void; orientation: "all" | "landscape" | "portrait" | "square"; setOrientation: (value: "all" | "landscape" | "portrait" | "square") => void; includeCustomBuying: boolean; setIncludeCustomBuying: (value: boolean) => void; notice: string; onOpen: (asset: Asset) => void }) {
   const [step, setStep] = useState(0);
+  const steps = searchSteps(searchMode);
 
   useEffect(() => {
-    if (!assetsLoading) { setStep(searchSteps.length); return undefined; }
+    if (!assetsLoading) { setStep(steps.length); return undefined; }
     setStep(0);
-    const timer = setInterval(() => setStep((current) => Math.min(searchSteps.length - 1, current + 1)), 260);
+    const timer = setInterval(() => setStep((current) => Math.min(steps.length - 1, current + 1)), 260);
     return () => clearInterval(timer);
-  }, [activeQuery, assetsLoading]);
+  }, [activeQuery, assetsLoading, searchMode, steps.length]);
 
   const traceAssets = assets.filter((asset) => Boolean(asset.previewUrl)).slice(0, 4);
   const isComplete = !assetsLoading;
-  const progress = isComplete ? 100 : Math.min(88, Math.round(((step + 1) / searchSteps.length) * 88));
+  const progress = isComplete ? 100 : Math.min(88, Math.round(((step + 1) / steps.length) * 88));
   const resultMessage = !isComplete
     ? `Searching the archive for “${activeQuery || "the latest verified media"}”`
     : notice.startsWith("The verified content service is unavailable")
       ? notice
       : activeQuery && !assets.length
-        ? `No approved metadata matches found for "${activeQuery}".`
+        ? `No approved ${searchMode === "ai" ? "semantic metadata" : "metadata"} matches found for "${activeQuery}".`
         : `${assets.length} verified result${assets.length === 1 ? "" : "s"} found.`;
 
   return <main className="search-results-page" id="search-results">
     <section className="search-results-intro">
       <div className="search-results-eyebrow"><span className="pulse" /> Archive search / live trace</div>
       <h1>Finding the visual story<br /><em>behind your brief.</em></h1>
-      <form className="search-box" onSubmit={runSearch}><span className="search-icon" aria-hidden="true"><Icon name="search" size={18} /></span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Describe the story you need to tell…" aria-label="Search photo and video" /><button type="submit" disabled={assetsLoading}>{assetsLoading ? "Searching…" : "Search again"} <span>↗</span></button></form>
+      <form className="search-box" onSubmit={runSearch}><span className="search-icon" aria-hidden="true"><Icon name="search" size={18} /></span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Describe the story you need to tell…" aria-label="Search photo and video" /><button type="submit" disabled={assetsLoading}>{assetsLoading ? "Searching…" : "Search again"} <span>↗</span></button><SearchModeToggle mode={searchMode} onChange={setSearchMode} /></form>
       <CustomBuyingToggle enabled={includeCustomBuying} onChange={setIncludeCustomBuying} />
       <div className="search-status" role="status" aria-live="polite" aria-busy={assetsLoading}><span className={`search-status-dot${isComplete ? " complete" : ""}`} /><span>{resultMessage}</span></div>
     </section>
@@ -827,8 +849,8 @@ function SearchResultsView({ query, setQuery, activeQuery, runSearch, assets, as
       <aside className="search-progress-panel">
         <div className="search-progress-heading"><span className="section-kicker">SEARCH PROCESS</span><strong>{isComplete ? "Complete" : `${progress}%`}</strong></div>
         <div className="search-progress-track" aria-hidden="true"><span style={{ width: `${progress}%` }} /></div>
-        <ol className="search-step-list">{searchSteps.map((label, index) => <li key={label} className={index < step || isComplete ? "done" : index === step ? "current" : ""}><span>{index < step || isComplete ? "✓" : String(index + 1).padStart(2, "0")}</span><strong>{label}</strong>{index === step && !isComplete && <small>Working through indexed records</small>}</li>)}</ol>
-        <p className="search-provenance"><strong>What is being checked?</strong> Approved records, stored previews, human verification, rights status, and the title and description written for each asset.</p>
+        <ol className="search-step-list">{steps.map((label, index) => <li key={label} className={index < step || isComplete ? "done" : index === step ? "current" : ""}><span>{index < step || isComplete ? "✓" : String(index + 1).padStart(2, "0")}</span><strong>{label}</strong>{index === step && !isComplete && <small>Working through indexed records</small>}</li>)}</ol>
+        <p className="search-provenance"><strong>What is being checked?</strong>{searchMode === "ai" ? " A natural-language brief is compared with vectors created from the current, approved descriptions and structured metadata. The source images are not re-analysed at search time." : " Approved records, stored previews, human verification, rights status, and the title and description written for each asset."}</p>
       </aside>
       <section className="search-trace-panel" aria-labelledby="trace-heading">
         <div className="search-trace-heading"><div><span className="section-kicker">CANDIDATE MEDIA</span><h2 id="trace-heading">{isComplete ? "Candidate records checked" : "Images being checked"} <em>{isComplete ? "first." : "now."}</em></h2></div><span className="trace-count">{traceAssets.length} candidate{traceAssets.length === 1 ? "" : "s"} in view</span></div>
@@ -1651,11 +1673,9 @@ function AccountWorkspace({ api, auth0, onNotice, buyer }: { api: (path: string,
   }
 
   async function downloadLicence(assetId: string): Promise<void> {
-    const response = await fetch(`/api/assets/${encodeURIComponent(assetId)}/original`, { credentials: "include", redirect: "manual" });
-    if (response.status === 302) {
-      window.location.assign(response.headers.get("Location") ?? `/api/assets/${encodeURIComponent(assetId)}/original`);
-      return;
-    }
+    const url = `/api/assets/${encodeURIComponent(assetId)}/original`;
+    const response = await fetch(url, { method: "HEAD", credentials: "include", redirect: "manual" });
+    if (response.status === 200 || response.status === 302) { window.location.assign(url); return; }
     const body = await response.json().catch(() => ({})) as { error?: string };
     onNotice(body.error ?? "Licensed delivery could not be opened. Try again.");
   }
