@@ -1894,15 +1894,21 @@ function GovernanceDetail({ asset, licenceType, setLicenceType, validation, onAc
   const [title, setTitle] = useState(asset.title);
   const [caption, setCaption] = useState(asset.caption);
   const [notes, setNotes] = useState(asset.curatorNotes);
+  const [rightsStatus, setRightsStatus] = useState(asset.rightsStatus);
+  const [modelReleaseStatus, setModelReleaseStatus] = useState(asset.modelReleaseStatus);
+  const [propertyReleaseStatus, setPropertyReleaseStatus] = useState(asset.propertyReleaseStatus);
   useEffect(() => {
     setTitle(asset.title);
     setCaption(asset.caption);
     setNotes(asset.curatorNotes);
-  }, [asset.id, asset.title, asset.caption, asset.curatorNotes]);
+    setRightsStatus(asset.rightsStatus);
+    setModelReleaseStatus(asset.modelReleaseStatus);
+    setPropertyReleaseStatus(asset.propertyReleaseStatus);
+  }, [asset.id, asset.title, asset.caption, asset.curatorNotes, asset.rightsStatus, asset.modelReleaseStatus, asset.propertyReleaseStatus]);
   const approved = asset.workflowStage === "approval" && asset.status === "published";
   const licences: LicenceType[] = ["editorial", "commercial", "advertising", "social", "broadcast", "exclusive"];
-  const dirty = title !== asset.title || caption !== asset.caption || notes !== asset.curatorNotes;
-  const corrections = { title: title.trim(), caption: caption.trim(), curatorNotes: notes.trim() };
+  const dirty = title !== asset.title || caption !== asset.caption || notes !== asset.curatorNotes || rightsStatus !== asset.rightsStatus || modelReleaseStatus !== asset.modelReleaseStatus || propertyReleaseStatus !== asset.propertyReleaseStatus;
+  const corrections = { title: title.trim(), caption: caption.trim(), curatorNotes: notes.trim(), rightsStatus, modelReleaseStatus, propertyReleaseStatus };
   return <article className="governance-detail">
     <div className="detail-heading"><div><span className="section-kicker">ASSET / {asset.id}</span><h2>{asset.title}</h2><p>{asset.city}, {asset.province} · {asset.contributor}</p></div><span className={`governance-status ${approved ? "approved" : "pending"}`}>{approved ? "Approved" : "Needs review"}</span></div>
     <div className={`governance-preview ${asset.kind}`}><span>{asset.kind === "video" ? "▶" : "V"}</span><small>SOURCE · {asset.sourceFileName ?? "source file pending"}</small><b>{asset.authenticityConfidence ? `${Math.round(asset.authenticityConfidence * 100)}%` : "—"}<em>AI confidence</em></b></div>
@@ -1911,6 +1917,9 @@ function GovernanceDetail({ asset, licenceType, setLicenceType, validation, onAc
       <label>Caption / context<textarea value={caption} onChange={(event) => setCaption(event.target.value)} maxLength={1000} rows={3} aria-label="Caption or context" /></label>
       <label>AI suggestions<div className="governance-tags">{asset.aiTags.length ? asset.aiTags.map((tag) => <span key={tag}>{tag}</span>) : <small>Pending AI pass</small>}</div></label>
       <label>Curator note<textarea value={notes} onChange={(event) => setNotes(event.target.value)} maxLength={2000} rows={3} aria-label="Curator note" /></label>
+      <label>Rights verification<select value={rightsStatus} onChange={(event) => setRightsStatus(event.target.value as Asset["rightsStatus"])}><option value="pending">Pending</option><option value="verified">Verified</option><option value="editorial_only">Editorial only</option><option value="restricted">Restricted</option></select></label>
+      <label>Model release verification<select value={modelReleaseStatus} onChange={(event) => setModelReleaseStatus(event.target.value as Asset["modelReleaseStatus"])}><option value="unknown">Unknown</option><option value="pending">Pending</option><option value="verified">Verified</option><option value="not_required">Not required</option></select></label>
+      <label>Property release verification<select value={propertyReleaseStatus} onChange={(event) => setPropertyReleaseStatus(event.target.value as Asset["propertyReleaseStatus"])}><option value="unknown">Unknown</option><option value="pending">Pending</option><option value="verified">Verified</option><option value="not_required">Not required</option></select></label>
     </div>
     <div className="draft-status" role="status" aria-live="polite">{dirty ? "Unsaved metadata changes" : "All metadata changes saved"}</div>
     <div className="release-evidence"><div><span className="section-kicker">CONTRIBUTOR RELEASES</span><h3>Evidence cross-check</h3></div><div className="evidence-grid"><Evidence label="Model release" status={asset.modelReleaseStatus} /><Evidence label="Property release" status={asset.propertyReleaseStatus} /></div></div>

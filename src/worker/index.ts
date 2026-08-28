@@ -2203,7 +2203,7 @@ const paymentSessionSchema = z.object({
 function allowedPaymentReturnUrl(env: Pick<Bindings, "APP_PUBLIC_URL" | "ALLOWED_ORIGINS" | "APP_ENV">, value: string): boolean {
   try {
     const candidate = new URL(value);
-    if (candidate.protocol !== "https:" && String(env.APP_ENV ?? "") !== "development") return false;
+    if (candidate.protocol !== "https:" && !["development", "demo"].includes(String(env.APP_ENV ?? ""))) return false;
     const allowed = [env.APP_PUBLIC_URL ?? "", ...(env.ALLOWED_ORIGINS ?? "").split(",")]
       .map((origin) => { try { return new URL(origin.trim()).origin; } catch { return ""; } })
       .filter(Boolean);

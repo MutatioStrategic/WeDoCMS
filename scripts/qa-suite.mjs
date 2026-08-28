@@ -324,6 +324,9 @@ async function publishContributorAsset({ page, logs, screenshot }, state) {
   await page.locator(".governance-item").filter({ hasText: state.createdAsset.title }).first().click();
   const workingTitle = page.getByLabel("Working title");
   await workingTitle.fill(state.createdAsset.title + " published");
+  await page.getByLabel("Rights verification").selectOption("verified");
+  await page.getByLabel("Model release verification").selectOption("not_required");
+  await page.getByLabel("Property release verification").selectOption("not_required");
   const saveCorrectionPromise = page.waitForResponse((response) => response.request().method() === "POST" && pathOnly(response.url()) === "/api/governance/assets/" + state.createdAsset.id + "/action");
   await page.getByRole("button", { name: /Save correction/ }).click();
   assertion((await saveCorrectionPromise).status() === 200, "Governance correction did not return 200");
