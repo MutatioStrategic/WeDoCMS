@@ -182,6 +182,7 @@ type SecretBindings = {
   FIRMA_API_TOKEN?: string;
   SESSION_SECRET?: string;
   AUTH_JWT_SECRET?: string;
+  AUTH_JWKS_URL?: string;
   AUTH_ISSUER?: string;
   AUTH_AUDIENCE?: string;
   AUTH_COOKIE_DOMAIN?: string;
