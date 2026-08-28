@@ -41,7 +41,13 @@ jobs:
         env:
           SESSION_SECRET: ci-session-secret-that-is-long-enough-for-tests
         run: |
-          npx wrangler dev --local --port 8787 --var SESSION_SECRET:ci-session-secret-that-is-long-enough-for-tests --var PAYMENT_WEBHOOK_SECRET:ci-payment-webhook-secret-that-is-long-enough > worker.log 2>&1 &
+          npx wrangler dev --local --port 8787 \
+            --var SESSION_SECRET:ci-session-secret-that-is-long-enough-for-tests \
+            --var PAYMENT_WEBHOOK_SECRET:ci-payment-webhook-secret-that-is-long-enough \
+            --var AUTH_PROVIDER:supabase \
+            --var SUPABASE_URL:https://tenant.supabase.co \
+            --var SUPABASE_ANON_KEY:sb_publishable_contract_test \
+            --var APP_PUBLIC_URL:https://archive.example.com > worker.log 2>&1 &
           worker_pid=$!
           trap 'kill $worker_pid' EXIT
           for attempt in $(seq 1 30); do
