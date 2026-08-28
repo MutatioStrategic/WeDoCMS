@@ -116,13 +116,13 @@
 		],
 		"consumers": [
 			{
-				"queue": "veld-archive-r2-events",
+				"queue": "veld-archive-demo-r2-events",
 				"max_batch_size": 100,
 				"max_batch_timeout": 5,
 				"max_retries": 5
 			},
 			{
-				"queue": "veld-archive-photo-enrichment",
+				"queue": "veld-archive-demo-photo-enrichment",
 				"max_batch_size": 10,
 				"max_batch_timeout": 5,
 				"max_concurrency": 1,
@@ -130,7 +130,7 @@
 				"dead_letter_queue": "veld-archive-photo-enrichment-dlq"
 			},
 			{
-				"queue": "veld-archive-zoho-integrations",
+				"queue": "veld-archive-demo-zoho-integrations",
 				"max_batch_size": 10,
 				"max_batch_timeout": 5,
 				"max_retries": 3,
