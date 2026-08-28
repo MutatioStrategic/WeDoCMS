@@ -2065,6 +2065,8 @@ components:
         limit: { type: integer, minimum: 0 }
         used: { type: integer, minimum: 0 }
         remaining: { type: integer, minimum: 0 }
+        freeCreditCost: { type: integer, minimum: 0, description: Credit value represented by one introductory free download. }
+        freeCreditsRemaining: { type: integer, minimum: 0, description: Remaining introductory download value expressed as credits. }
         downloads: { type: array, items: { type: object, additionalProperties: true } }
       additionalProperties: false
     PurchaseHistoryResponse:
@@ -2081,6 +2083,9 @@ components:
         creditPackCredits: { type: integer, minimum: 1, description: Default media credit pack size. }
         creditPackDurationDays: { type: integer, minimum: 1, description: Validity period for the default media credit pack. }
         balanceCredits: { type: integer, minimum: 0 }
+        introductoryFreeCredits: { type: integer, minimum: 0, description: Introductory credits granted to eligible buyers. }
+        introductoryFreeCreditCost: { type: integer, minimum: 0, description: Credit value represented by one introductory free download. }
+        introductoryFreeDownloadLimit: { type: integer, minimum: 0, description: Maximum introductory free downloads per buyer. }
         transactions:
           type: array
           items:
