@@ -1619,7 +1619,7 @@ app.post("/api/assets", async (c) => {
       ?, ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?,
-      'curator_correction', ?, ?
+      ?, 'curator_correction', ?
     )`)
     .bind(id, user.organizationId, user.id, payload.kind, payload.title, payload.description, payload.caption, payload.province ?? null, payload.city ?? null, payload.locality ?? null, payload.landmark ?? null, JSON.stringify(payload.subjectTags), JSON.stringify(payload.culturalTags), payload.rightsStatus, payload.modelReleaseStatus, payload.propertyReleaseStatus, payload.monetizationModel, payload.licensePriceCents ?? null, payload.licenseCreditCost, subscriptionIncluded ? 1 : 0, payload.kind === "image" && payload.freeDownloadEnabled ? 1 : 0, geographicLocationSource).run();
   return c.json(validateContractResponse("POST /api/assets 201", assetCreateResponseSchema, { id, status: "needs_review" }), 201, { Location: `/api/assets/${id}` });
