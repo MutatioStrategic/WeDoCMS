@@ -339,6 +339,9 @@
 			"vars": {
 				"APP_ENV": "demo",
 				"DEMO_AUTH_ENABLED": "true",
+				"DEMO_BUYER_EMAIL": "buyer@demo.veld",
+				"DEMO_SELLER_EMAIL": "seller@demo.veld",
+				"DEMO_EDITOR_EMAIL": "editor@demo.veld",
 				"ALLOWED_ORIGINS": "https://veld-archive.pages.dev,https://veld-archive-api-demo.blewisorlando.workers.dev,http://localhost:5173,http://127.0.0.1:5173",
 				"TURNSTILE_HOSTNAMES": "veld-archive.pages.dev,veld-archive-api-demo.blewisorlando.workers.dev,localhost,127.0.0.1",
 				"DEFAULT_ORGANIZATION_ID": "org-demo",

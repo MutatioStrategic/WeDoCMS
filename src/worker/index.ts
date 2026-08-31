@@ -189,6 +189,9 @@ type SecretBindings = {
   AUTH_ACCOUNT_PORTAL_URL?: string;
   AUTH_ALLOW_ORG_PROVISIONING?: string;
   DEMO_AUTH_ENABLED?: string;
+  DEMO_BUYER_EMAIL?: string;
+  DEMO_SELLER_EMAIL?: string;
+  DEMO_EDITOR_EMAIL?: string;
   DEFAULT_ORGANIZATION_ID?: string;
   ALLOWED_ORIGINS?: string;
   RATE_LIMIT_WINDOW_SECONDS?: string;
@@ -520,7 +523,20 @@ async function sessionResponse(c: { env: Bindings; req: { raw: Request }; json: 
   return responseWithSession(response, session.token, c.env);
 }
 
-async function seedSessionForRole(c: AppContext, role: DemoRole): Promise<Response> {
+async function seedSessionForRole(c: AppContext, role: DemoRole, useConfiguredAccount = false): Promise<Response> {
+  if (useConfiguredAccount) {
+    const email = role === "buyer" ? c.env.DEMO_BUYER_EMAIL : role === "contributor" ? c.env.DEMO_SELLER_EMAIL : role === "editor" ? c.env.DEMO_EDITOR_EMAIL : undefined;
+    if (email?.trim()) {
+      const allowedRoles = role === "buyer" ? "'buyer'" : role === "contributor" ? "'contributor'" : "'editor', 'admin'";
+      const account = await c.env.DB.prepare(`SELECT u.id, om.organization_id
+        FROM users u JOIN organization_memberships om ON om.user_id = u.id
+        WHERE lower(u.email) = lower(?) AND u.status = 'active' AND om.status = 'active'
+          AND om.organization_id = ? AND om.role IN (${allowedRoles})
+        ORDER BY om.created_at LIMIT 1`).bind(email.trim(), c.env.DEFAULT_ORGANIZATION_ID ?? "org-demo").first<{ id: string; organization_id: string }>();
+      if (!account) return c.json({ error: "Configured demo account is not an active tenant member" }, 503);
+      return sessionResponse(c, account.id, account.organization_id);
+    }
+  }
   const userId = role === "admin" ? "demo-admin" : role === "editor" ? "demo-editor" : role === "contributor" ? "demo-contributor" : "demo-buyer";
   if (role === "editor") {
     const adminMembership = await c.env.DB.prepare("SELECT organization_id FROM organization_memberships WHERE user_id = 'demo-admin' AND status = 'active' ORDER BY created_at LIMIT 1")
@@ -564,7 +580,7 @@ app.post("/api/auth/dev-login", async (c) => {
 app.post("/api/auth/demo-login", async (c) => {
   if (!isDemoEnvironment(c.env)) return c.json({ error: "Demo authentication is disabled" }, 404);
   const payload = devLoginSchema.parse(await c.req.json());
-  return seedSessionForRole(c, payload.role);
+  return seedSessionForRole(c, payload.role, true);
 });
 
 app.post("/api/auth/exchange", async (c) => {
