@@ -1,6 +1,6 @@
 import { basicHeaders, bearerHeaders, idempotencyHeaders, IntegrationError, joinUrl, readJson, type HttpClient } from "./http";
 
-export type PayoutRail = "stripe_connect" | "payfast" | "za_bank" | "mobile_money" | "sepa";
+export type PayoutRail = "stripe_connect" | "payfast" | "za_bank" | "mobile_money" | "sepa" | "paystack_instant";
 export type PayoutStatus = "pending" | "processing" | "paid" | "failed" | "cancelled";
 
 export type Money = { amountMinor: number; currency: string };
@@ -144,6 +144,88 @@ export class SepaTransferPayoutAdapter extends JsonPayoutAdapter {
     if (!request.recipient.iban) throw new IntegrationError(this.rail, "iban is required");
     if (request.money.currency.toUpperCase() !== "EUR") throw new IntegrationError(this.rail, "SEPA transfers must use EUR");
     return { endToEndId: request.reference, instructedAmount: { amount: (request.money.amountMinor / 100).toFixed(2), currency: request.money.currency.toUpperCase() }, debtorMessage: request.description, creditor: { name: request.recipient.name, iban: request.recipient.iban, bic: request.recipient.bic }, metadata: request.metadata };
+  }
+}
+
+/** Paystack Instant Transfer for immediate payouts to Nigerian and South African bank accounts. */
+export class PaystackInstantTransferAdapter implements PayoutProvider {
+  readonly rail = "paystack_instant" as const;
+  private readonly fetcher: HttpClient;
+
+  constructor(private readonly config: { endpoint: string; secretKey: string; fetcher?: HttpClient }) {
+    this.fetcher = config.fetcher ?? fetch;
+  }
+
+  async createPayout(request: PayoutRequest): Promise<Payout> {
+    if (!request.recipient.bankAccount) throw new IntegrationError(this.rail, "bankAccount is required for instant transfer");
+    if (!request.recipient.bankAccount.accountNumber) throw new IntegrationError(this.rail, "accountNumber is required");
+    if (!request.recipient.bankAccount.branchCode && !request.recipient.bankAccount.bankName) {
+      throw new IntegrationError(this.rail, "branchCode or bankName is required");
+    }
+
+    const response = await this.fetcher(`${this.config.endpoint}/transferrecipient`, {
+      method: "POST",
+      headers: { ...bearerHeaders(this.config.secretKey), "Content-Type": "application/json", ...idempotencyHeaders(request.idempotencyKey) },
+      body: JSON.stringify({
+        type: "nuban",
+        name: request.recipient.name,
+        account_number: request.recipient.bankAccount.accountNumber,
+        bank_code: request.recipient.bankAccount.branchCode,
+        currency: request.money.currency.toUpperCase(),
+      }),
+    });
+
+    const recipientData = await readJson<{ status: boolean; data: { id: number; recipient_code: string } }>(response, this.rail);
+    if (!recipientData.status || !recipientData.data?.recipient_code) {
+      throw new IntegrationError(this.rail, "Failed to create transfer recipient", { details: recipientData });
+    }
+
+    const transferResponse = await this.fetcher(`${this.config.endpoint}/transfer`, {
+      method: "POST",
+      headers: { ...bearerHeaders(this.config.secretKey), "Content-Type": "application/json", ...idempotencyHeaders(`${request.idempotencyKey}:transfer`) },
+      body: JSON.stringify({
+        source: "balance",
+        amount: request.money.amountMinor,
+        recipient: recipientData.data.recipient_code,
+        reason: request.description ?? `Payout ${request.reference}`,
+        reference: request.reference,
+      }),
+    });
+
+    const transferData = await readJson<{ status: boolean; data: { id: number; transfer_code: string; status: string; reference?: string } }>(transferResponse, this.rail);
+    if (!transferData.status || !transferData.data?.transfer_code) {
+      throw new IntegrationError(this.rail, "Failed to initiate instant transfer", { details: transferData });
+    }
+
+    return {
+      id: request.reference,
+      provider: this.rail,
+      status: normalizePayoutStatus(transferData.data.status),
+      reference: request.reference,
+      providerReference: transferData.data.transfer_code,
+      money: request.money,
+      raw: transferData.data,
+    };
+  }
+
+  async getPayout(providerReference: string): Promise<Payout> {
+    const response = await this.fetcher(`${this.config.endpoint}/transfer/${encodeURIComponent(providerReference)}`, {
+      headers: { ...bearerHeaders(this.config.secretKey) },
+    });
+    const data = await readJson<{ status: boolean; data: { id: number; transfer_code: string; status: string; amount: number; currency: string; failure_reason?: string } }>(response, this.rail);
+    if (!data.status || !data.data) {
+      throw new IntegrationError(this.rail, "Failed to fetch transfer status", { details: data });
+    }
+    return {
+      id: providerReference,
+      provider: this.rail,
+      status: normalizePayoutStatus(data.data.status),
+      reference: providerReference,
+      providerReference: data.data.transfer_code,
+      money: { amountMinor: data.data.amount, currency: (data.data.currency ?? "ZAR").toUpperCase() },
+      failureReason: data.data.failure_reason,
+      raw: data.data,
+    };
   }
 }
 

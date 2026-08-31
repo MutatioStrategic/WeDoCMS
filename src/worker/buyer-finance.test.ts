@@ -2,9 +2,13 @@ import { describe, expect, it } from "vitest";
 import { creditPurchaseAmountCents, isCalendarDate, nextMonthlyChargeDate } from "./buyer-finance";
 
 describe("buyer finance rules", () => {
-  it("prices each archive credit at R100", () => {
+  it("prices single credit at R100 (standard tier)", () => {
     expect(creditPurchaseAmountCents(1)).toBe(10000);
-    expect(creditPurchaseAmountCents(25)).toBe(250000);
+  });
+  
+  it("applies silver tier discount for 25 credits (5% off)", () => {
+    // 25 credits falls in silver tier (10-49), unit price = 9500 cents
+    expect(creditPurchaseAmountCents(25)).toBe(237500); // 25 * 9500
   });
 
   it("rejects invalid or fractional credit quantities", () => {
