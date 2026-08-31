@@ -936,6 +936,8 @@ function GovernanceWorkspace({ api, onNotice }: { api: (path: string, init?: Req
   const [stage, setStage] = useState<WorkflowStage | "all">("all");
   const [licenceType, setLicenceType] = useState<LicenceType>("commercial");
   const [buyerTermsAccepted, setBuyerTermsAccepted] = useState(false);
+  const [showLicenseTerms, setShowLicenseTerms] = useState(false);
+  const [checkoutStep, setCheckoutStep] = useState<"select" | "terms" | "confirm" | "complete">(0 as "select");
   const selected = items.find((item) => item.id === selectedId) ?? items[0];
   const visible = stage === "all" ? items : items.filter((item) => item.workflowStage === stage);
   const validation = selected ? archiveDomain.evaluateLicenceRequest(selected, { assetId: selected.id, licenceType, territory: "Worldwide", durationDays: 365 }) : null;
@@ -962,20 +964,36 @@ function GovernanceWorkspace({ api, onNotice }: { api: (path: string, init?: Req
     onNotice(name === "run_ai_tagging" ? "AI suggestions generated; curator review is required." : name === "save_correction" ? "Curator correction saved to the audit trail." : "Asset approved and ready for rights validation.");
   }
 
-  async function checkout() {
+  async function initiateCheckout() {
     if (!selected || !validation) return;
     if (selected.monetizationModel === "custom_quote") { onNotice("Custom quote selected. No payment was created; contact the contributor for pricing."); return; }
-    const accepted = buyerTermsAccepted || window.confirm("Please read the Buyer Licence and Payment Terms shown on this page. Continue only if you accept the selected licence, Paystack payment split disclosure, and limited rights-enforcement disclosure.");
-    if (!accepted) return;
-    setBuyerTermsAccepted(true);
-    try { const response = await api("/api/checkout", { method: "POST", body: JSON.stringify({ assetId: selected.id, licenceType, territory: "Worldwide", durationDays: 365, buyerAgreementVersion: "buyer-marketplace-v1", acceptBuyerTerms: accepted }) }); if (!response.ok) throw new Error(); onNotice("Licence created. Paystack will process the buyer payment and split the agreed seller percentage at checkout."); }
-    catch { onNotice(validation.allowed ? "Checkout could not be opened. Payment was not created." : `Checkout blocked: ${validation.blockingReasons[0]}`); }
+    setShowLicenseTerms(true);
+    setCheckoutStep("terms");
   }
 
-  return <main className="governance-page"><div className="governance-intro"><div><span className="section-kicker">CURATOR OPERATIONS / METADATA GOVERNANCE</span><h1>Review what the model <em>cannot know.</em></h1><p>Assets move from source file to licensable record through an explicit, auditable chain.</p></div><div className="governance-summary"><strong>{items.filter((item) => item.workflowStage !== "approval").length}</strong><span>assets need human attention</span></div></div><div className="governance-pipeline"><button className={stage === "all" ? "active" : ""} onClick={() => setStage("all")}><b>00</b><span>All assets<small>Full pipeline</small></span><strong>{items.length}</strong></button>{(["ingestion", "ai_tagging", "curator_correction", "approval"] as WorkflowStage[]).map((value, index) => <React.Fragment key={value}><i>→</i><button className={stage === value ? "active" : ""} onClick={() => setStage(value)}><b>0{index + 1}</b><span>{value === "ai_tagging" ? "AI tagging" : value === "curator_correction" ? "Curator correction" : value[0].toUpperCase() + value.slice(1)}<small>{items.filter((item) => item.workflowStage === value).length} records</small></span><strong>{items.filter((item) => item.workflowStage === value).length}</strong></button></React.Fragment>)}</div><div className="governance-grid"><div className="governance-queue"><div className="governance-queue-heading"><span className="section-kicker">REVIEW QUEUE</span><span>{visible.length} records</span></div>{visible.map((item) => <button key={item.id} className={`governance-item ${item.id === selected?.id ? "selected" : ""}`} onClick={() => setSelectedId(item.id)}><div className={`governance-thumb ${item.kind}`}><span>{item.kind === "video" ? "▶" : "V"}</span></div><div><small>{item.workflowStage === "curator_correction" ? "Needs correction" : item.workflowStage === "ai_tagging" ? "AI tagging" : item.workflowStage === "approval" ? "Approved" : "Ingestion"}</small><strong>{item.title}</strong><span>{item.contributor} · {item.city ?? item.country}</span></div><i className={item.humanVerified ? "verified" : ""}></i></button>)}</div>{selected && <GovernanceDetail asset={selected} licenceType={licenceType} setLicenceType={setLicenceType} validation={validation!} onAction={action} onCheckout={checkout} buyerTermsAccepted={buyerTermsAccepted} setBuyerTermsAccepted={setBuyerTermsAccepted} />}</div></main>;
+  async function confirmCheckout() {
+    if (!selected || !validation) return;
+    if (!buyerTermsAccepted) {
+      onNotice("You must accept the Buyer Licence and Payment Terms before continuing.");
+      return;
+    }
+    setCheckoutStep("confirm");
+    try {
+      const response = await api("/api/checkout", { method: "POST", body: JSON.stringify({ assetId: selected.id, licenceType, territory: "Worldwide", durationDays: 365, buyerAgreementVersion: "buyer-marketplace-v1", acceptBuyerTerms: true }) });
+      if (!response.ok) throw new Error();
+      setCheckoutStep("complete");
+      onNotice("Licence created. Paystack will process the buyer payment and split the agreed seller percentage at checkout.");
+      setTimeout(() => { setShowLicenseTerms(false); setCheckoutStep("select"); setBuyerTermsAccepted(false); }, 3000);
+    } catch {
+      setCheckoutStep("select");
+      onNotice(validation.allowed ? "Checkout could not be opened. Payment was not created." : `Checkout blocked: ${validation.blockingReasons[0]}`);
+    }
+  }
+
+  return <main className="governance-page"><div className="governance-intro"><div><span className="section-kicker">CURATOR OPERATIONS / METADATA GOVERNANCE</span><h1>Review what the model <em>cannot know.</em></h1><p>Assets move from source file to licensable record through an explicit, auditable chain.</p></div><div className="governance-summary"><strong>{items.filter((item) => item.workflowStage !== "approval").length}</strong><span>assets need human attention</span></div></div><div className="governance-pipeline"><button className={stage === "all" ? "active" : ""} onClick={() => setStage("all")}><b>00</b><span>All assets<small>Full pipeline</small></span><strong>{items.length}</strong></button>{(["ingestion", "ai_tagging", "curator_correction", "approval"] as WorkflowStage[]).map((value, index) => <React.Fragment key={value}><i>→</i><button className={stage === value ? "active" : ""} onClick={() => setStage(value)}><b>0{index + 1}</b><span>{value === "ai_tagging" ? "AI tagging" : value === "curator_correction" ? "Curator correction" : value[0].toUpperCase() + value.slice(1)}<small>{items.filter((item) => item.workflowStage === value).length} records</small></span><strong>{items.filter((item) => item.workflowStage === value).length}</strong></button></React.Fragment>)}</div><div className="governance-grid"><div className="governance-queue"><div className="governance-queue-heading"><span className="section-kicker">REVIEW QUEUE</span><span>{visible.length} records</span></div>{visible.map((item) => <button key={item.id} className={`governance-item ${item.id === selected?.id ? "selected" : ""}`} onClick={() => setSelectedId(item.id)}><div className={`governance-thumb ${item.kind}`}><span>{item.kind === "video" ? "▶" : "V"}</span></div><div><small>{item.workflowStage === "curator_correction" ? "Needs correction" : item.workflowStage === "ai_tagging" ? "AI tagging" : item.workflowStage === "approval" ? "Approved" : "Ingestion"}</small><strong>{item.title}</strong><span>{item.contributor} · {item.city ?? item.country}</span></div><i className={item.humanVerified ? "verified" : ""}></i></button>)}</div>{selected && <GovernanceDetail asset={selected} licenceType={licenceType} setLicenceType={setLicenceType} validation={validation!} onAction={action} onCheckout={initiateCheckout} buyerTermsAccepted={buyerTermsAccepted} setBuyerTermsAccepted={setBuyerTermsAccepted} showLicenseTerms={showLicenseTerms} checkoutStep={checkoutStep} confirmCheckout={confirmCheckout} />}</div></main>;
 }
 
-function GovernanceDetail({ asset, licenceType, setLicenceType, validation, onAction, onCheckout, buyerTermsAccepted, setBuyerTermsAccepted }: { asset: Asset; licenceType: LicenceType; setLicenceType: (value: LicenceType) => void; validation: ReturnType<typeof archiveDomain.evaluateLicenceRequest>; onAction: (name: "run_ai_tagging" | "save_correction" | "approve", updates?: Partial<Asset>) => void; onCheckout: () => void; buyerTermsAccepted: boolean; setBuyerTermsAccepted: (value: boolean) => void }) {
+function GovernanceDetail({ asset, licenceType, setLicenceType, validation, onAction, onCheckout, buyerTermsAccepted, setBuyerTermsAccepted, showLicenseTerms, checkoutStep, confirmCheckout }: { asset: Asset; licenceType: LicenceType; setLicenceType: (value: LicenceType) => void; validation: ReturnType<typeof archiveDomain.evaluateLicenceRequest>; onAction: (name: "run_ai_tagging" | "save_correction" | "approve", updates?: Partial<Asset>) => void; onCheckout: () => void; buyerTermsAccepted: boolean; setBuyerTermsAccepted: (value: boolean) => void; showLicenseTerms: boolean; checkoutStep: "select" | "terms" | "confirm" | "complete"; confirmCheckout: () => void }) {
   const [title, setTitle] = useState(asset.title);
   const [caption, setCaption] = useState(asset.caption);
   const [notes, setNotes] = useState(asset.curatorNotes);
@@ -988,6 +1006,7 @@ function GovernanceDetail({ asset, licenceType, setLicenceType, validation, onAc
   const licences: LicenceType[] = ["editorial", "commercial", "advertising", "social", "broadcast", "exclusive"];
   const dirty = title !== asset.title || caption !== asset.caption || notes !== asset.curatorNotes;
   const corrections = { title: title.trim(), caption: caption.trim(), curatorNotes: notes.trim() };
+  
   return <article className="governance-detail">
     <div className="detail-heading"><div><span className="section-kicker">ASSET / {asset.id}</span><h2>{asset.title}</h2><p>{asset.city}, {asset.province} · {asset.contributor}</p></div><span className={`governance-status ${approved ? "approved" : "pending"}`}>{approved ? "Approved" : "Needs review"}</span></div>
     <div className={`governance-preview ${asset.kind}`}><span>{asset.kind === "video" ? "▶" : "V"}</span><small>SOURCE · {asset.sourceFileName ?? "source file pending"}</small><b>{asset.authenticityConfidence ? `${Math.round(asset.authenticityConfidence * 100)}%` : "—"}<em>AI confidence</em></b></div>
@@ -1000,6 +1019,93 @@ function GovernanceDetail({ asset, licenceType, setLicenceType, validation, onAc
     <div className="draft-status" role="status" aria-live="polite">{dirty ? "Unsaved metadata changes" : "All metadata changes saved"}</div>
     <div className="release-evidence"><div><span className="section-kicker">CONTRIBUTOR RELEASES</span><h3>Evidence cross-check</h3></div><div className="evidence-grid"><Evidence label="Model release" status={asset.modelReleaseStatus} /><Evidence label="Property release" status={asset.propertyReleaseStatus} /></div></div>
     <div className="governance-actions">{!approved && <><button className="outline-button" onClick={() => onAction("run_ai_tagging", { aiTags: ["South Africa", asset.city ?? "location", asset.kind, "context pending"] })}>Run AI tagging ↗</button><button className="dark-button" disabled={!dirty || !corrections.title} onClick={() => onAction("save_correction", corrections)}>Save correction ↗</button><button className="approve-button" disabled={!corrections.title} onClick={() => onAction("approve", corrections)}>Approve asset ✓</button></>}{approved && <span className="approved-copy"><span className="verified-dot"></span> Approval recorded; checkout gate is active.</span>}</div>
+    
+    {showLicenseTerms && (
+      <div className="license-terms-modal">
+        <div className="license-terms-content">
+          <div className="license-terms-header">
+            <span className="section-kicker">BUYER LICENCE TERMS</span>
+            <button className="close-modal" onClick={() => { setShowLicenseTerms(false); setCheckoutStep("select"); }}>×</button>
+          </div>
+          <div className="license-steps">
+            <div className={`step-indicator ${checkoutStep === "terms" ? "active" : ""}`}>1. Review Terms</div>
+            <div className={`step-indicator ${checkoutStep === "confirm" ? "active" : ""}`}>2. Accept & Pay</div>
+            <div className={`step-indicator ${checkoutStep === "complete" ? "active" : ""}`}>3. Complete</div>
+          </div>
+          
+          {checkoutStep === "terms" && (
+            <div className="terms-section">
+              <h3>WeDoCMS Buyer Licence and Payment Terms</h3>
+              <p className="terms-version">Version: buyer-marketplace-v1 · Effective: 2026-08-16</p>
+              
+              <div className="terms-body">
+                <section>
+                  <h4>1. Marketplace role</h4>
+                  <p>WeDoCMS operates a marketplace and delivery service. The Seller retains copyright and is the licensor. WeDoCMS does not sell or transfer copyright unless a listing expressly says otherwise.</p>
+                </section>
+                <section>
+                  <h4>2. Licence you receive</h4>
+                  <p>After successful payment, you receive only the usage rights described by the listing's selected licence, territory, duration, product restrictions and any custom schedule. You do not receive ownership, an unrestricted resale right, a right to sublicense, or a right to remove attribution unless the selected licence expressly grants it.</p>
+                </section>
+                <section>
+                  <h4>3. Payment destination and price</h4>
+                  <p>You pay the price shown at checkout in South African rand through Paystack. Paystack processes the payment and, where enabled, splits the settlement between the Seller's verified Paystack account and WeDoCMS's platform account according to the Seller's published marketplace arrangement. The split does not increase the price you see and does not change the licence you receive. Provider fees, tax treatment, refunds, chargebacks and settlement timing are handled under the applicable provider and platform rules.</p>
+                </section>
+                <section>
+                  <h4>4. Download and records</h4>
+                  <p>WeDoCMS may require an authenticated account before delivery. We record the licence, payment reference, buyer account, timestamp and download event so that the licence can be proved and misuse investigated. Do not share account credentials or download links.</p>
+                </section>
+                <section>
+                  <h4>5. Your responsibilities</h4>
+                  <p>Use the media only within the selected licence. Do not resell, redistribute, train an AI model, imply endorsement, use a person's image unlawfully, or use the media in a prohibited or defamatory context. You are responsible for checking the licence and obtaining any additional permissions your campaign requires.</p>
+                </section>
+                <section>
+                  <h4>6. Enforcement disclosure</h4>
+                  <p>By accepting these terms, you agree that WeDoCMS may disclose the minimum buyer, licence and download information reasonably necessary to the Seller for a rights investigation or enforcement request, subject to applicable privacy law and our privacy notice. The Seller may use it only for that purpose.</p>
+                </section>
+                <section>
+                  <h4>7. Refunds, takedowns and limits</h4>
+                  <p>A payment may be refunded or a download suspended where a transaction is reversed, a rights problem is verified, a provider or regulator requires action, or mandatory consumer law applies. A takedown does not automatically expand your licence or create a right to continue using disputed media. Questions and complaints should be sent through the support channel shown at checkout.</p>
+                </section>
+              </div>
+              
+              <div className="terms-acceptance">
+                <label className="checkbox-row">
+                  <input 
+                    type="checkbox" 
+                    checked={buyerTermsAccepted} 
+                    onChange={(event) => setBuyerTermsAccepted(event.target.checked)} 
+                  />
+                  I have read and accept the Buyer Licence and Payment Terms, including the Paystack payment split disclosure and limited rights-enforcement disclosure.
+                </label>
+                <button 
+                  className={buyerTermsAccepted ? "approve-button" : "blocked-button"} 
+                  onClick={confirmCheckout}
+                  disabled={!buyerTermsAccepted}
+                >
+                  Accept & Continue to Payment →
+                </button>
+              </div>
+            </div>
+          )}
+          
+          {checkoutStep === "confirm" && (
+            <div className="confirm-section">
+              <h3>Processing your licence purchase...</h3>
+              <p>Please wait while we connect to the payment provider.</p>
+            </div>
+          )}
+          
+          {checkoutStep === "complete" && (
+            <div className="complete-section">
+              <h3>Licence purchase successful!</h3>
+              <p>Your licence has been recorded and the payment is being processed.</p>
+            </div>
+          )}
+        </div>
+      </div>
+    )}
+    
     <div className={`checkout-guard ${validation.allowed ? "clear" : "blocked"}`}><div><span className="section-kicker">PRE-CHECKOUT GATE</span><h3>Licence rules <em>before</em> payment.</h3><p>Requested licence is checked against approval, rights scope, and contributor releases.</p><p className="pricing-note">Seller access: <strong>{assetPricingLabel(asset)}</strong></p></div><div className="checkout-controls"><label>Requested licence<select value={licenceType} onChange={(event) => setLicenceType(event.target.value as LicenceType)}>{licences.map((licence) => <option key={licence} value={licence}>{licence[0].toUpperCase() + licence.slice(1)}</option>)}</select></label><button className={validation.allowed && asset.monetizationModel !== "custom_quote" ? "approve-button" : "blocked-button"} onClick={onCheckout}>{validation.allowed && asset.monetizationModel !== "custom_quote" ? "Continue to checkout ↗" : asset.monetizationModel === "custom_quote" ? "Request custom quote" : "Checkout blocked"}</button></div><div className="checkout-checks">{validation.checks.map((check) => <div key={check.label}><span className={check.passed ? "check-pass" : "check-fail"}>{check.passed ? "✓" : "×"}</span><span><strong>{check.label}</strong><small>{check.detail}</small></span></div>)}</div></div>
   </article>;
 }

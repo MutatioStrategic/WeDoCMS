@@ -1,5 +1,5 @@
-export const PLATFORM_SUBSCRIPTION_PRICE_CENTS = 129900;
-export const CREDIT_UNIT_CENTS = 10000;
+export const PLATFORM_SUBSCRIPTION_PRICE_CENTS = Number((import.meta.env.VITE_PLATFORM_SUBSCRIPTION_PRICE_CENTS as string | undefined) || "129900");
+export const CREDIT_UNIT_CENTS = Number((import.meta.env.VITE_CREDIT_UNIT_CENTS as string | undefined) || "10000");
 
 export function creditPurchaseAmountCents(credits: number): number {
   if (!Number.isInteger(credits) || credits < 1 || credits > 100000) throw new Error("Credit quantity must be an integer between 1 and 100000");
