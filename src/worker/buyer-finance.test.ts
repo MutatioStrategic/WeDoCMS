@@ -1,10 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { creditPurchaseAmountCents, isCalendarDate, nextMonthlyChargeDate } from "./buyer-finance";
+import { calculateCreditExpiryDate, creditPurchaseAmountCents, creditPurchasePricing, getDiscountTier, isCalendarDate, isCreditExpired, nextMonthlyChargeDate } from "./buyer-finance";
 
 describe("buyer finance rules", () => {
   it("uses the configured provider reference for credit membership checkout", () => {
-    expect(creditPurchaseAmountCents(100)).toBe(29900);
-    expect(creditPurchaseAmountCents(200)).toBe(59800);
+    expect(creditPurchaseAmountCents(1)).toBe(299);
+    expect(creditPurchaseAmountCents(100)).toBe(25400);
+  });
+
+  it("applies deterministic bulk pricing while preserving the one-credit price", () => {
+    expect(getDiscountTier(1).tier).toBe("standard");
+    expect(creditPurchasePricing(10)).toMatchObject({ amountCents: 2840, unitPriceCents: 284, discountTier: "silver", discountAmountCents: 150 });
+    expect(creditPurchaseAmountCents(500)).toBe(119500);
+  });
+
+  it("calculates and detects credit expiry timestamps", () => {
+    expect(calculateCreditExpiryDate("2026-08-31T12:00:00.000Z")).toBe("2027-08-31 12:00:00");
+    expect(isCreditExpired("2026-08-30 12:00:00", null, new Date("2026-08-31T00:00:00.000Z"))).toBe(true);
+    expect(isCreditExpired("2027-08-30 12:00:00", null, new Date("2026-08-31T00:00:00.000Z"))).toBe(false);
   });
 
   it("rejects invalid or fractional credit quantities", () => {

@@ -1191,6 +1191,57 @@ function sharedAssetSignals(left: Asset, right: Asset): number {
   return [...right.subjectTags, ...right.culturalTags].filter((tag) => leftTags.has(tag.toLowerCase())).length;
 }
 
+type CampaignOutputFormat = "story" | "linkedin" | "web" | "email";
+const campaignOutputFormats: Array<{ id: CampaignOutputFormat; label: string; ratio: string; width: number; height: number; note: string }> = [
+  { id: "story", label: "Instagram Story", ratio: "9:16", width: 1080, height: 1920, note: "Protect the top and bottom UI-safe edges." },
+  { id: "linkedin", label: "LinkedIn", ratio: "1.91:1", width: 1200, height: 628, note: "Keep the subject clear of the platform chrome." },
+  { id: "web", label: "Website hero", ratio: "16:9", width: 1600, height: 900, note: "Reserve a clean third for headline copy." },
+  { id: "email", label: "Email header", ratio: "4:3", width: 1200, height: 900, note: "Keep important detail inside the central 70%." },
+];
+
+function CampaignFormatPlanner({ asset, onApprove, onNotice }: { asset: Asset; onApprove: () => void; onNotice: (notice: string) => void }) {
+  const [format, setFormat] = useState<CampaignOutputFormat>("story");
+  const [busy, setBusy] = useState(false);
+  const selected = campaignOutputFormats.find((item) => item.id === format) ?? campaignOutputFormats[0];
+
+  async function downloadPreview(): Promise<void> {
+    if (!asset.previewUrl) { onNotice("This source has no processed preview yet. No substitute image was used."); return; }
+    setBusy(true);
+    let sourceUrl = "";
+    try {
+      const response = await fetch(asset.previewUrl);
+      if (!response.ok) throw new Error("preview");
+      sourceUrl = URL.createObjectURL(await response.blob());
+      const source = new Image();
+      await new Promise<void>((resolve, reject) => { source.onload = () => resolve(); source.onerror = () => reject(new Error("image")); source.src = sourceUrl; });
+      const canvas = document.createElement("canvas");
+      canvas.width = selected.width; canvas.height = selected.height;
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("canvas");
+      const crop = fitCrop(source.naturalWidth, source.naturalHeight, selected.width / selected.height);
+      context.drawImage(source, crop.x, crop.y, crop.width, crop.height, 0, 0, canvas.width, canvas.height);
+      const output = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/webp", .9));
+      if (!output) throw new Error("export");
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(output);
+      link.download = `${asset.id}-${selected.id}-preview.webp`;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+      onNotice(`${selected.label} preview exported from the original source. The source photo remains unchanged.`);
+    } catch {
+      onNotice("The preview could not be formatted. The source photo was not changed.");
+    } finally {
+      if (sourceUrl) URL.revokeObjectURL(sourceUrl);
+      setBusy(false);
+    }
+  }
+
+  return <section className="campaign-format-planner" aria-labelledby="campaign-format-heading">
+    <div className="campaign-format-heading"><div><span className="section-kicker">04 · FORMAT FOR CAMPAIGN</span><h3 id="campaign-format-heading">One source. Clear outputs.</h3><p>Select the buyer’s channel, check the safe area, and export a reviewable preview. Every output keeps the source asset ID attached.</p></div><span className="status-pill cool">Source protected</span></div>
+    <div className="campaign-format-layout"><div className="campaign-format-source"><AssetPreview asset={asset} className="campaign-format-photo" /><div><strong>{asset.title}</strong><small>{assetPlace(asset)} · {asset.rightsStatus} · source {asset.id.slice(0, 12)}…</small></div></div><div className="campaign-format-options" role="list" aria-label="Campaign output formats">{campaignOutputFormats.map((item) => <button type="button" role="listitem" className={`campaign-format-option ${format === item.id ? "selected" : ""}`} key={item.id} onClick={() => setFormat(item.id)}><span>{item.label}</span><strong>{item.ratio}</strong><small>{item.width} × {item.height}</small></button>)}</div><div className="campaign-format-action"><div><strong>{selected.label}</strong><span>{selected.note}</span></div><div><button type="button" className="outline-button" onClick={() => void downloadPreview()} disabled={busy || !asset.previewUrl}>{busy ? "Preparing…" : "Download preview"}</button><button type="button" className="approve-button" onClick={onApprove}>Approve source for pack</button></div></div></div>
+  </section>;
+}
+
 function CampaignWorkspace({ api, onNotice, onOpen, role }: { api: (path: string, init?: RequestInit) => Promise<Response>; onNotice: (notice: string) => void; onOpen: (asset: Asset) => void; role?: string }) {
   const [campaigns, setCampaigns] = useState<CampaignSummary[]>([]);
   const [activeId, setActiveId] = useState("");
@@ -1410,6 +1461,7 @@ function CampaignWorkspace({ api, onNotice, onOpen, role }: { api: (path: string
           {assistantTool === "variants" && <><AssistantOutputHeading title="Channel variant plan" detail="Reformatting instructions keep one traceable licensed source across every output." /><div className="variant-grid">{(["linkedin", "instagram", "web", "email"] as const).map((platform) => <article key={platform}><span>{campaignPlatformLabel(platform)}</span><strong>{platform === "instagram" ? "9:16 Story" : platform === "linkedin" ? "1.91:1" : platform === "web" ? "16:9 Hero" : "4:3 / 1:1"}</strong><small>{cropAdvice(selectedAsset, platform === "linkedin" ? "linkedin" : platform)[0]}</small><em>Source: {selectedAsset.id.slice(0, 12)}…</em></article>)}</div><p className="assistant-disclaimer">These are production-ready directions, not silently generated replacements.</p></>}
         </div> : <div className="assistant-empty">Select a ranked source to start. The assistant will keep the asset ID and rights status attached to every suggestion.</div>}</aside>
        </div>
+      {selectedAsset && selectedRecommendation && <CampaignFormatPlanner asset={selectedAsset} onApprove={() => void changeStage(selectedRecommendation, "approved")} onNotice={onNotice} />}
       {activeCampaign && <CampaignDeliveryPanel campaign={activeCampaign} selectedAssetId={selectedAssetId} assets={campaignAssets} editVersions={editVersions} derivatives={derivatives} bundles={bundles} licenceMetadata={licenceMetadata} blockers={campaignBlockers} role={role} api={api} onNotice={onNotice} onRefresh={() => void loadCampaign(activeCampaign.id)} />}
     </section>}
   </main>;
@@ -2018,7 +2070,18 @@ function AgreementReviewModal({ api, onClose, onAccept, returnFocusRef }: { api:
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     closeRef.current?.focus();
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); onClose(); return; }
+      if (event.key !== "Tab") return;
+      const dialog = document.querySelector<HTMLElement>(".terms-modal");
+      if (!dialog) return;
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'));
+      if (focusable.length === 0) { event.preventDefault(); return; }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
     document.addEventListener("keydown", onKeyDown);
     return () => {
       document.body.style.overflow = previousOverflow;
@@ -2373,14 +2436,29 @@ function AssetModal({ asset, api, autoOpenPurchase = false, includeCustomBuying,
   const [newName, setNewName] = useState("");
   const [savingId, setSavingId] = useState("");
   const closeButtonRef = React.useRef<HTMLButtonElement>(null);
+  const dialogRef = React.useRef<HTMLDivElement>(null);
   const previousFocusRef = React.useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null);
 
   useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); onClose(); return; }
+      if (event.key !== "Tab") return;
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'));
+      if (focusable.length === 0) { event.preventDefault(); return; }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
     window.addEventListener("keydown", onKeyDown);
     closeButtonRef.current?.focus();
     return () => {
       window.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
       previousFocusRef.current?.focus();
     };
   }, [onClose]);
@@ -2559,14 +2637,14 @@ function AssetModal({ asset, api, autoOpenPurchase = false, includeCustomBuying,
   const accessPrice = activeMembership ? "Price: 0 credits for active members" : `Price: ${formatCredits(creditCost)}`;
   const actionLabel = purchaseComplete ? "Media unlocked" : activeMembership ? "Unlock with membership" : creditShortfall ? `Buy ${formatCredits(creditCost)}` : `Buy this asset with ${formatCredits(creditCost)}`;
 
-  return <div className="modal-backdrop" role="presentation" onClick={onClose}>
-    <div className="asset-modal" role="dialog" aria-modal="true" aria-labelledby="asset-title" onClick={(event) => event.stopPropagation()}>
+  return <div className="modal-backdrop asset-modal-backdrop" role="presentation" onClick={onClose}>
+    <div ref={dialogRef} className="asset-modal" role="dialog" aria-modal="true" aria-labelledby="asset-title" aria-describedby="asset-description" onClick={(event) => event.stopPropagation()}>
       <button ref={closeButtonRef} className="close-button" onClick={onClose} aria-label="Close">×</button>
       <AssetPreview asset={asset} className={`modal-visual ${asset.kind}`} />
       <div className="modal-copy">
         <span className="section-kicker">{asset.kind === "video" ? "FILM & VIDEO" : "PHOTOGRAPHY"} · {asset.city}</span>
         <h2 id="asset-title">{asset.title}</h2>
-        <p>{asset.caption || asset.description}</p>
+        <p id="asset-description">{asset.caption || asset.description}</p>
         <div className="tag-list">{asset.culturalTags.map((tag) => <span key={tag}>{tag}</span>)}</div>
         <div className="match-box"><div className="card-heading"><span className="section-kicker">WHY THIS MATCHED</span><strong>{asset.metadata_score == null ? `${archiveDomain.percent(explanation.matchConfidence)}% ${archiveDomain.confidenceLabel(explanation.matchConfidence)}` : `${Math.round(asset.metadata_score)}% metadata`}</strong></div>{explanation.signals.slice(0, 3).map((signal) => <p key={signal.label}><b>{signal.label}:</b> {signal.detail}</p>)}<small>{explanation.metadataReviewNote}</small>{asset.match_type && <div className="metadata-evidence"><span><b>{asset.match_type}</b> in <b>{asset.matched_field ?? "metadata"}</b><i>source: {asset.source_id ?? asset.id}</i></span>{asset.match_snippet && <small>“{asset.match_snippet}”</small>}</div>}</div>
         <div className="rights-summary"><span>Rights: <b>{asset.rightsStatus}</b></span><span>Authenticity: <b>{archiveDomain.percent(asset.authenticityConfidence)}%</b></span><span>Access: <b>{assetPricingLabel(asset)}</b></span></div>

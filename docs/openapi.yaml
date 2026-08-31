@@ -821,6 +821,112 @@ paths:
                   referenceAmountCents: { type: integer, minimum: 0, nullable: true, description: Optional display-only internal currency reference. }
                 additionalProperties: true
         '503': { description: Payment provider is unavailable or unconfigured }
+  /api/buyer/usage-reports:
+    get:
+      operationId: listBuyerUsageReports
+      summary: Return previously generated authenticated buyer usage reports
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Buyer usage report summaries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/BuyerUsageReportSummary' } }
+        '401': { description: Authentication required }
+        '403': { description: Buyer access required }
+  /api/buyer/usage-report:
+    get:
+      operationId: generateBuyerUsageReport
+      summary: Generate and persist an authenticated buyer usage report
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: periodStart, in: query, required: false, schema: { type: string, format: date-time } }
+        - { name: periodEnd, in: query, required: false, schema: { type: string, format: date-time } }
+      responses:
+        '200':
+          description: Buyer usage report
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BuyerUsageReport' }
+        '401': { description: Authentication required }
+        '422': { description: Invalid usage-report period }
+  /api/buyer/carts:
+    get:
+      operationId: listBuyerCarts
+      summary: List the authenticated buyer's active licence carts
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Active buyer carts
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/BuyerCart' } }
+        '401': { description: Authentication required }
+    post:
+      operationId: createBuyerCart
+      summary: Create an authenticated buyer licence cart
+      security: [{ sessionCookie: [] }]
+      responses:
+        '201':
+          description: Buyer cart created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BuyerCart' }
+        '401': { description: Authentication required }
+  /api/buyer/carts/{id}:
+    get:
+      operationId: getBuyerCart
+      summary: Return an authenticated buyer licence cart
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Buyer cart, content: { application/json: { schema: { $ref: '#/components/schemas/BuyerCart' } } } }
+        '404': { description: Cart not found }
+  /api/buyer/carts/{id}/items:
+    post:
+      operationId: addBuyerCartItem
+      summary: Add a server-validated licence selection to a buyer cart
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BuyerCartItemRequest' }
+      responses:
+        '201': { description: Cart item added, content: { application/json: { schema: { $ref: '#/components/schemas/BuyerCart' } } } }
+        '422': { description: Asset or licence selection is not valid }
+  /api/buyer/carts/{id}/items/{assetId}:
+    delete:
+      operationId: removeBuyerCartItem
+      summary: Remove an asset selection from a buyer cart
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: assetId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Updated buyer cart, content: { application/json: { schema: { $ref: '#/components/schemas/BuyerCart' } } } }
+        '404': { description: Cart or cart item not found }
+  /api/buyer/carts/{id}/validate:
+    post:
+      operationId: validateBuyerCart
+      summary: Revalidate every cart item before canonical per-licence checkout
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Cart is ready for canonical checkout }
+        '422': { description: Cart is empty or contains blocked items }
   /api/subscription/manage-link:
     post:
       operationId: createBuyerSubscriptionManageLink
@@ -2000,6 +2106,68 @@ components:
             properties:
               path: { type: array, items: { oneOf: [{ type: string }, { type: integer }] } }
               code: { type: string }
+      additionalProperties: true
+    BuyerCartItemRequest:
+      type: object
+      required: [assetId, licenceType, territory, durationDays]
+      properties:
+        assetId: { type: string, minLength: 1, maxLength: 160 }
+        licenceType: { type: string, enum: [editorial, commercial, advertising, social, broadcast, exclusive] }
+        territory: { type: string, minLength: 1, maxLength: 80 }
+        durationDays: { type: integer, minimum: 1, maximum: 3650 }
+        includeCustomBuying: { type: boolean, default: false }
+      additionalProperties: false
+    BuyerCart:
+      type: object
+      required: [id, organizationId, buyerId, items, status, totalCredits, createdAt, updatedAt, expiresAt, checkedOutAt, paymentReference]
+      properties:
+        id: { type: string }
+        organizationId: { type: string }
+        buyerId: { type: string }
+        items: { type: array, items: { $ref: '#/components/schemas/BuyerCartItem' } }
+        status: { type: string, enum: [active, checked_out, abandoned, expired] }
+        totalCredits: { type: integer, minimum: 0 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time, nullable: true }
+        checkedOutAt: { type: string, format: date-time, nullable: true }
+        paymentReference: { type: string, nullable: true }
+      additionalProperties: true
+    BuyerCartItem:
+      allOf:
+        - $ref: '#/components/schemas/BuyerCartItemRequest'
+        - type: object
+          required: [creditCost, addedAt]
+          properties:
+            creditCost: { type: integer, minimum: 1, maximum: 100000 }
+            addedAt: { type: string, format: date-time }
+    BuyerUsageReportSummary:
+      type: object
+      required: [id, periodStart, periodEnd, generatedAt, totalLicences, totalSpentCents, creditsUsed, downloadCount]
+      properties:
+        id: { type: string }
+        periodStart: { type: string, format: date-time }
+        periodEnd: { type: string, format: date-time }
+        generatedAt: { type: string, format: date-time }
+        totalLicences: { type: integer, minimum: 0 }
+        totalSpentCents: { type: integer, minimum: 0 }
+        creditsUsed: { type: integer, minimum: 0 }
+        downloadCount: { type: integer, minimum: 0 }
+      additionalProperties: true
+    BuyerUsageReport:
+      type: object
+      required: [id, organizationId, buyerId, periodStart, periodEnd, generatedAt, summary, assets, licences, downloads]
+      properties:
+        id: { type: string }
+        organizationId: { type: string }
+        buyerId: { type: string }
+        periodStart: { type: string, format: date-time }
+        periodEnd: { type: string, format: date-time }
+        generatedAt: { type: string, format: date-time }
+        summary: { type: object, additionalProperties: true }
+        assets: { type: array, items: { type: object, additionalProperties: true } }
+        licences: { type: array, items: { type: object, additionalProperties: true } }
+        downloads: { type: array, items: { type: object, additionalProperties: true } }
       additionalProperties: true
     HealthResponse:
       type: object

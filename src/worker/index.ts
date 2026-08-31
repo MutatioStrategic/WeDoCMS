@@ -38,7 +38,9 @@ import { normalizePaystackPaymentEvent, verifyPaystackWebhook } from "../integra
 import { normalizeDiditStatus, verifyDiditWebhook } from "../integrations/didit";
 import { agreementText, buyerAgreement, paymentDisclosure, sellerAgreement } from "../legal/agreements";
 import { isPayFastIp, payfastAmountCents, verifyPayFastSignature } from "../integrations/payfast";
-import { CREDIT_REFERENCE_UNIT_CENTS, creditPurchaseAmountCents } from "./buyer-finance";
+import { calculateCreditExpiryDate, CREDIT_REFERENCE_UNIT_CENTS, creditPurchaseAmountCents, creditPurchasePricing } from "./buyer-finance";
+import { generateBuyerUsageReport, getBuyerUsageReports } from "./buyer-usage-reporting";
+import { calculateCartTotals, cartItemSchema, createCart, getCart, saveCartItems, type CartItem } from "./licence-cart";
 import { monthlyPayoutSchedule } from "./payout-schedule";
 import { buildStatementCsv, buildStatementPdf } from "./statement-export";
 import { canonicalContract, ocrValidation, sanitizeOcrResult, sha256Hex } from "./seller-workflow";
@@ -318,7 +320,13 @@ async function runMaintenance(env: Bindings): Promise<void> {
     env.DB.prepare("UPDATE campaign_bundle_builds SET status = 'failed', error_text = 'bundle_build_timeout', updated_at = CURRENT_TIMESTAMP WHERE status = 'building' AND started_at < datetime('now', '-1 hour')"),
     env.DB.prepare("UPDATE stream_uploads SET status = 'expired', updated_at = CURRENT_TIMESTAMP WHERE status IN ('created', 'uploading') AND datetime(expires_at) <= CURRENT_TIMESTAMP"),
     env.DB.prepare("UPDATE photographer_subscriptions SET status = 'expired', updated_at = CURRENT_TIMESTAMP WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP"),
+    env.DB.prepare("UPDATE buyer_credit_purchases SET expired_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE status = 'paid' AND expired_at IS NULL AND expires_at IS NOT NULL AND datetime(expires_at) <= CURRENT_TIMESTAMP"),
   ]);
+  await cullExpiredBuyerCarts(env);
+}
+
+async function cullExpiredBuyerCarts(env: Bindings): Promise<void> {
+  await env.DB.prepare("UPDATE shopping_carts SET status = 'expired', updated_at = CURRENT_TIMESTAMP WHERE status = 'active' AND expires_at IS NOT NULL AND datetime(expires_at) <= CURRENT_TIMESTAMP").run();
 }
 
 /** Best-effort transactional email. Never throws into the caller's request path. */
@@ -1868,7 +1876,7 @@ async function mediaAccessDecision(env: Bindings, user: RequestUser | null, asse
     env.DB.prepare(`SELECT id FROM buyer_subscriptions
       WHERE organization_id = ? AND buyer_id = ? AND status IN ('active', 'non-renewing')
       ORDER BY created_at DESC LIMIT 1`).bind(user.organizationId, user.id),
-    env.DB.prepare("SELECT COALESCE(SUM(credits), 0) AS balance FROM buyer_credit_transactions WHERE organization_id = ? AND buyer_id = ?").bind(user.organizationId, user.id),
+    env.DB.prepare("SELECT COALESCE(SUM(CASE WHEN expires_at IS NULL OR datetime(expires_at) > CURRENT_TIMESTAMP THEN credits ELSE 0 END), 0) AS balance FROM buyer_credit_transactions WHERE organization_id = ? AND buyer_id = ?").bind(user.organizationId, user.id),
   ]);
   const subscriptionId = subscription.results.length ? String((subscription.results[0] as Record<string, unknown>).id) : null;
   const subscriptionActive = Boolean(subscriptionId);
@@ -2171,10 +2179,13 @@ app.post("/api/checkout", async (c) => {
   if (access.accessMode === "credits") {
     checkoutStatements.push(
       c.env.DB.prepare(`INSERT INTO buyer_credit_transactions
-        (id, organization_id, buyer_id, transaction_type, credits, amount_cents, reference_type, reference_id, idempotency_key)
-        SELECT ?, ?, ?, 'spend', ?, 0, 'licence', ?, ?
-        WHERE (SELECT COALESCE(SUM(credits), 0) FROM buyer_credit_transactions WHERE organization_id = ? AND buyer_id = ?) >= ?`)
-        .bind(crypto.randomUUID(), user.organizationId, user.id, -access.creditCost, licenceId, creditSpendIdempotencyKey, user.organizationId, user.id, access.creditCost),
+        (id, organization_id, buyer_id, transaction_type, credits, amount_cents, reference_type, reference_id, idempotency_key, expires_at)
+        SELECT ?, ?, ?, 'spend', ?, 0, 'licence', ?, ?,
+          (SELECT MIN(expires_at) FROM buyer_credit_transactions
+            WHERE organization_id = ? AND buyer_id = ? AND credits > 0
+              AND expires_at IS NOT NULL AND datetime(expires_at) > CURRENT_TIMESTAMP)
+        WHERE (SELECT COALESCE(SUM(CASE WHEN expires_at IS NULL OR datetime(expires_at) > CURRENT_TIMESTAMP THEN credits ELSE 0 END), 0) FROM buyer_credit_transactions WHERE organization_id = ? AND buyer_id = ?) >= ?`)
+        .bind(crypto.randomUUID(), user.organizationId, user.id, -access.creditCost, licenceId, creditSpendIdempotencyKey, user.organizationId, user.id, user.organizationId, user.id, access.creditCost),
     );
   }
   if (creditSettlement) {
@@ -2204,7 +2215,7 @@ app.post("/api/checkout", async (c) => {
   const finalized = Number(checkoutResult[checkoutResult.length - 1]?.meta?.changes ?? 0) === 1;
   if (!finalized) {
     await c.env.DB.prepare("UPDATE licences SET status = 'cancelled', payment_reference = ? WHERE id = ? AND status = 'pending'").bind("insufficient-credits", licenceId).run();
-    const balance = await c.env.DB.prepare("SELECT COALESCE(SUM(credits), 0) AS balance FROM buyer_credit_transactions WHERE organization_id = ? AND buyer_id = ?").bind(user.organizationId, user.id).first<{ balance: number }>();
+    const balance = await c.env.DB.prepare("SELECT COALESCE(SUM(CASE WHEN expires_at IS NULL OR datetime(expires_at) > CURRENT_TIMESTAMP THEN credits ELSE 0 END), 0) AS balance FROM buyer_credit_transactions WHERE organization_id = ? AND buyer_id = ?").bind(user.organizationId, user.id).first<{ balance: number }>();
     return c.json({ blocked: true, code: "insufficient_credits", error: `You need ${access.creditCost} credits to unlock this media. Buy credits and try again.`, creditCost: access.creditCost, creditBalance: Number(balance?.balance ?? 0), creditsRequired: true, accessMode: "credits", subscriptionIncluded: access.subscriptionIncluded, subscriptionActive: access.subscriptionActive }, 402);
   }
   const creditsRemaining = access.accessMode === "credits" ? Number(access.creditBalance ?? 0) - access.creditCost : access.creditBalance;
@@ -2340,20 +2351,21 @@ app.get("/api/demo/payments/:licenceId/complete", async (c) => {
     WHERE l.id = ? AND l.organization_id = ? AND l.buyer_id = ?
   `).bind(licenceId, user.organizationId, user.id).first<{ id: string; organization_id: string; buyer_id: string; price_cents: number; status: string; payment_provider: string | null; payment_reference: string | null; asset_title: string }>();
   const creditPurchase = await c.env.DB.prepare(`
-    SELECT id, organization_id, buyer_id, credits, amount_cents, status, payment_provider, payment_reference
+    SELECT id, organization_id, buyer_id, credits, amount_cents, status, payment_provider, payment_reference, expires_at
     FROM buyer_credit_purchases
     WHERE id = ? AND organization_id = ? AND buyer_id = ?
-  `).bind(licenceId, user.organizationId, user.id).first<{ id: string; organization_id: string; buyer_id: string; credits: number; amount_cents: number; status: string; payment_provider: string | null; payment_reference: string | null }>();
+  `).bind(licenceId, user.organizationId, user.id).first<{ id: string; organization_id: string; buyer_id: string; credits: number; amount_cents: number; status: string; payment_provider: string | null; payment_reference: string | null; expires_at: string | null }>();
   if (!licence && creditPurchase) {
     if (creditPurchase.status !== "paid" && (creditPurchase.payment_provider !== "demo" || creditPurchase.payment_reference !== `demo:${creditPurchase.id}`)) {
       return c.json({ error: "Start the demo checkout before completing this credit purchase" }, 409);
     }
     if (creditPurchase.status === "pending") {
       const eventId = `demo:credit:${creditPurchase.id}`;
+      const creditExpiry = creditPurchase.expires_at ?? calculateCreditExpiryDate();
       try {
         await c.env.DB.batch([
-          c.env.DB.prepare("UPDATE buyer_credit_purchases SET status = 'paid', payment_provider = 'demo', payment_reference = ?, paid_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ? AND buyer_id = ? AND status = 'pending'").bind(eventId, creditPurchase.id, user.organizationId, user.id),
-          c.env.DB.prepare("INSERT OR IGNORE INTO buyer_credit_transactions (id, organization_id, buyer_id, transaction_type, credits, amount_cents, reference_type, reference_id, idempotency_key) VALUES (?, ?, ?, 'purchase', ?, ?, 'credit_purchase', ?, ?)").bind(crypto.randomUUID(), user.organizationId, user.id, creditPurchase.credits, creditPurchase.amount_cents, creditPurchase.id, eventId),
+          c.env.DB.prepare("UPDATE buyer_credit_purchases SET status = 'paid', payment_provider = 'demo', payment_reference = ?, paid_at = CURRENT_TIMESTAMP, expires_at = COALESCE(expires_at, ?), updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ? AND buyer_id = ? AND status = 'pending'").bind(eventId, creditExpiry, creditPurchase.id, user.organizationId, user.id),
+          c.env.DB.prepare("INSERT OR IGNORE INTO buyer_credit_transactions (id, organization_id, buyer_id, transaction_type, credits, amount_cents, reference_type, reference_id, idempotency_key, expires_at) VALUES (?, ?, ?, 'purchase', ?, ?, 'credit_purchase', ?, ?, ?)").bind(crypto.randomUUID(), user.organizationId, user.id, creditPurchase.credits, creditPurchase.amount_cents, creditPurchase.id, eventId, creditExpiry),
           c.env.DB.prepare(`INSERT OR IGNORE INTO payment_webhook_events
             (id, provider, provider_event_id, event_type, credit_purchase_id, product_type, amount_cents, currency, payload_json, status, processed_at)
             VALUES (?, 'demo', ?, 'payment_succeeded', ?, 'credit_purchase', ?, 'ZAR', ?, 'processed', CURRENT_TIMESTAMP)`)
@@ -2815,10 +2827,12 @@ app.post("/api/buyer/credits/checkout", async (c) => {
   if (!licencePaymentProviderConfigured(c.env)) return c.json({ error: "Payment provider is not configured for credit purchases" }, 503);
   const payload = creditPurchaseRequestSchema.parse(await c.req.json());
   if (!allowedPaymentReturnUrl(c.env, payload.successUrl) || !allowedPaymentReturnUrl(c.env, payload.cancelUrl)) return c.json({ error: "Payment return URLs must belong to this archive deployment" }, 422);
-  const amountCents = creditPurchaseAmountCents(payload.credits);
+  const pricing = creditPurchasePricing(payload.credits);
+  const amountCents = pricing.amountCents;
+  const expiresAt = calculateCreditExpiryDate();
   const purchaseId = crypto.randomUUID();
-  await c.env.DB.prepare("INSERT INTO buyer_credit_purchases (id, organization_id, buyer_id, credits, amount_cents, currency) VALUES (?, ?, ?, ?, ?, 'ZAR')")
-    .bind(purchaseId, user.organizationId, user.id, payload.credits, amountCents).run();
+  await c.env.DB.prepare("INSERT INTO buyer_credit_purchases (id, organization_id, buyer_id, credits, amount_cents, currency, expires_at, unit_price_cents, discount_tier, discount_amount_cents) VALUES (?, ?, ?, ?, ?, 'ZAR', ?, ?, ?, ?)")
+    .bind(purchaseId, user.organizationId, user.id, payload.credits, amountCents, expiresAt, pricing.unitPriceCents, pricing.discountTier, pricing.discountAmountCents).run();
   try {
     const session = await new IntegrationContainer(c.env).payments.get(c.env.PAYMENT_PROVIDER ?? "demo").createCheckoutSession({
       idempotencyKey: `credit-purchase:${purchaseId}`,
@@ -2829,11 +2843,11 @@ app.post("/api/buyer/credits/checkout", async (c) => {
       buyer: { id: user.id, email: user.email },
       successUrl: payload.successUrl,
       cancelUrl: payload.cancelUrl,
-      metadata: { organizationId: user.organizationId, userId: user.id, productType: "credit_purchase", credits: String(payload.credits), creditUnitCents: String(CREDIT_REFERENCE_UNIT_CENTS) },
+       metadata: { organizationId: user.organizationId, userId: user.id, productType: "credit_purchase", credits: String(payload.credits), creditUnitCents: String(pricing.unitPriceCents), discountTier: pricing.discountTier },
     });
     await c.env.DB.prepare("UPDATE buyer_credit_purchases SET payment_provider = ?, payment_reference = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ?")
       .bind(c.env.PAYMENT_PROVIDER, session.providerReference ?? session.id, purchaseId, user.organizationId).run();
-    return c.json({ purchaseId, provider: session.provider, checkoutUrl: session.checkoutUrl, status: session.status, credits: payload.credits, amountCents, currency: "CREDITS", showCurrencyReference: currencyReferenceEnabled(c.env), ...(currencyReferenceEnabled(c.env) ? { referenceAmountCents: amountCents } : {}) }, 201, { Location: `/api/my/credits` });
+    return c.json({ purchaseId, provider: session.provider, checkoutUrl: session.checkoutUrl, status: session.status, credits: payload.credits, amountCents, unitPriceCents: pricing.unitPriceCents, discountTier: pricing.discountTier, discountAmountCents: pricing.discountAmountCents, expiresAt, currency: "CREDITS", showCurrencyReference: currencyReferenceEnabled(c.env), ...(currencyReferenceEnabled(c.env) ? { referenceAmountCents: amountCents } : {}) }, 201, { Location: `/api/my/credits` });
   } catch (error) {
     await c.env.DB.prepare("UPDATE buyer_credit_purchases SET status = 'failed', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND organization_id = ? AND status = 'pending'").bind(purchaseId, user.organizationId).run();
     logEvent("error", "payment.credit_checkout_failed", c.get("trace"), { purchaseId, provider: c.env.PAYMENT_PROVIDER, error: error instanceof Error ? error.message : "unknown" });
@@ -2849,9 +2863,9 @@ app.get("/api/my/credits", async (c) => {
   if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, 403);
   await ensureIntroductoryCreditGrant(c.env, user);
   const [balance, transactions, pending] = await c.env.DB.batch([
-    c.env.DB.prepare("SELECT COALESCE(SUM(credits), 0) AS balance FROM buyer_credit_transactions WHERE organization_id = ? AND buyer_id = ?").bind(user.organizationId, user.id),
-    c.env.DB.prepare("SELECT id, transaction_type, credits, amount_cents, reference_type, reference_id, created_at FROM buyer_credit_transactions WHERE organization_id = ? AND buyer_id = ? ORDER BY created_at DESC LIMIT 100").bind(user.organizationId, user.id),
-    c.env.DB.prepare("SELECT id, credits, amount_cents, currency, status, created_at FROM buyer_credit_purchases WHERE organization_id = ? AND buyer_id = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 20").bind(user.organizationId, user.id),
+    c.env.DB.prepare("SELECT COALESCE(SUM(CASE WHEN expires_at IS NULL OR datetime(expires_at) > CURRENT_TIMESTAMP THEN credits ELSE 0 END), 0) AS balance FROM buyer_credit_transactions WHERE organization_id = ? AND buyer_id = ?").bind(user.organizationId, user.id),
+    c.env.DB.prepare("SELECT id, transaction_type, credits, amount_cents, reference_type, reference_id, expires_at, created_at FROM buyer_credit_transactions WHERE organization_id = ? AND buyer_id = ? ORDER BY created_at DESC LIMIT 100").bind(user.organizationId, user.id),
+    c.env.DB.prepare("SELECT id, credits, amount_cents, currency, status, unit_price_cents, discount_tier, discount_amount_cents, expires_at, created_at FROM buyer_credit_purchases WHERE organization_id = ? AND buyer_id = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 20").bind(user.organizationId, user.id),
   ]);
   const showCurrency = currencyReferenceEnabled(c.env);
   return c.json({
@@ -2867,6 +2881,105 @@ app.get("/api/my/credits", async (c) => {
     showCurrencyReference: showCurrency,
     ...(showCurrency ? { referenceAmountCents: creditPurchaseAmountCents(MEDIA_MEMBERSHIP_CREDITS) } : {}),
   });
+});
+
+app.get("/api/buyer/usage-reports", async (c) => {
+  const user = await buyerAccount(c);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, user ? 403 : 401);
+  try {
+    return c.json({ results: await getBuyerUsageReports(c.env, user.organizationId, user.id) });
+  } catch (error) {
+    logEvent("warn", "buyer.usage_reports_unavailable", c.get("trace"), { error: error instanceof Error ? error.message : "unknown" });
+    return c.json({ error: "Buyer usage reports are not available for this deployment" }, 503);
+  }
+});
+
+app.get("/api/buyer/usage-report", async (c) => {
+  const user = await buyerAccount(c);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, user ? 403 : 401);
+  const end = c.req.query("periodEnd")?.trim() || new Date().toISOString();
+  const start = c.req.query("periodStart")?.trim() || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  try {
+    return c.json(await generateBuyerUsageReport(c.env, user.organizationId, user.id, start, end));
+  } catch (error) {
+    logEvent("warn", "buyer.usage_report_failed", c.get("trace"), { error: error instanceof Error ? error.message : "unknown" });
+    return c.json({ error: error instanceof Error ? error.message : "Buyer usage report could not be generated" }, 422);
+  }
+});
+
+const cartItemRequestSchema = z.object({
+  assetId: z.string().trim().min(1).max(160),
+  licenceType: z.enum(["editorial", "commercial", "advertising", "social", "broadcast", "exclusive"]),
+  territory: z.string().trim().min(1).max(80),
+  durationDays: z.number().int().positive().max(3650),
+  includeCustomBuying: z.boolean().default(false),
+});
+
+app.post("/api/buyer/carts", async (c) => {
+  const user = await buyerAccount(c);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, user ? 403 : 401);
+  return c.json(await createCart(c.env, user.organizationId, user.id), 201);
+});
+
+app.get("/api/buyer/carts", async (c) => {
+  const user = await buyerAccount(c);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, user ? 403 : 401);
+  const rows = await c.env.DB.prepare("SELECT id FROM shopping_carts WHERE organization_id = ? AND buyer_id = ? AND status = 'active' ORDER BY updated_at DESC LIMIT 20").bind(user.organizationId, user.id).all<{ id: string }>();
+  const carts = (await Promise.all(rows.results.map((row) => getCart(c.env, row.id, user.organizationId, user.id)))).filter((cart): cart is NonNullable<typeof cart> => Boolean(cart));
+  return c.json({ results: carts });
+});
+
+app.get("/api/buyer/carts/:id", async (c) => {
+  const user = await buyerAccount(c);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, user ? 403 : 401);
+  const cart = await getCart(c.env, c.req.param("id"), user.organizationId, user.id);
+  return cart ? c.json(cart) : c.json({ error: "Cart not found" }, 404);
+});
+
+app.post("/api/buyer/carts/:id/items", async (c) => {
+  const user = await buyerAccount(c);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, user ? 403 : 401);
+  const cart = await getCart(c.env, c.req.param("id"), user.organizationId, user.id);
+  if (!cart) return c.json({ error: "Cart not found" }, 404);
+  if (cart.status !== "active") return c.json({ error: "Cart is not active" }, 409);
+  const payload = cartItemRequestSchema.parse(await c.req.json());
+  const asset = await governanceAsset(c, payload.assetId, user.organizationId);
+  if (!asset || asset.status !== "published") return c.json({ error: "Only published assets can be added to a cart" }, 422);
+  if (asset.monetizationModel === "custom_quote" && !payload.includeCustomBuying) return c.json({ error: "Custom buying must be explicitly enabled for this asset" }, 422);
+  const request = { assetId: payload.assetId, licenceType: payload.licenceType, territory: payload.territory, durationDays: payload.durationDays };
+  const validation = archiveDomain.evaluateLicenceRequest(asset, request);
+  if (!validation.allowed) return c.json({ error: "This asset is not ready for the selected licence", blockingReasons: validation.blockingReasons }, 422);
+  if (cart.items.some((item) => item.assetId === payload.assetId && item.licenceType === payload.licenceType && item.territory === payload.territory && item.durationDays === payload.durationDays)) return c.json({ error: "That licence selection is already in the cart" }, 409);
+  const item: CartItem = cartItemSchema.parse({ ...payload, creditCost: licenceCreditCost(request, asset), addedAt: new Date().toISOString() });
+  return c.json(await saveCartItems(c.env, cart, [...cart.items, item]), 201);
+});
+
+app.delete("/api/buyer/carts/:id/items/:assetId", async (c) => {
+  const user = await buyerAccount(c);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, user ? 403 : 401);
+  const cart = await getCart(c.env, c.req.param("id"), user.organizationId, user.id);
+  if (!cart) return c.json({ error: "Cart not found" }, 404);
+  if (cart.status !== "active") return c.json({ error: "Cart is not active" }, 409);
+  const items = cart.items.filter((item) => item.assetId !== c.req.param("assetId"));
+  if (items.length === cart.items.length) return c.json({ error: "Cart item not found" }, 404);
+  return c.json(await saveCartItems(c.env, cart, items));
+});
+
+app.post("/api/buyer/carts/:id/validate", async (c) => {
+  const user = await buyerAccount(c);
+  if (!user || !allowedRole(user, ["buyer", "contributor", "editor", "admin"])) return c.json({ error: "Authenticated buyer required" }, user ? 403 : 401);
+  const cart = await getCart(c.env, c.req.param("id"), user.organizationId, user.id);
+  if (!cart) return c.json({ error: "Cart not found" }, 404);
+  if (cart.status !== "active") return c.json({ valid: false, status: cart.status, items: cart.items, error: "Cart is not active" }, 409);
+  if (!cart.items.length) return c.json({ valid: false, totalCredits: 0, items: [], error: "Cart is empty" }, 422);
+  const items = await Promise.all(cart.items.map(async (item) => {
+    const asset = await governanceAsset(c, item.assetId, user.organizationId);
+    if (!asset) return { ...item, valid: false, reason: "Asset is no longer available" };
+    const validation = archiveDomain.evaluateLicenceRequest(asset, item);
+    return { ...item, valid: validation.allowed, reason: validation.allowed ? null : validation.blockingReasons[0] ?? "Licence validation failed", assetTitle: asset.title };
+  }));
+  const valid = items.every((item) => item.valid);
+  return c.json({ valid, totalCredits: calculateCartTotals(cart.items).totalCredits, items, nextAction: valid ? "Submit each item through the canonical /api/checkout route after confirming the displayed terms." : "Remove or update blocked items before checkout." }, valid ? 200 : 422);
 });
 
 app.get("/api/my/purchases", async (c) => {
@@ -3020,29 +3133,31 @@ app.post("/api/webhooks/payments", async (c) => {
         c.env.DB.prepare("INSERT OR IGNORE INTO buyer_subscription_payments (id, subscription_id, provider, provider_event_id, provider_reference, event_type, amount_cents, currency, status, paid_at, payload_json) VALUES (?, ?, 'paystack', ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'success' THEN CURRENT_TIMESTAMP ELSE NULL END, ?)").bind(crypto.randomUUID(), subscription.id, payload.eventId, payload.paymentReference ?? null, payload.type, payload.amountCents, payload.currency.toUpperCase(), payload.type === "payment_succeeded" ? "success" : payload.type === "refund" ? "refunded" : "failed", payload.type === "payment_succeeded" ? "success" : "failed", body),
       ]);
     } else if (payload.productType === "credit_purchase") {
-      const purchase = await c.env.DB.prepare("SELECT id, organization_id, buyer_id, credits, amount_cents, status FROM buyer_credit_purchases WHERE id = ?").bind(payload.creditPurchaseId).first<{ id: string; organization_id: string; buyer_id: string; credits: number; amount_cents: number; status: string }>();
+      const purchase = await c.env.DB.prepare("SELECT id, organization_id, buyer_id, credits, amount_cents, status, expires_at, unit_price_cents FROM buyer_credit_purchases WHERE id = ?").bind(payload.creditPurchaseId).first<{ id: string; organization_id: string; buyer_id: string; credits: number; amount_cents: number; status: string; expires_at: string | null; unit_price_cents: number | null }>();
       if (!purchase) throw new Error("Credit purchase not found");
       if (Number(purchase.amount_cents) !== payload.amountCents && payload.type === "payment_succeeded") throw new Error("Payment amount does not match the credit purchase");
       if (payload.type === "payment_succeeded") {
         if (purchase.status !== "pending") throw new Error("Credit purchase is not awaiting payment");
+        const creditExpiry = purchase.expires_at ?? calculateCreditExpiryDate();
         await c.env.DB.batch([
-          c.env.DB.prepare("UPDATE buyer_credit_purchases SET status = 'paid', payment_provider = ?, payment_reference = ?, paid_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'").bind(payload.provider, payload.paymentReference ?? payload.eventId, purchase.id),
-          c.env.DB.prepare("INSERT OR IGNORE INTO buyer_credit_transactions (id, organization_id, buyer_id, transaction_type, credits, amount_cents, reference_type, reference_id, idempotency_key) VALUES (?, ?, ?, 'purchase', ?, ?, 'credit_purchase', ?, ?)").bind(crypto.randomUUID(), purchase.organization_id, purchase.buyer_id, purchase.credits, purchase.amount_cents, purchase.id, `${payload.provider}:${payload.eventId}`),
+          c.env.DB.prepare("UPDATE buyer_credit_purchases SET status = 'paid', payment_provider = ?, payment_reference = ?, paid_at = CURRENT_TIMESTAMP, expires_at = COALESCE(expires_at, ?), updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'").bind(payload.provider, payload.paymentReference ?? payload.eventId, creditExpiry, purchase.id),
+          c.env.DB.prepare("INSERT OR IGNORE INTO buyer_credit_transactions (id, organization_id, buyer_id, transaction_type, credits, amount_cents, reference_type, reference_id, idempotency_key, expires_at) VALUES (?, ?, ?, 'purchase', ?, ?, 'credit_purchase', ?, ?, ?)").bind(crypto.randomUUID(), purchase.organization_id, purchase.buyer_id, purchase.credits, purchase.amount_cents, purchase.id, `${payload.provider}:${payload.eventId}`, creditExpiry),
         ]);
         transactionId = purchase.id;
       } else if (payload.type === "payment_failed") {
         await c.env.DB.prepare("UPDATE buyer_credit_purchases SET status = 'failed', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'").bind(purchase.id).run();
       } else if (payload.type === "refund" || payload.type === "chargeback") {
         if (purchase.status !== "paid") throw new Error("Credit purchase is not paid");
+        const unitPriceCents = Math.max(1, Number(purchase.unit_price_cents) || CREDIT_REFERENCE_UNIT_CENTS);
         const credits = payload.amountCents === Number(purchase.amount_cents)
           ? Number(purchase.credits)
-          : payload.amountCents % CREDIT_REFERENCE_UNIT_CENTS === 0 && payload.amountCents <= Number(purchase.amount_cents)
-            ? payload.amountCents / CREDIT_REFERENCE_UNIT_CENTS
+          : payload.amountCents % unitPriceCents === 0 && payload.amountCents <= Number(purchase.amount_cents)
+            ? payload.amountCents / unitPriceCents
             : 0;
         if (!Number.isInteger(credits) || credits < 1 || credits > Number(purchase.credits)) throw new Error("Credit refund must be a whole number of purchased credits");
         await c.env.DB.batch([
           c.env.DB.prepare("UPDATE buyer_credit_purchases SET status = 'refunded', updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(purchase.id),
-          c.env.DB.prepare("INSERT OR IGNORE INTO buyer_credit_transactions (id, organization_id, buyer_id, transaction_type, credits, amount_cents, reference_type, reference_id, idempotency_key) VALUES (?, ?, ?, 'refund', ?, ?, 'credit_purchase', ?, ?)").bind(crypto.randomUUID(), purchase.organization_id, purchase.buyer_id, -credits, -payload.amountCents, purchase.id, `${payload.provider}:${payload.eventId}`),
+          c.env.DB.prepare("INSERT OR IGNORE INTO buyer_credit_transactions (id, organization_id, buyer_id, transaction_type, credits, amount_cents, reference_type, reference_id, idempotency_key, expires_at) VALUES (?, ?, ?, 'refund', ?, ?, 'credit_purchase', ?, ?, ?)").bind(crypto.randomUUID(), purchase.organization_id, purchase.buyer_id, -credits, -payload.amountCents, purchase.id, `${payload.provider}:${payload.eventId}`, purchase.expires_at),
          ]);
          transactionId = purchase.id;
       }
@@ -4072,6 +4187,12 @@ app.get("/api/assets/:id/preview-access", async (c) => {
         WHERE l.asset_id = a.id AND l.organization_id = a.organization_id
           AND l.buyer_id = ? AND l.status = 'paid' AND COALESCE(l.payment_provider, '') <> 'subscription'
       ) AS paid_entitlement,
+      (
+        SELECT l.id FROM licences l
+        WHERE l.asset_id = a.id AND l.organization_id = a.organization_id
+          AND l.buyer_id = ? AND l.status = 'paid' AND COALESCE(l.payment_provider, '') <> 'subscription'
+        ORDER BY l.created_at DESC LIMIT 1
+      ) AS paid_licence_id,
       EXISTS(
         SELECT 1 FROM photographer_subscriptions s
         WHERE s.organization_id = a.organization_id AND s.photographer_id = a.owner_id
@@ -4155,7 +4276,7 @@ app.on(["GET", "HEAD"], "/api/assets/:id/original", async (c) => {
       ) AS introductory_free_entitlement
     FROM assets a
     WHERE a.id = ? AND a.organization_id = ?
-  `).bind(user.id, user.id, user.id, user.id, c.req.param("id"), user.organizationId).first<Record<string, unknown>>();
+  `).bind(user.id, user.id, user.id, user.id, user.id, c.req.param("id"), user.organizationId).first<Record<string, unknown>>();
   if (!row) return c.json({ error: "Original media not found" }, 404);
   const elevated = allowedRole(user, ["editor", "admin"]);
   if (allowedRole(user, ["buyer", "contributor", "editor", "admin"])) await ensureIntroductoryCreditGrant(c.env, user);
@@ -4190,7 +4311,7 @@ app.on(["GET", "HEAD"], "/api/assets/:id/original", async (c) => {
       c.env.DB.prepare(`INSERT OR IGNORE INTO buyer_free_downloads (id, organization_id, buyer_id, asset_id, object_key)
         SELECT ?, ?, ?, ?, ?
         WHERE (SELECT COUNT(*) FROM buyer_free_downloads WHERE organization_id = ? AND buyer_id = ?) < ?
-          AND (SELECT COALESCE(SUM(credits), 0) FROM buyer_credit_transactions WHERE organization_id = ? AND buyer_id = ?) >= ?`)
+          AND (SELECT COALESCE(SUM(CASE WHEN expires_at IS NULL OR datetime(expires_at) > CURRENT_TIMESTAMP THEN credits ELSE 0 END), 0) FROM buyer_credit_transactions WHERE organization_id = ? AND buyer_id = ?) >= ?`)
         .bind(claimId, user.organizationId, user.id, row.id, originalKey, user.organizationId, user.id, freeLimit, user.organizationId, user.id, INTRODUCTORY_FREE_CREDIT_COST),
       c.env.DB.prepare(`INSERT OR IGNORE INTO buyer_credit_transactions
         (id, organization_id, buyer_id, transaction_type, credits, amount_cents, reference_type, reference_id, idempotency_key)
@@ -4218,6 +4339,17 @@ app.on(["GET", "HEAD"], "/api/assets/:id/original", async (c) => {
     await c.env.DB.prepare("INSERT INTO media_download_events (id, organization_id, asset_id, user_id, entitlement_type, object_key) VALUES (?, ?, ?, ?, ?, ?)")
       .bind(crypto.randomUUID(), user.organizationId, row.id, user.id, entitlementType, originalKey).run();
   }
+  await c.env.DB.prepare(`INSERT INTO asset_usage_logs
+    (id, organization_id, asset_id, licence_id, user_id, action_type, metadata_json)
+    VALUES (?, ?, ?, ?, ?, 'download', ?)`)
+    .bind(
+      crypto.randomUUID(),
+      user.organizationId,
+      row.id,
+      typeof row.paid_licence_id === "string" ? row.paid_licence_id : null,
+      user.id,
+      JSON.stringify({ entitlementType, source: "original" }),
+    ).run();
   recordMetric(c.env, "asset_download", c.get("trace"), 1, [user.organizationId, String(row.id), entitlementType]);
   if (streamFromBinding) {
     if (c.req.method === "HEAD") {
