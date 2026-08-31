@@ -1,23 +1,60 @@
+```gitignore
+# Dependencies
 node_modules/
+
+# Build outputs
 dist/
-contracts/reports/
-worker-smoke*.log
+build/
+target/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+.venv.bak/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
 *.log
-scripts/_tmp-*.mjs
-scripts/_tmp-test-photo-library.*
-.tmp-ai-previews-*/
-.wrangler/
-.security-dry-run/
-security-dry-run/
-security-dry-run-*/
-worker-smoke-*.log
-worker-*.log
-worker-*.log
-.dev.vars
+*.pot
+*.po
+*~
+.pytest_cache/
+.mypy_cache/
+.hypothesis/
+
+# Logs
+*.log
+
+# Environment variables
 .env
-.backups/
-*.sql.gz
-fixtures/demo-media/
-supabase/.temp/
-fixtures/test-photo-library/
-worker-configuration.d.ts
+.env.local
+.env.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Coverage
+coverage/
+htmlcov/
+.coverage
+```
