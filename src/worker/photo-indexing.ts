@@ -1,5 +1,6 @@
 import { logEvent, recordMetric, type ObservabilityBindings, type TraceContext } from "./observability";
 import { createPresignedR2Url } from "./r2-presign";
+import { assetWithContributorSelect } from "./asset-select";
 import { archiveDomain } from "../shared";
 
 export type PhotoJobOperation = "enrich" | "sync_index";
@@ -284,9 +285,19 @@ function base64Bytes(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+export function isLocalVisionProvider(provider?: string): boolean {
+  const normalized = (provider ?? "").trim().toLowerCase();
+  return normalized === "ollama" || normalized === "ollama-tunnel";
+}
+
+export function isWorkersAiVisionProvider(provider?: string): boolean {
+  const normalized = (provider ?? "").trim().toLowerCase();
+  return normalized === "" || normalized === "workers-ai";
+}
+
 export async function runPhotoVision(env: PhotoPipelineBindings, model: string, image: Uint8Array, aiImage: string): Promise<unknown> {
   const provider = (env.PHOTO_VISION_PROVIDER ?? "").trim().toLowerCase();
-  if (provider === "ollama" || provider === "ollama-tunnel") {
+  if (isLocalVisionProvider(provider)) {
     const remote = provider === "ollama-tunnel";
     let endpoint: URL;
     try {
@@ -314,6 +325,9 @@ export async function runPhotoVision(env: PhotoPipelineBindings, model: string, 
     if (!response.ok) throw new PhotoPipelineError(`Local vision provider returned HTTP ${response.status}`, response.status >= 500 ? "retryable" : "permanent");
     const body = await response.json() as { response?: unknown; thinking?: unknown; message?: { content?: unknown } };
     return body.response || body.thinking || body.message?.content || body;
+  }
+  if (!isWorkersAiVisionProvider(provider)) {
+    throw new PhotoPipelineError(`Vision provider '${provider}' is not supported`, "permanent");
   }
   if (!env.AI) throw new PhotoPipelineError("AI binding is not configured for photo enrichment", "retryable");
   return env.AI.run(model, { task: "query", image: aiImage, question: PHOTO_VISION_PROMPT, reasoning: false, stream: false, temperature: 0, max_tokens: 900 });
@@ -345,7 +359,7 @@ function parseVisionObject(value: unknown): { metadata: VisionMetadata; malforme
   } catch {
     return { metadata: emptyVisionMetadata(), malformed: true };
   }
-  const rawLocationType = asString(parsed.locationType ?? parsed.location_type).toLowerCase().replace(/[\s-]+/g, "_");
+  const rawLocationType = asString(parsed.locationType ?? parsed.location_type ?? parsed.visualLocationType ?? parsed.visual_location_type).toLowerCase().replace(/[\s-]+/g, "_");
   const rawSceneContext = asString(parsed.sceneContext ?? parsed.scene_context).toLowerCase().replace(/[\s-]+/g, "_");
   const rawCategory = asString(parsed.primaryCategory ?? parsed.primary_category).toLowerCase().replace(/[\s-]+/g, "_");
   const rawReadability = asString(parsed.textReadability ?? parsed.text_readability).toLowerCase();
@@ -355,6 +369,8 @@ function parseVisionObject(value: unknown): { metadata: VisionMetadata; malforme
     ? confidenceSource as Record<string, unknown>
     : {};
   const fieldConfidences = Object.fromEntries(Object.entries(confidenceRecord).map(([key, confidence]) => [key, clampConfidence(confidence)]));
+  if (fieldConfidences.locationType === undefined && fieldConfidences.visualLocationType !== undefined) fieldConfidences.locationType = fieldConfidences.visualLocationType;
+  if (fieldConfidences.locationType === undefined && fieldConfidences.visual_location_type !== undefined) fieldConfidences.locationType = fieldConfidences.visual_location_type;
   const metadata: VisionMetadata = {
     description: asString(parsed.description).slice(0, 1200),
     visibleText: asString(parsed.visibleText ?? parsed.visible_text ?? parsed.ocrText).slice(0, 2000),
@@ -378,7 +394,7 @@ function unwrapVisionResult(value: unknown, depth = 0): unknown {
   if (typeof value === "string") return value.trim();
   if (typeof value !== "object" || Array.isArray(value)) return value;
   const record = value as Record<string, unknown>;
-  const metadataKeys = ["description", "visibleText", "visible_text", "subjectTags", "subject_tags", "locationType", "location_type", "sceneContext", "scene_context", "primaryCategory", "primary_category"];
+  const metadataKeys = ["description", "visibleText", "visible_text", "subjectTags", "subject_tags", "locationType", "location_type", "visualLocationType", "visual_location_type", "sceneContext", "scene_context", "primaryCategory", "primary_category"];
   if (metadataKeys.some((key) => key in record)) return record;
   for (const key of ["answer", "response", "output", "result", "data"]) {
     if (record[key] !== undefined && record[key] !== null) {
@@ -483,6 +499,16 @@ export function photoJobMatchesAsset(
   asset: Pick<AssetRow, "asset_revision" | "source_etag"> | Record<string, unknown>,
 ): boolean {
   return Number(asset.asset_revision) === job.assetRevision && String(asset.source_etag ?? "") === String(job.sourceEtag ?? "");
+}
+
+export function photoEnrichmentWorkflowState(asset: { status?: unknown; workflow_stage?: unknown }): {
+  status: "draft" | "needs_review";
+  workflowStage: "ingestion" | "curator_correction";
+} {
+  const sellerDraft = String(asset.status ?? "") === "draft" && String(asset.workflow_stage ?? "") === "ingestion";
+  return sellerDraft
+    ? { status: "draft", workflowStage: "ingestion" }
+    : { status: "needs_review", workflowStage: "curator_correction" };
 }
 
 function vectorAssetId(vectorId: string): string {
@@ -759,11 +785,18 @@ async function enrichPhoto(env: PhotoPipelineBindings, job: PhotoEnrichmentJob, 
     await markJob(env, job.jobId, "skipped", { error: "not-an-indexable-image", errorClass: "permanent" });
     return;
   }
+  // The Dynamic seller workspace shares this queue but has a stricter
+  // hand-off: AI may prepare editable values, yet the seller must still save
+  // or submit the private draft. Direct WeDoCMS uploads already enter the
+  // editor queue and keep their existing needs_review transition.
+  const workflowState = photoEnrichmentWorkflowState(asset);
   const cached = cachedVisionMetadata(asset, job);
   let preparedImage: PreparedVisionImage = { bytes: null, contentType: "image/jpeg", transformed: false, aiInput: null };
   let image: Uint8Array | null = null;
   const visionProvider = (env.PHOTO_VISION_PROVIDER ?? "").trim().toLowerCase();
-  const localVision = visionProvider === "ollama" || visionProvider === "ollama-tunnel";
+  const localVision = isLocalVisionProvider(visionProvider);
+  const workersAiVision = isWorkersAiVisionProvider(visionProvider);
+  if (!localVision && !workersAiVision) throw new PhotoPipelineError(`Vision provider '${visionProvider}' is not supported`, "permanent");
   const model = localVision ? `ollama:${env.LOCAL_VISION_MODEL?.trim() || "moondream"}` : (env.PHOTO_VISION_MODEL ?? DEFAULT_VISION_MODEL);
   let vision: unknown = cached;
   let classified: VisionClassification;
@@ -807,7 +840,7 @@ async function enrichPhoto(env: PhotoPipelineBindings, job: PhotoEnrichmentJob, 
       detected_language = ?, text_readability = ?, ocr_confidence = ?, ai_field_confidences = ?,
       enrichment_validation_json = ?, ai_confidence = ?, enriched_revision = ?,
       metadata_review_status = 'needs_context', metadata_review_note = ?, metadata_provenance = 'ai_suggested',
-      status = 'needs_review', workflow_stage = 'curator_correction', updated_at = CURRENT_TIMESTAMP
+      status = ?, workflow_stage = ?, updated_at = CURRENT_TIMESTAMP
     WHERE id = ? AND asset_revision = ? AND COALESCE(source_etag, '') = COALESCE(?, '') AND status <> 'published'
   `).bind(
     fallback.description, fallback.caption,
@@ -816,6 +849,7 @@ async function enrichPhoto(env: PhotoPipelineBindings, job: PhotoEnrichmentJob, 
     JSON.stringify(metadata.sceneAttributes), metadata.detectedLanguage, metadata.textReadability,
     metadata.fieldConfidences.visibleText ?? null, JSON.stringify(metadata.fieldConfidences),
     JSON.stringify(classified.validation), metadata.confidence, job.assetRevision, reviewNote,
+    workflowState.status, workflowState.workflowStage,
     asset.id, job.assetRevision, job.sourceEtag,
   ).run();
   if (result.meta.changes === 0) {
@@ -1069,10 +1103,13 @@ export async function processPhotoJob(env: PhotoPipelineBindings, job: PhotoEnri
           .bind(deadLettered ? "error" : "pending", deadLettered ? "dead_lettered" : "retry_pending", job.assetId, job.assetRevision).run();
       }
     } else {
-      await env.DB.prepare(`UPDATE assets SET status = 'needs_review', workflow_stage = ?, metadata_review_status = ?,
+      const failedAsset = await getAsset(env, job.assetId);
+      const sellerDraft = photoEnrichmentWorkflowState(failedAsset ?? {}).status === "draft";
+      await env.DB.prepare(`UPDATE assets SET status = ?, workflow_stage = ?, metadata_review_status = ?,
         metadata_review_note = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND asset_revision = ?`)
         .bind(
-          deadLettered ? "curator_correction" : "ai_tagging",
+          sellerDraft ? "draft" : "needs_review",
+          sellerDraft ? "ingestion" : deadLettered ? "curator_correction" : "ai_tagging",
           deadLettered ? "blocked" : "needs_context",
           deadLettered ? `AI enrichment stopped after a ${errorClass} failure; an editor can correct metadata or replay the job.` : "AI enrichment will retry; seller metadata is preserved.",
           job.assetId, job.assetRevision,
@@ -1162,7 +1199,7 @@ export async function searchPhotoIndex(
     let rows: Record<string, unknown>[] = [];
     if (vectorIds.length) {
       const placeholders = vectorIds.map(() => "?").join(", ");
-      const result = await env.DB.prepare(`SELECT a.*, u.display_name AS contributor
+      const result = await env.DB.prepare(`SELECT ${assetWithContributorSelect}
         FROM assets a JOIN users u ON u.id = a.owner_id
         WHERE ${filter.clauses.join(" AND ")}
           AND a.vector_index_status = 'indexed'
@@ -1188,7 +1225,7 @@ export async function searchPhotoIndex(
   }
   const metadataStartedAt = performance.now();
   const exactResult = normalizedQuery
-    ? await env.DB.prepare(`SELECT a.*, u.display_name AS contributor
+    ? await env.DB.prepare(`SELECT ${assetWithContributorSelect}
         FROM assets a JOIN users u ON u.id = a.owner_id
         WHERE ${filter.clauses.join(" AND ")}
           AND (
@@ -1228,7 +1265,7 @@ export async function searchPhotoIndex(
     const match = ftsQuery(normalizedQuery);
     if (match) {
       try {
-        const fuzzyResult = await env.DB.prepare(`SELECT a.*, u.display_name AS contributor
+        const fuzzyResult = await env.DB.prepare(`SELECT ${assetWithContributorSelect}
             FROM asset_search_fts JOIN assets a ON a.id = asset_search_fts.asset_id AND a.approved_revision = CAST(asset_search_fts.revision AS INTEGER)
             JOIN users u ON u.id = a.owner_id
             WHERE asset_search_fts MATCH ? AND ${filter.clauses.join(" AND ")}
@@ -1242,7 +1279,7 @@ export async function searchPhotoIndex(
 
     // The bounded scan repairs old/stale FTS rows after metadata edits and also
     // makes a misspelling useful without ever widening the searchable fields.
-    const candidateResult = await env.DB.prepare(`SELECT a.*, u.display_name AS contributor
+    const candidateResult = await env.DB.prepare(`SELECT ${assetWithContributorSelect}
         FROM assets a JOIN users u ON u.id = a.owner_id
         WHERE ${filter.clauses.join(" AND ")}
         ORDER BY a.id ASC LIMIT ${FUZZY_CANDIDATE_LIMIT}`).bind(...filter.values).all<Record<string, unknown>>();

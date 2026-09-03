@@ -9,8 +9,7 @@
 	"secrets": {
 		"required": [
 			"R2_ACCESS_KEY_ID",
-			"R2_SECRET_ACCESS_KEY",
-			"REMOTE_VISION_TOKEN"
+			"R2_SECRET_ACCESS_KEY"
 		]
 	},
 	"observability": {
@@ -571,9 +570,7 @@
 				"OCR_ENABLED": "false",
 				"OCR_MODEL": "@cf/moondream/moondream3.1-9B-A2B",
 				"PHOTO_VISION_MODEL": "@cf/moondream/moondream3.1-9B-A2B",
-				"PHOTO_VISION_PROVIDER": "ollama-tunnel",
-				"REMOTE_VISION_URL": "https://veld-vision.mutatiostrategic.io/api/generate",
-				"LOCAL_VISION_MODEL": "qwen3-vl:8b",
+				"PHOTO_VISION_PROVIDER": "workers-ai",
 				"PHOTO_AI_SOURCE_ORIGIN": "https://veld-archive-api-production.blewisorlando.workers.dev",
 				"R2_ACCOUNT_ID": "37e92dc58245d6eab6517a916bd4d9d6",
 				"PHOTO_EMBEDDING_MODEL": "@cf/baai/bge-base-en-v1.5",

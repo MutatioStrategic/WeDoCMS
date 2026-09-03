@@ -33,6 +33,7 @@ import {
 } from "./audit-analytics";
 import { IntegrationContainer } from "../integrations";
 import { IntegrationError } from "../integrations/http";
+import { assetWithContributorSelect } from "./asset-select";
 import { calculateMarketplaceSplit } from "../integrations/paystack-splits";
 import { normalizePaystackPaymentEvent, verifyPaystackWebhook } from "../integrations/paystack-webhooks";
 import { normalizeDiditStatus, verifyDiditWebhook } from "../integrations/didit";
@@ -778,7 +779,7 @@ app.get("/api/integrations/wordpress/v1/assets", async (c) => {
     const pattern = `%${token}%`;
     values.push(pattern, pattern, pattern, pattern, pattern, pattern);
   }
-  const rows = await c.env.DB.prepare(`SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id WHERE ${clauses.join(" AND ")} ORDER BY a.human_verified DESC, a.updated_at DESC LIMIT 40`).bind(...values).all<Record<string, unknown>>();
+  const rows = await c.env.DB.prepare(`SELECT ${assetWithContributorSelect} FROM assets a JOIN users u ON u.id = a.owner_id WHERE ${clauses.join(" AND ")} ORDER BY a.human_verified DESC, a.updated_at DESC LIMIT 40`).bind(...values).all<Record<string, unknown>>();
   return c.json({ query, page: 1, limit: 40, total: rows.results.length, results: rows.results.map((row) => wordpressAssetResponse(c.req.raw, c.env, row)) });
 });
 
@@ -1207,7 +1208,7 @@ app.get("/api/governance/assets", async (c) => {
   const stage = governanceStageSchema.parse(c.req.query("stage") ?? "all");
   const where = stage === "all" ? "a.organization_id = ?" : "a.organization_id = ? AND a.workflow_stage = ?";
   const result = await c.env.DB.prepare(`
-    SELECT a.*, u.display_name AS contributor
+    SELECT ${assetWithContributorSelect}
     FROM assets a JOIN users u ON u.id = a.owner_id
     WHERE ${where}
     ORDER BY CASE a.workflow_stage WHEN 'curator_correction' THEN 1 WHEN 'ai_tagging' THEN 2 WHEN 'ingestion' THEN 3 ELSE 4 END, a.updated_at DESC
@@ -1699,7 +1700,7 @@ app.patch("/api/assets/:id", async (c) => {
 app.get("/api/my/assets", async (c) => {
   const user = await requestUser(c);
   if (!user) return c.json({ error: "Authentication required" }, 401);
-  const result = await c.env.DB.prepare("SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.organization_id = ? AND a.owner_id = ? ORDER BY a.updated_at DESC").bind(user.organizationId, user.id).all<Record<string, unknown>>();
+  const result = await c.env.DB.prepare(`SELECT ${assetWithContributorSelect} FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.organization_id = ? AND a.owner_id = ? ORDER BY a.updated_at DESC`).bind(user.organizationId, user.id).all<Record<string, unknown>>();
   return c.json({ results: (result.results as Record<string, unknown>[]).map((row) => assetRowToDomain(row, c.env)) });
 });
 
@@ -1728,7 +1729,7 @@ app.get("/api/assets/:id/versions", async (c) => {
 app.get("/api/admin/review", async (c) => {
   const user = await requestUser(c);
   if (!user || !allowedRole(user, ["editor", "admin"])) return c.json({ error: "Editor access required" }, 403);
-  const result = await c.env.DB.prepare("SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.organization_id = ? AND a.status IN ('needs_review', 'processing') ORDER BY a.authenticity_confidence DESC, a.created_at ASC LIMIT 100").bind(user.organizationId).all<Record<string, unknown>>();
+  const result = await c.env.DB.prepare(`SELECT ${assetWithContributorSelect} FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.organization_id = ? AND a.status IN ('needs_review', 'processing') ORDER BY a.authenticity_confidence DESC, a.created_at ASC LIMIT 100`).bind(user.organizationId).all<Record<string, unknown>>();
   return c.json({ results: (result.results as Record<string, unknown>[]).map((row) => assetRowToDomain(row, c.env)) });
 });
 
@@ -1811,8 +1812,8 @@ const checkoutRequestSchema = contractLicenceRequestSchema.extend({
 
 async function governanceAsset(c: { env: Bindings }, assetId: string, organizationId?: string): Promise<Asset | null> {
   const row = organizationId
-    ? await c.env.DB.prepare("SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.id = ? AND a.organization_id = ?").bind(assetId, organizationId).first<Record<string, unknown>>()
-    : await c.env.DB.prepare("SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.id = ?").bind(assetId).first<Record<string, unknown>>();
+    ? await c.env.DB.prepare(`SELECT ${assetWithContributorSelect} FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.id = ? AND a.organization_id = ?`).bind(assetId, organizationId).first<Record<string, unknown>>()
+    : await c.env.DB.prepare(`SELECT ${assetWithContributorSelect} FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.id = ?`).bind(assetId).first<Record<string, unknown>>();
   if (!row) return null;
   const releases = await c.env.DB.prepare("SELECT release_type, status, document_name FROM contributor_releases WHERE asset_id = ?").bind(assetId).all<Record<string, unknown>>();
   return addReleaseDocuments(assetRowToDomain(row), releases.results as Record<string, unknown>[]);
@@ -4471,7 +4472,7 @@ app.get("/api/creators/:slug", async (c) => {
   `).bind(slug).first<Record<string, unknown>>();
   if (!row) return c.json({ error: "Creator not found" }, 404);
   const [assets, collections] = await Promise.all([
-    c.env.DB.prepare(`SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id
+    c.env.DB.prepare(`SELECT ${assetWithContributorSelect} FROM assets a JOIN users u ON u.id = a.owner_id
       WHERE a.owner_id = ? AND a.status = 'published' ${productionAssetFilter}
       ORDER BY a.human_verified DESC, a.updated_at DESC LIMIT 24`).bind(row.user_id).all<Record<string, unknown>>(),
     c.env.DB.prepare(`SELECT pc.*, cp.slug AS creator_slug, u.display_name AS creator_name,
@@ -4570,7 +4571,7 @@ const searchAssetsHandler = async (c: Context<{ Bindings: Bindings; Variables: V
     if (params.orientation === "square") clauses.push("COALESCE(a.media_width, 0) = COALESCE(a.media_height, 0) AND COALESCE(a.media_width, 0) > 0");
     if (params.verified) clauses.push("a.human_verified = 1");
     const result = await c.env.DB.prepare(`
-      SELECT a.*, u.display_name AS contributor
+      SELECT ${assetWithContributorSelect}
       FROM assets a JOIN users u ON u.id = a.owner_id
       WHERE ${clauses.join(" AND ")}
        ORDER BY ${params.sort === "newest" ? "a.created_at DESC" : params.sort === "random" ? "RANDOM()" : "a.human_verified DESC, a.authenticity_confidence DESC, a.created_at DESC"}
@@ -4707,7 +4708,7 @@ app.get("/api/admin/launch-readiness", readinessResponse);
 app.get("/api/assets/facets", async (c) => {
   const params = searchSchema.parse({ q: c.req.query("q") ?? "", kind: c.req.query("kind") ?? "all", status: "published" });
   const query = `%${params.q}%`;
-  const rows = await c.env.DB.prepare(`SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id
+  const rows = await c.env.DB.prepare(`SELECT ${assetWithContributorSelect} FROM assets a JOIN users u ON u.id = a.owner_id
     WHERE a.status = 'published' AND a.id NOT LIKE 'asset-test-photo-%' AND (? = '' OR a.title LIKE ? OR a.description LIKE ? OR a.subject_tags LIKE ?)
     ORDER BY a.human_verified DESC, a.created_at DESC LIMIT 500`).bind(params.q, query, query, query).all<Record<string, unknown>>();
   const assets = rows.results.map((row) => assetRowToDomain(row, c.env));
@@ -4717,7 +4718,7 @@ app.get("/api/assets/facets", async (c) => {
 
 app.get("/api/assets/:id", async (c) => {
   const user = await requestUser(c);
-  const row = await c.env.DB.prepare("SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.id = ?")
+  const row = await c.env.DB.prepare(`SELECT ${assetWithContributorSelect} FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.id = ?`)
     .bind(c.req.param("id")).first<Record<string, unknown>>();
   if (!row) return c.json({ error: "Asset not found" }, 404);
   const mayInspectPrivate = Boolean(user && String(row.organization_id) === user.organizationId && (String(row.owner_id) === user.id || allowedRole(user, ["editor", "admin"])));
@@ -5297,10 +5298,10 @@ app.delete("/api/buyer-api-keys/:id", async (c) => { const user = await requestU
 app.get("/api/public/v1/assets", async (c) => {
   const organizationId = await publicBuyerOrganization(c.env, c.req.raw); if (!organizationId) return c.json({ error: "Valid buyer API token required" }, 401);
   const q = z.string().trim().max(240).parse(c.req.query("q") ?? ""); const limit = Math.min(100, Math.max(1, Number(c.req.query("limit") ?? 25) || 25)); const match = `%${q}%`;
-  const rows = await c.env.DB.prepare("SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.organization_id = ? AND a.status = 'published' AND (? = '' OR a.title LIKE ? OR a.description LIKE ? OR a.subject_tags LIKE ?) ORDER BY a.human_verified DESC, a.created_at DESC LIMIT ?").bind(organizationId, q, match, match, match, limit).all<Record<string, unknown>>();
+  const rows = await c.env.DB.prepare(`SELECT ${assetWithContributorSelect} FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.organization_id = ? AND a.status = 'published' AND (? = '' OR a.title LIKE ? OR a.description LIKE ? OR a.subject_tags LIKE ?) ORDER BY a.human_verified DESC, a.created_at DESC LIMIT ?`).bind(organizationId, q, match, match, match, limit).all<Record<string, unknown>>();
   return c.json({ results: rows.results.map((row) => assetRowToDomain(row, c.env)), limit });
 });
-app.get("/api/public/v1/assets/:id", async (c) => { const organizationId = await publicBuyerOrganization(c.env, c.req.raw); if (!organizationId) return c.json({ error: "Valid buyer API token required" }, 401); const row = await c.env.DB.prepare("SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.id = ? AND a.organization_id = ? AND a.status = 'published'").bind(c.req.param("id"), organizationId).first<Record<string, unknown>>(); return row ? c.json(assetRowToDomain(row, c.env)) : c.json({ error: "Asset not found" }, 404); });
+app.get("/api/public/v1/assets/:id", async (c) => { const organizationId = await publicBuyerOrganization(c.env, c.req.raw); if (!organizationId) return c.json({ error: "Valid buyer API token required" }, 401); const row = await c.env.DB.prepare(`SELECT ${assetWithContributorSelect} FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.id = ? AND a.organization_id = ? AND a.status = 'published'`).bind(c.req.param("id"), organizationId).first<Record<string, unknown>>(); return row ? c.json(assetRowToDomain(row, c.env)) : c.json({ error: "Asset not found" }, 404); });
 
 app.get("/api/community/overview", async (c) => {
   const organizationId = c.env.DEFAULT_ORGANIZATION_ID ?? "org-demo";
@@ -5757,7 +5758,7 @@ app.get("/api/campaigns/:id", async (c) => {
     FROM campaign_bundles b LEFT JOIN campaign_bundle_builds bb ON bb.bundle_id = b.id
     WHERE b.organization_id = ? AND b.campaign_id = ? ORDER BY b.created_at DESC`).bind(user.organizationId, campaignId).all<Record<string, unknown>>()).results;
   const bundles = bundleRows.map(bundlePayload);
-  const candidateRows = await c.env.DB.prepare("SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.organization_id = ? AND a.status = 'published' ORDER BY a.human_verified DESC, a.created_at DESC LIMIT 200").bind(user.organizationId).all<Record<string, unknown>>();
+  const candidateRows = await c.env.DB.prepare(`SELECT ${assetWithContributorSelect} FROM assets a JOIN users u ON u.id = a.owner_id WHERE a.organization_id = ? AND a.status = 'published' ORDER BY a.human_verified DESC, a.created_at DESC LIMIT 200`).bind(user.organizationId).all<Record<string, unknown>>();
   const rankedCandidates = rankCampaignAssets(candidateRows.results.map((row) => assetRowToDomain(row, c.env)), summary.briefFields, summary.brandKit);
   const recommendations = [...rankedCandidates.slice(0, 12), ...rankedCandidates.slice(12).filter((item) => stagedByAsset.has(item.asset.id))].map((item) => {
     const staged = stagedByAsset.get(item.asset.id);
@@ -6414,7 +6415,7 @@ app.post("/api/campaigns/:id/integrations/zoho/social", async (c) => {
   const socialChannels = ["instagram", "facebook", "tiktok", "linkedin"];
   const channels = [...new Set(requestedChannels.filter((channel) => socialChannels.includes(channel)))];
   if (!channels.length) return c.json({ error: "Select at least one Zoho Social channel: Instagram, Facebook, TikTok, or LinkedIn" }, 422);
-  const approvedRows = await c.env.DB.prepare(`SELECT a.*, u.display_name AS contributor
+  const approvedRows = await c.env.DB.prepare(`SELECT ${assetWithContributorSelect}
     FROM campaign_assets ca JOIN assets a ON a.id = ca.asset_id JOIN users u ON u.id = a.owner_id
     WHERE ca.campaign_id = ? AND a.organization_id = ? AND ca.stage = 'approved' ORDER BY ca.updated_at DESC`).bind(campaign.id, user.organizationId).all<Record<string, unknown>>();
   const approvedAssets = approvedRows.results.map((row) => assetRowToDomain(row, c.env));
@@ -6514,7 +6515,7 @@ app.get("/api/discovery", async (c) => {
     lightboxes = await listUserLightboxes(c, user);
   }
   const interestTokens = discoveryTokens([...savedSearches.map((search) => search.query || search.name), ...lightboxes.flatMap((box) => [box.name, box.description])]);
-  const assetRows = await c.env.DB.prepare(`SELECT a.*, u.display_name AS contributor FROM assets a JOIN users u ON u.id = a.owner_id
+  const assetRows = await c.env.DB.prepare(`SELECT ${assetWithContributorSelect} FROM assets a JOIN users u ON u.id = a.owner_id
     WHERE a.organization_id = ? AND a.status = 'published'
     ORDER BY a.human_verified DESC, a.created_at DESC LIMIT 24`).bind(organizationId).all<Record<string, unknown>>();
   const recommendations = assetRows.results.map((row) => {
@@ -6575,7 +6576,7 @@ app.get("/api/lightboxes/shared/:token", async (c) => {
   const tokenHash = await sha256Hex(c.req.param("token"));
   const lightbox = await c.env.DB.prepare("SELECT * FROM user_lightboxes WHERE share_token_hash = ? AND visibility = 'shared'").bind(tokenHash).first<Record<string, unknown>>();
   if (!lightbox) return c.json({ error: "Shared lightbox not found" }, 404);
-  const assets = await c.env.DB.prepare(`SELECT a.*, u.display_name AS contributor FROM user_lightbox_assets la
+  const assets = await c.env.DB.prepare(`SELECT ${assetWithContributorSelect} FROM user_lightbox_assets la
     JOIN assets a ON a.id = la.asset_id JOIN users u ON u.id = a.owner_id
     WHERE la.lightbox_id = ? AND a.status = 'published' ORDER BY la.added_at ASC`).bind(lightbox.id).all<Record<string, unknown>>();
   return c.json({ id: String(lightbox.id), name: String(lightbox.name), visibility: "shared", results: assets.results.map((row) => assetRowToDomain(row, c.env)) });
@@ -6586,7 +6587,7 @@ app.get("/api/lightboxes/:id", async (c) => {
   if (!user) return c.json({ error: "Authentication required" }, 401);
   const lightbox = await c.env.DB.prepare("SELECT * FROM user_lightboxes WHERE id = ? AND organization_id = ? AND owner_id = ?").bind(c.req.param("id"), user.organizationId, user.id).first<Record<string, unknown>>();
   if (!lightbox) return c.json({ error: "Lightbox not found" }, 404);
-  const assets = await c.env.DB.prepare(`SELECT a.*, u.display_name AS contributor FROM user_lightbox_assets la
+  const assets = await c.env.DB.prepare(`SELECT ${assetWithContributorSelect} FROM user_lightbox_assets la
     JOIN assets a ON a.id = la.asset_id JOIN users u ON u.id = a.owner_id WHERE la.lightbox_id = ? ORDER BY la.added_at ASC`).bind(c.req.param("id")).all<Record<string, unknown>>();
   return c.json({ ...lightboxFromRow({ ...lightbox, asset_count: assets.results.length, asset_ids: assets.results.map((row) => row.id).join(",") }), assets: assets.results.map((row) => assetRowToDomain(row, c.env)) });
 });

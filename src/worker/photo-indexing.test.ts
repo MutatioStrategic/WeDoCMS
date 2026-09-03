@@ -10,6 +10,7 @@ import {
   preparePhotoForVision,
   runPhotoVision,
   photoJobMatchesAsset,
+  photoEnrichmentWorkflowState,
   enqueuePhotoJob,
   replayPhotoJob,
   requeuePhotoEnrichment,
@@ -49,6 +50,25 @@ describe("photo AI indexing", () => {
     }) } };
     expect(normalizeVisionResult(wrapped)).toEqual(expect.any(String));
     expect(classifyVisionResult(wrapped).metadata.description).toContain("dog standing outdoors");
+  });
+
+  it("maps legacy visual location aliases into the canonical form field", () => {
+    const result = classifyVisionResult({
+      response: JSON.stringify({
+        description: "A close-up flower photographed outdoors in daylight",
+        visualLocationType: "nature",
+        sceneContext: "plant_close_up",
+        primaryCategory: "nature",
+        sceneAttributes: ["outdoor", "close_up"],
+        confidence: 0.8,
+        fieldConfidences: { visualLocationType: 0.8, sceneContext: 0.8, primaryCategory: 0.8, description: 0.8 },
+        imageQuality: "readable",
+        textReadability: "no_text",
+        detectedLanguage: "none",
+      }),
+    });
+    expect(result.metadata.locationType).toBe("nature");
+    expect(result.metadata.fieldConfidences.locationType).toBe(0.8);
   });
 
   it("refines broad landscape labels into a specific visual scene context", () => {
@@ -121,6 +141,11 @@ describe("photo AI indexing", () => {
     expect(photoJobMatchesAsset({ assetRevision: 8, sourceEtag: "etag-new" }, asset)).toBe(true);
     expect(photoJobMatchesAsset({ assetRevision: 7, sourceEtag: "etag-new" }, asset)).toBe(false);
     expect(photoJobMatchesAsset({ assetRevision: 8, sourceEtag: "etag-old" }, asset)).toBe(false);
+  });
+
+  it("keeps Dynamic seller drafts private while enrichment prepares metadata", () => {
+    expect(photoEnrichmentWorkflowState({ status: "draft", workflow_stage: "ingestion" })).toEqual({ status: "draft", workflowStage: "ingestion" });
+    expect(photoEnrichmentWorkflowState({ status: "needs_review", workflow_stage: "ai_tagging" })).toEqual({ status: "needs_review", workflowStage: "curator_correction" });
   });
 
   it("does not create a second enrichment job for the same upload revision", async () => {
@@ -257,6 +282,27 @@ describe("photo AI indexing", () => {
     }
   });
 
+  it("uses the Workers AI binding when production selects workers-ai", async () => {
+    const aiRun = vi.fn(async () => ({ description: "A forest path in warm light" }));
+    await expect(runPhotoVision({
+      PHOTO_VISION_PROVIDER: "workers-ai",
+      AI: { run: aiRun },
+    } as unknown as PhotoPipelineBindings, "@cf/moondream/moondream3.1-9B-A2B", new Uint8Array([1, 2, 3]), "data:image/jpeg;base64,AQID"))
+      .resolves.toMatchObject({ description: "A forest path in warm light" });
+    expect(aiRun).toHaveBeenCalledWith("@cf/moondream/moondream3.1-9B-A2B", expect.objectContaining({
+      task: "query",
+      image: "data:image/jpeg;base64,AQID",
+    }));
+  });
+
+  it("fails closed for an unrecognised vision provider", async () => {
+    await expect(runPhotoVision({
+      PHOTO_VISION_PROVIDER: "unrecognised-provider",
+      AI: { run: vi.fn() },
+    } as unknown as PhotoPipelineBindings, "@cf/moondream/moondream3.1-9B-A2B", new Uint8Array(), "data:image/jpeg;base64,"))
+      .rejects.toThrow("Vision provider 'unrecognised-provider' is not supported");
+  });
+
   it("reports missing private R2 signing instead of silently dropping an oversized image", async () => {
     await expect(preparePhotoForVision({} as PhotoPipelineBindings, "originals/mountain.jpg", "job-1", imageObject(22_500_000), "image/jpeg"))
       .rejects.toThrow("private R2 GET signing and the AI source origin are not configured");
@@ -337,10 +383,11 @@ describe("photo AI indexing", () => {
     await searchPhotoIndex({ DB: { prepare } } as unknown as PhotoPipelineBindings, "forest path", { kind: "image", status: "published" });
 
     const sql = (prepare.mock.calls as unknown as unknown[][]).map(([statement]) => String(statement ?? ""));
-    expect(sql[0]).toContain("a.title");
-    expect(sql[0]).toContain("a.description");
-    expect(sql[0]).not.toContain("a.caption");
-    expect(sql[0]).not.toContain("a.ocr_text");
+    const exactWhere = sql[0].slice(sql[0].indexOf("WHERE"));
+    expect(exactWhere).toContain("a.title");
+    expect(exactWhere).toContain("a.description");
+    expect(exactWhere).not.toContain("a.caption");
+    expect(exactWhere).not.toContain("a.ocr_text");
     expect(sql.find((statement) => statement.includes("asset_search_fts MATCH"))).toContain("bm25(asset_search_fts, 0, 0, 0, 3.2, 1.6, 0, 0, 0, 0, 0, 0, 0, 0)");
     expect(String(binds.find((values) => String(values[0] ?? "").includes("{title description}"))?.[0] ?? "")).toContain("{title description}");
   });
